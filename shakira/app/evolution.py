@@ -15,6 +15,66 @@ class EvolutionClient:
     def __init__(self, client: httpx.AsyncClient) -> None:
         self._client = client
 
+    def _auth_headers(self, api_key: str) -> dict[str, str]:
+        return {
+            "Content-Type": "application/json",
+            "apikey": api_key,
+        }
+
+    async def send_presence(
+        self,
+        *,
+        base_url: str,
+        api_key: str,
+        instance: str,
+        number: str,
+        presence: str = "composing",
+        delay_ms: int = 120_000,
+    ) -> dict[str, Any] | None:
+        """Indicador de digitando/gravando (presence composing) no WhatsApp."""
+        base = base_url.rstrip("/")
+        url = f"{base}/chat/sendPresence/{instance}"
+        body = {
+            "number": number,
+            "presence": presence,
+            "delay": max(1000, min(int(delay_ms), 300_000)),
+        }
+        try:
+            r = await self._client.post(
+                url,
+                headers=self._auth_headers(api_key),
+                json=body,
+                timeout=15.0,
+            )
+        except httpx.RequestError as e:
+            log.debug("Evolution sendPresence failed: %s", e)
+            return None
+        if r.status_code not in (200, 201):
+            log.debug("Evolution sendPresence %s: %s", r.status_code, r.text[:300])
+            return None
+        try:
+            return r.json()
+        except Exception:
+            return {"raw": r.text}
+
+    async def send_typing(
+        self,
+        *,
+        base_url: str,
+        api_key: str,
+        instance: str,
+        number: str,
+        delay_ms: int = 120_000,
+    ) -> dict[str, Any] | None:
+        return await self.send_presence(
+            base_url=base_url,
+            api_key=api_key,
+            instance=instance,
+            number=number,
+            presence="composing",
+            delay_ms=delay_ms,
+        )
+
     async def send_text(
         self,
         *,
@@ -26,13 +86,9 @@ class EvolutionClient:
     ) -> dict[str, Any] | None:
         base = base_url.rstrip("/")
         url = f"{base}/message/sendText/{instance}"
-        headers = {
-            "Content-Type": "application/json",
-            "apikey": api_key,
-        }
         body = {"number": number, "text": text}
         try:
-            r = await self._client.post(url, headers=headers, json=body, timeout=60.0)
+            r = await self._client.post(url, headers=self._auth_headers(api_key), json=body, timeout=60.0)
         except httpx.RequestError as e:
             log.exception("Evolution send failed: %s", e)
             return None
@@ -60,10 +116,6 @@ class EvolutionClient:
         """Envia imagem/video. media pode ser URL ou base64."""
         base = base_url.rstrip("/")
         url = f"{base}/message/sendMedia/{instance}"
-        headers = {
-            "Content-Type": "application/json",
-            "apikey": api_key,
-        }
         body: dict[str, Any] = {
             "number": number,
             "mediatype": mediatype,
@@ -73,7 +125,7 @@ class EvolutionClient:
             "caption": caption or "",
         }
         try:
-            r = await self._client.post(url, headers=headers, json=body, timeout=120.0)
+            r = await self._client.post(url, headers=self._auth_headers(api_key), json=body, timeout=120.0)
         except httpx.RequestError as e:
             log.exception("Evolution sendMedia failed: %s", e)
             return None

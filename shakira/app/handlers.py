@@ -154,6 +154,37 @@ def _truncate_whatsapp(text: str, limit: int = 3800) -> str:
     return text[: limit - 3] + "..."
 
 
+def _resolve_evolution_instance(
+    inst_hint: str | None,
+    webhook_instance: Any,
+    default_inst: str,
+    settings: AppSettings,
+) -> str:
+    hint = inst_hint if isinstance(inst_hint, str) and inst_hint.strip() else ""
+    return (hint or str(webhook_instance) or default_inst or settings.evolution_instance).strip()
+
+
+async def _notify_typing(
+    evo: EvolutionClient,
+    *,
+    evo_base: str,
+    evo_key: str,
+    instance: str,
+    phone: str,
+) -> None:
+    """Envia 'digitando...' no WhatsApp enquanto o agente processa."""
+    if not evo_base or not evo_key or not instance or not phone:
+        return
+    delay_ms = int(os.environ.get("EVOLUTION_TYPING_DELAY_MS", "120000"))
+    await evo.send_typing(
+        base_url=evo_base,
+        api_key=evo_key,
+        instance=instance,
+        number=phone,
+        delay_ms=delay_ms,
+    )
+
+
 def extract_target_entity_id(
     domain: str,
     service: str,
@@ -205,6 +236,10 @@ def build_ha_service_data(
         code = raw.get("code")
         if isinstance(code, str) and code.strip():
             data["code"] = code.strip()
+    if domain == "input_select" and service == "select_option":
+        option = raw.get("option")
+        if isinstance(option, str) and option.strip():
+            data["option"] = option.strip()
     return data
 
 
@@ -542,7 +577,11 @@ async def handle_search_photos(
     )
 
     try:
-        photos, preview_token = await pp.search_photos(filters=filters, count=count)
+        photos, preview_token = await pp.search_photos(
+            filters=filters,
+            count=count,
+            supervisor_token=settings.supervisor_token,
+        )
     except PhotoprismAuthError:
         msg = (intro + "\n\nErro de autenticacao no PhotoPrism. Verifique o token.").strip()
         await evo.send_text(
@@ -554,7 +593,7 @@ async def handle_search_photos(
         extra = ""
         diag = getattr(e, "diagnostic", None) or {}
         if isinstance(diag, dict) and diag.get("hints"):
-            extra = f"\n\nDica: {diag['hints'][0]}"
+            extra = f"\n\n{diag['hints'][0]}"
         msg = (intro + f"\n\nNao consegui buscar fotos: {e}{extra}").strip()
         await evo.send_text(
             base_url=evo_base, api_key=evo_key, instance=instance, number=phone, text=_truncate_whatsapp(msg)
@@ -689,6 +728,17 @@ async def handle_evolution_payload(
                 )
                 record_exchange(phone_norm, user_text or "", reply_text)
             continue
+
+        send_instance_early = _resolve_evolution_instance(
+            _inst_hint, webhook_instance, default_inst, settings
+        )
+        await _notify_typing(
+            evo,
+            evo_base=evo_base,
+            evo_key=evo_key,
+            instance=send_instance_early,
+            phone=phone_norm,
+        )
 
         states = await ha.get_states()
         ctx, total = build_entities_context(states)

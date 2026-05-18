@@ -1,24 +1,23 @@
-"""Cliente da API REST do PhotoPrism (busca e thumbnails)."""
+"""Cliente da API REST do PhotoPrism (busca, thumbnails, auto-discovery Ingress HA)."""
 
 from __future__ import annotations
 
 import json
 import logging
+import os
+import re
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
-from urllib.parse import urlencode, urlparse
+from urllib.parse import urlencode, urljoin, urlparse
 
 import httpx
 
 log = logging.getLogger(__name__)
 
 DEFAULT_THUMB_SIZE = "fit_720"
-PROBE_PATHS = (
-    "/api/v1/config",
-    "/api/v1/photos?count=1&primary=true",
-    "/api/v1/index",
-    "/",
-)
+INGRESS_PREFIX_RE = re.compile(r"(/api/hassio_ingress/[^/]+)")
+PREFIX_CACHE_PATH = Path(os.environ.get("PHOTOPRISM_PREFIX_CACHE", "/data/photoprism_api_prefix.json"))
 
 
 @dataclass(frozen=True)
@@ -29,30 +28,6 @@ class PhotoResult:
     taken_at: str
     place_label: str
     preview_token: str
-
-
-@dataclass
-class ProbeResult:
-    url: str
-    status: int | None
-    content_type: str
-    server: str
-    body_preview: str
-    looks_like_photoprism: bool
-    looks_like_nginx_404: bool
-    error: str = ""
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "url": self.url,
-            "status": self.status,
-            "content_type": self.content_type,
-            "server": self.server,
-            "looks_like_photoprism": self.looks_like_photoprism,
-            "looks_like_nginx_404": self.looks_like_nginx_404,
-            "body_preview": self.body_preview[:200],
-            "error": self.error,
-        }
 
 
 def build_search_query(filters: dict[str, Any]) -> str:
@@ -133,6 +108,131 @@ def _analyze_response(status: int | None, headers: httpx.Headers, body: str) -> 
     return is_pp, nginx_404
 
 
+def _normalize_prefix(prefix: str) -> str:
+    p = prefix.strip().rstrip("/")
+    if not p:
+        return ""
+    return p if p.startswith("/") else f"/{p}"
+
+
+def _load_prefix_cache(base_url: str) -> str | None:
+    if not PREFIX_CACHE_PATH.is_file():
+        return None
+    try:
+        data = json.loads(PREFIX_CACHE_PATH.read_text(encoding="utf-8"))
+        if isinstance(data, dict) and data.get("base_url") == base_url.rstrip("/"):
+            p = data.get("prefix")
+            if isinstance(p, str) and p.strip():
+                return _normalize_prefix(p)
+    except (json.JSONDecodeError, OSError):
+        pass
+    return None
+
+
+def _save_prefix_cache(base_url: str, prefix: str) -> None:
+    try:
+        PREFIX_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        PREFIX_CACHE_PATH.write_text(
+            json.dumps({"base_url": base_url.rstrip("/"), "prefix": prefix}, indent=2),
+            encoding="utf-8",
+        )
+    except OSError as e:
+        log.warning("Nao foi possivel gravar cache de prefixo PhotoPrism: %s", e)
+
+
+def _slug_candidates_from_host(hostname: str) -> list[str]:
+    if not hostname:
+        return []
+    out: list[str] = [hostname]
+    underscored = hostname.replace("-", "_")
+    if underscored not in out:
+        out.append(underscored)
+    if hostname.endswith("-photoprism"):
+        alt = hostname.replace("-photoprism", "_photoprism")
+        if alt not in out:
+            out.append(alt)
+    return out
+
+
+async def discover_ingress_prefix_redirect(
+    client: httpx.AsyncClient,
+    base_url: str,
+    headers: dict[str, str],
+) -> str | None:
+    """Segue redirects do Ingress HA ate achar /api/hassio_ingress/TOKEN."""
+    base = base_url.rstrip("/")
+    url = f"{base}/"
+    seen: set[str] = set()
+
+    for _ in range(15):
+        if url in seen:
+            break
+        seen.add(url)
+
+        match = INGRESS_PREFIX_RE.search(url)
+        if match:
+            prefix = _normalize_prefix(match.group(1))
+            log.info("PhotoPrism prefix via redirect: %s", prefix)
+            return prefix
+
+        try:
+            r = await client.get(url, headers=headers, follow_redirects=False, timeout=15.0)
+        except httpx.RequestError as e:
+            log.warning("PhotoPrism discovery redirect falhou em %s: %s", url, e)
+            break
+
+        for candidate in (str(r.url), r.headers.get("location") or ""):
+            m = INGRESS_PREFIX_RE.search(candidate)
+            if m:
+                prefix = _normalize_prefix(m.group(1))
+                log.info("PhotoPrism prefix via Location/url: %s", prefix)
+                return prefix
+
+        if r.status_code not in (301, 302, 303, 307, 308):
+            break
+
+        loc = r.headers.get("location")
+        if not loc:
+            break
+        url = urljoin(url, loc)
+
+    return None
+
+
+async def discover_ingress_prefix_supervisor(
+    client: httpx.AsyncClient,
+    supervisor_token: str,
+    hostname: str,
+) -> str | None:
+    if not supervisor_token.strip():
+        return None
+
+    headers = {"Authorization": f"Bearer {supervisor_token.strip()}"}
+    for slug in _slug_candidates_from_host(hostname):
+        url = f"http://supervisor/addons/{slug}/info"
+        try:
+            r = await client.get(url, headers=headers, timeout=12.0)
+        except httpx.RequestError:
+            continue
+        if r.status_code != 200:
+            log.debug("Supervisor addons/%s/info -> %s", slug, r.status_code)
+            continue
+        try:
+            payload = r.json()
+        except Exception:
+            continue
+        data = payload.get("data") if isinstance(payload, dict) else None
+        if not isinstance(data, dict):
+            continue
+        for key in ("ingress_entry", "ingress_path"):
+            entry = data.get(key)
+            if isinstance(entry, str) and "hassio_ingress" in entry:
+                prefix = _normalize_prefix(entry.split("/library")[0].split("/login")[0])
+                log.info("PhotoPrism prefix via Supervisor (%s): %s", slug, prefix)
+                return prefix
+    return None
+
+
 class PhotoprismClient:
     def __init__(
         self,
@@ -144,14 +244,17 @@ class PhotoprismClient:
     ) -> None:
         self._client = client
         self._base = base_url.rstrip("/")
-        self._prefix = (api_prefix or "").strip().rstrip("/")
-        if self._prefix and not self._prefix.startswith("/"):
-            self._prefix = "/" + self._prefix
+        self._prefix = _normalize_prefix(api_prefix)
         self._token = token.strip()
+        self._prefix_source = "config" if self._prefix else ""
 
     @property
     def api_base(self) -> str:
         return f"{self._base}{self._prefix}"
+
+    @property
+    def prefix_source(self) -> str:
+        return self._prefix_source
 
     def _headers(self, *, json_accept: bool = True) -> dict[str, str]:
         h: dict[str, str] = {
@@ -167,6 +270,61 @@ class PhotoprismClient:
             path = "/" + path
         return f"{self.api_base}{path}"
 
+    async def _api_reachable(self) -> bool:
+        url = self._url("/api/v1/config")
+        try:
+            r = await self._client.get(url, headers=self._headers(), timeout=12.0)
+        except httpx.RequestError:
+            return False
+        ct = (r.headers.get("content-type") or "").lower()
+        if r.status_code in (200, 401) and "application/json" in ct:
+            return True
+        body = (r.text or "")[:200].lower()
+        return r.status_code == 200 and not ("nginx" in body and "<html" in body)
+
+    async def ensure_api_prefix(self, *, supervisor_token: str = "") -> bool:
+        """Resolve prefixo Ingress HA se a API nao estiver na raiz."""
+        if self._prefix and await self._api_reachable():
+            return True
+
+        if self._prefix and not await self._api_reachable():
+            log.warning("PhotoPrism prefix configurado invalido: %s", self._prefix)
+            self._prefix = ""
+
+        cached = _load_prefix_cache(self._base)
+        if cached:
+            self._prefix = cached
+            self._prefix_source = "cache"
+            if await self._api_reachable():
+                log.info("PhotoPrism API OK com prefixo em cache: %s", self._prefix)
+                return True
+            self._prefix = ""
+
+        host = urlparse(self._base).hostname or ""
+        via_sup = await discover_ingress_prefix_supervisor(
+            self._client, supervisor_token, host
+        )
+        if via_sup:
+            self._prefix = via_sup
+            self._prefix_source = "supervisor"
+            if await self._api_reachable():
+                _save_prefix_cache(self._base, self._prefix)
+                return True
+            self._prefix = ""
+
+        via_redir = await discover_ingress_prefix_redirect(
+            self._client, self._base, self._headers()
+        )
+        if via_redir:
+            self._prefix = via_redir
+            self._prefix_source = "redirect"
+            if await self._api_reachable():
+                _save_prefix_cache(self._base, self._prefix)
+                log.info("PhotoPrism API base: %s", self.api_base)
+                return True
+
+        return False
+
     def _log_request(self, method: str, url: str, params: dict[str, Any] | None = None) -> None:
         full = url
         if params:
@@ -179,7 +337,7 @@ class PhotoprismClient:
         log.info(
             "PhotoPrism << %s %s status=%s ct=%s server=%s photoprism=%s nginx404=%s",
             context,
-            str(r.request.url)[:200],
+            str(r.request.url)[:220],
             r.status_code,
             r.headers.get("content-type", "-"),
             r.headers.get("server", "-"),
@@ -187,78 +345,66 @@ class PhotoprismClient:
             nginx_404,
         )
         if r.status_code >= 400 or not is_pp:
-            log.warning(
-                "PhotoPrism corpo (%s): %s",
-                context,
-                _body_preview(body),
-            )
+            log.warning("PhotoPrism corpo (%s): %s", context, _body_preview(body))
 
-    async def probe(self) -> dict[str, Any]:
-        """Testa caminhos comuns e devolve diagnostico para /status ou logs."""
-        parsed = urlparse(self._base)
-        probes: list[ProbeResult] = []
-        for path in PROBE_PATHS:
-            url = f"{self._base}{path}"
+    async def probe(self, *, supervisor_token: str = "") -> dict[str, Any]:
+        """Testa API (com auto-discovery de prefixo Ingress)."""
+        await self.ensure_api_prefix(supervisor_token=supervisor_token)
+
+        test_urls = [
+            self._url("/api/v1/config"),
+            self._url("/api/v1/photos?count=1&primary=true"),
+        ]
+        probes: list[dict[str, Any]] = []
+        any_pp = False
+        any_nginx = False
+
+        for url in test_urls:
             try:
-                r = await self._client.get(
-                    url,
-                    headers=self._headers(),
-                    timeout=15.0,
-                    follow_redirects=True,
-                )
+                r = await self._client.get(url, headers=self._headers(), timeout=15.0)
                 body = r.text[:400] if r.text else ""
                 is_pp, nginx_404 = _analyze_response(r.status_code, r.headers, body)
+                any_pp = any_pp or is_pp
+                any_nginx = any_nginx or nginx_404
                 probes.append(
-                    ProbeResult(
-                        url=url,
-                        status=r.status_code,
-                        content_type=r.headers.get("content-type", ""),
-                        server=r.headers.get("server", ""),
-                        body_preview=_body_preview(body),
-                        looks_like_photoprism=is_pp,
-                        looks_like_nginx_404=nginx_404,
-                    )
+                    {
+                        "url": url,
+                        "status": r.status_code,
+                        "content_type": r.headers.get("content-type", ""),
+                        "server": r.headers.get("server", ""),
+                        "looks_like_photoprism": is_pp,
+                        "looks_like_nginx_404": nginx_404,
+                        "body_preview": _body_preview(body),
+                    }
                 )
             except httpx.RequestError as e:
-                probes.append(
-                    ProbeResult(
-                        url=url,
-                        status=None,
-                        content_type="",
-                        server="",
-                        body_preview="",
-                        looks_like_photoprism=False,
-                        looks_like_nginx_404=False,
-                        error=str(e),
-                    )
-                )
+                probes.append({"url": url, "error": str(e)})
 
-        any_pp = any(p.looks_like_photoprism for p in probes)
-        any_nginx = any(p.looks_like_nginx_404 for p in probes)
         hints: list[str] = []
-        if any_nginx and not any_pp:
+        if any_pp:
+            summary = "ok"
+        elif any_nginx:
+            summary = "ingress_sem_api"
             hints.append(
-                "A porta responde com nginx 404, nao com a API PhotoPrism. "
-                "Use o hostname interno do add-on (ex: http://SLUG-photoprism:2342), "
-                "nao o IP:porta do host, a menos que a API esteja exposta."
+                "O add-on PhotoPrism usa Ingress do HA. O Shakira tenta detectar o prefixo "
+                "/api/hassio_ingress/... automaticamente. Verifique o token (app password)."
             )
-        if parsed.hostname and not parsed.hostname.endswith("-photoprism"):
-            hints.append(
-                "No HA, tente photoprism_url=http://<slug>-photoprism:2342 "
-                "(slug visivel na pagina do add-on PhotoPrism)."
-            )
-        if self._prefix:
-            hints.append(f"Prefixo API configurado: {self._prefix}")
+        else:
+            summary = "unreachable_or_wrong_url"
+            hints.append("Confirme photoprism_url=http://<slug>-photoprism:2342 e o app password.")
 
-        summary = "ok" if any_pp else ("nginx_proxy?" if any_nginx else "unreachable_or_wrong_url")
+        if self._prefix:
+            hints.insert(0, f"Prefixo API: {self._prefix} (fonte: {self._prefix_source or 'config'})")
+
         return {
             "base_url": self._base,
             "api_prefix": self._prefix or None,
             "api_base": self.api_base,
+            "prefix_source": self._prefix_source or None,
             "token_set": bool(self._token),
             "summary": summary,
             "hints": hints,
-            "probes": [p.to_dict() for p in probes],
+            "probes": probes,
         }
 
     async def search_photos(
@@ -266,8 +412,15 @@ class PhotoprismClient:
         *,
         filters: dict[str, Any] | None = None,
         count: int = 5,
+        supervisor_token: str = "",
     ) -> tuple[list[PhotoResult], str | None]:
-        """Busca fotos. Retorna (resultados, preview_token dos headers)."""
+        if not await self.ensure_api_prefix(supervisor_token=supervisor_token):
+            diag = await self.probe(supervisor_token=supervisor_token)
+            raise PhotoprismError(
+                "API PhotoPrism nao encontrada (Ingress HA?). Veja photoprism_probe no painel /status.",
+                diagnostic=diag,
+            )
+
         filters = filters or {}
         count = max(1, min(int(count), 10))
         q = build_search_query(filters)
@@ -284,7 +437,13 @@ class PhotoprismClient:
 
         url = self._url("/api/v1/photos")
         self._log_request("GET", url, params)
-        log.info("PhotoPrism filtros=%s q=%r", filters, q or "(vazio)")
+        log.info(
+            "PhotoPrism filtros=%s q=%r prefix=%s (%s)",
+            filters,
+            q or "(vazio)",
+            self._prefix or "(raiz)",
+            self._prefix_source,
+        )
 
         try:
             r = await self._client.get(
@@ -302,24 +461,18 @@ class PhotoprismClient:
         if r.status_code == 401:
             raise PhotoprismAuthError("Token PhotoPrism invalido ou expirado")
         if r.status_code >= 400:
-            diag = await self.probe()
-            log.error("PhotoPrism diagnostico apos erro %s:\n%s", r.status_code, json.dumps(diag, indent=2))
-            hint = ""
-            if diag.get("hints"):
-                hint = " " + diag["hints"][0]
-            raise PhotoprismError(
-                f"Busca falhou: HTTP {r.status_code}.{hint}",
-                diagnostic=diag,
-            )
+            diag = await self.probe(supervisor_token=supervisor_token)
+            log.error("PhotoPrism diagnostico:\n%s", json.dumps(diag, indent=2))
+            hint = diag["hints"][0] if diag.get("hints") else ""
+            raise PhotoprismError(f"Busca falhou: HTTP {r.status_code}. {hint}", diagnostic=diag)
 
         preview_token = r.headers.get("X-Preview-Token") or r.headers.get("x-preview-token")
         try:
             rows = r.json()
         except Exception as e:
-            raise PhotoprismError("Resposta JSON invalida (URL pode estar errada)") from e
+            raise PhotoprismError("Resposta JSON invalida") from e
 
         if not isinstance(rows, list):
-            log.warning("PhotoPrism search retornou tipo %s, esperado lista", type(rows).__name__)
             return [], preview_token
 
         log.info("PhotoPrism encontrou %s resultado(s)", len(rows))
@@ -330,7 +483,6 @@ class PhotoprismClient:
                 continue
             file_hash = _extract_file_hash(row)
             if not file_hash:
-                log.debug("PhotoPrism item sem hash: uid=%s", row.get("UID"))
                 continue
             results.append(
                 PhotoResult(
@@ -364,7 +516,6 @@ class PhotoprismClient:
         self._log_response(r, context="thumbnail")
         if r.status_code >= 400:
             raise PhotoprismError(f"Thumbnail HTTP {r.status_code}")
-        log.info("PhotoPrism thumbnail ok hash=%s bytes=%s", file_hash[:12], len(r.content))
         return r.content
 
 

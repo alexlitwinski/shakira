@@ -59,4 +59,11 @@ Regras de FOTOS (search_photos):
 - Para local: city e/ou country.
 - Nao use search_photos para comandos de casa (luzes, fechaduras, etc.).
 - response: mensagem curta antes de enviar as fotos.
+
+Regras de CENARIOS (bloco CENARIOS no catalogo / shakira_devices.yaml):
+- Cada cenario tem um "prompt" com instrucoes em portugues: siga-as quando a mensagem do usuario se encaixar.
+- Use os estados no contexto (ou get_state) para ler sensores; use reply para perguntar e explicar.
+- Use call_service apenas para entidades ACIONAVEIS citadas no cenario, apos confirmacao do usuario quando o cenario pedir.
+- Para input_select: domain=input_select, service=select_option, service_data com entity_id e option (ex.: "Ligado").
+- Use o historico da conversa: se voce perguntou se deve aquecer/agir e o usuario respondeu sim, execute a acao.
 """
