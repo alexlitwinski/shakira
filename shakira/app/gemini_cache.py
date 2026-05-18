@@ -10,11 +10,15 @@ from pathlib import Path
 from typing import Any
 
 import google.generativeai as genai
+from google.api_core import exceptions as google_exceptions
 
 from app.devices_catalog import DevicesCatalog
 from app.prompts import SYSTEM_INSTRUCTION
 
 log = logging.getLogger(__name__)
+
+# API Gemini exige conteudo minimo para CachedContent (erro 400 se menor)
+GEMINI_MIN_CACHE_TOKENS = 4096
 
 CACHE_META_PATH = Path(os.environ.get("GEMINI_CACHE_META_PATH", "/data/shakira_gemini_cache.json"))
 
@@ -50,6 +54,23 @@ def _delete_cache(name: str) -> None:
         caching.CachedContent.delete(name=name)
     except Exception as e:
         log.debug("Cache antigo nao removido (%s): %s", name, e)
+
+
+def _estimate_cache_tokens(*, model: str, system_text: str, contents_text: str) -> int | None:
+    """Conta tokens do payload do cache; None se a API nao responder."""
+    payload = f"{system_text}\n\n{contents_text}"
+    try:
+        m = genai.GenerativeModel(model_name=model)
+        result = m.count_tokens(payload)
+        return int(getattr(result, "total_tokens", 0) or 0)
+    except Exception as e:
+        log.debug("count_tokens indisponivel: %s", e)
+        return None
+
+
+def _cache_too_small_error(exc: BaseException) -> bool:
+    msg = str(exc).lower()
+    return "too small" in msg or "min_total_token_count" in msg
 
 
 def _cache_exists(name: str) -> bool:
@@ -95,17 +116,38 @@ def ensure_catalog_cache(
     if isinstance(existing_name, str) and existing_name:
         _delete_cache(existing_name)
 
+    contents_text = "Catalogo de dispositivos e regras de acao carregados."
+    token_count = _estimate_cache_tokens(
+        model=model, system_text=full_system, contents_text=contents_text
+    )
+    if token_count is not None and token_count < GEMINI_MIN_CACHE_TOKENS:
+        log.info(
+            "Catalogo pequeno (%s tokens, minimo %s); cache Gemini omitido — fallback inline",
+            token_count,
+            GEMINI_MIN_CACHE_TOKENS,
+        )
+        return None
+
     try:
         cache = caching.CachedContent.create(
             model=_model_resource(model),
             display_name="shakira-catalog",
             system_instruction=full_system,
-            contents=["Catalogo de dispositivos e regras de acao carregados."],
+            contents=[contents_text],
             ttl=datetime.timedelta(hours=max(1, min(ttl_hours, 168))),
         )
         _save_meta({"cache_name": cache.name, "content_hash": content_hash})
         log.info("Gemini cache atualizado: %s (hash=%s...)", cache.name, content_hash[:12])
         return cache.name
+    except google_exceptions.InvalidArgument as e:
+        if _cache_too_small_error(e):
+            log.info(
+                "Cache Gemini nao criado (conteudo abaixo do minimo de %s tokens); fallback inline",
+                GEMINI_MIN_CACHE_TOKENS,
+            )
+            return None
+        log.warning("Cache Gemini rejeitado: %s", e)
+        return None
     except Exception:
         log.exception("Falha ao criar cache Gemini; usando fallback inline")
         return None

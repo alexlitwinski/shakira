@@ -1,6 +1,6 @@
 name: Shakira - Assistente WhatsApp
 description: Assistente pessoal via WhatsApp para Home Assistant (Evolution API + Gemini)
-version: "1.0.4"
+version: "1.0.6"
 slug: shakira
 init: false
 arch:
@@ -24,7 +24,7 @@ options:
   evolution_api_key: ""
   gemini_api_key: ""
   evolution_instance: ""
-  devices_config_path: /config/shakira_devices.yaml
+  devices_config_path: /homeassistant/shakira_devices.yaml
   gemini_cache_ttl_hours: 24
 schema:
   ha_url: url

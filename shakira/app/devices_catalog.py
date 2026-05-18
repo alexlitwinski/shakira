@@ -14,6 +14,37 @@ import yaml
 log = logging.getLogger(__name__)
 
 DEFAULT_DEVICES_PATH = "/config/shakira_devices.yaml"
+# Em muitos add-ons HA OS a pasta de configuracao monta em /homeassistant, nao em /config
+FALLBACK_DEVICES_PATHS = (
+    "/homeassistant/shakira_devices.yaml",
+    "/config/shakira_devices.yaml",
+)
+
+
+def resolve_devices_path(configured: str | Path | None = None) -> Path:
+    """Resolve o YAML de dispositivos (caminho configurado ou fallbacks do Supervisor)."""
+    candidates: list[Path] = []
+    if configured and str(configured).strip():
+        candidates.append(Path(str(configured).strip()))
+    env = os.environ.get("SHAKIRA_DEVICES_PATH", "").strip()
+    if env:
+        candidates.append(Path(env))
+    for p in FALLBACK_DEVICES_PATHS:
+        candidates.append(Path(p))
+    candidates.append(Path(DEFAULT_DEVICES_PATH))
+
+    seen: set[str] = set()
+    for path in candidates:
+        key = str(path)
+        if key in seen:
+            continue
+        seen.add(key)
+        if path.is_file():
+            if configured and key != str(Path(str(configured).strip())):
+                log.info("Usando catalogo em %s (caminho configurado nao encontrado)", path)
+            return path
+
+    return Path(str(configured).strip()) if configured and str(configured).strip() else Path(DEFAULT_DEVICES_PATH)
 
 
 def _log_config_dir_hint(target: Path) -> None:
@@ -57,7 +88,7 @@ class DevicesCatalog:
 
     @classmethod
     def load(cls, path: str | Path | None = None) -> DevicesCatalog:
-        resolved = Path(path or os.environ.get("SHAKIRA_DEVICES_PATH", DEFAULT_DEVICES_PATH))
+        resolved = resolve_devices_path(path)
         if not resolved.is_file():
             log.warning("Arquivo de dispositivos NAO encontrado: %s", resolved)
             _log_config_dir_hint(resolved)

@@ -87,7 +87,7 @@ async def status(request: Request) -> dict[str, Any]:
     exists = bool(resolved and resolved.is_file())
     actionable = sorted(catalog.actionable_entity_ids())
     return {
-        "version": "1.0.4",
+        "version": "1.0.6",
         "devices_config_path": path,
         "file_exists": exists,
         "resolved_path": str(resolved) if resolved else None,

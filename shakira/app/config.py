@@ -73,10 +73,9 @@ class AppSettings:
             or opts.get("ha_url")
             or "http://supervisor/core"
         )
-        devices_path = (
-            _opts_str(opts, "devices_config_path", "SHAKIRA_DEVICES_PATH")
-            or "/config/shakira_devices.yaml"
-        )
+        devices_path = _opts_str(opts, "devices_config_path", "SHAKIRA_DEVICES_PATH")
+        if not devices_path:
+            devices_path = "/homeassistant/shakira_devices.yaml"
 
         return cls(
             supervisor_token=token.strip(),
