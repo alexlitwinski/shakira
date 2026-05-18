@@ -41,9 +41,16 @@ class AppSettings:
     @classmethod
     def load(cls) -> AppSettings:
         opts = load_addon_options()
+        opt_token = opts.get("homeassistant_long_lived_token")
+        opt_llt = ""
+        if isinstance(opt_token, str):
+            opt_llt = opt_token.strip()
+
         token = (
             os.environ.get("SUPERVISOR_TOKEN")
+            or os.environ.get("HASSIO_TOKEN")
             or os.environ.get("HA_SUPERVISOR_TOKEN")
+            or opt_llt
             or os.environ.get("HOMEASSISTANT_TOKEN")
             or ""
         )

@@ -18,7 +18,8 @@ Usa **`FROM ghcr.io/home-assistant/base:latest`** (sem `build.yaml`). O erro `am
 
 | Opção | Descrição |
 |-------|-----------|
-| **ha_url** | URL da API Core (HA OS: `http://supervisor/core`). |
+| **ha_url** | URL da API Core (HA OS típico: `http://supervisor/core`). |
+| **homeassistant_long_lived_token** | Fallback se o Supervisor não definir token: cole um token de **Perfil HA → Tokens de longa duração** (recomenda-se mesmo que o erro `SUPERVISOR_TOKEN ausente` desapareça). |
 | **evolution_base_url** | URL base da Evolution (ex: `http://192.168.1.50:8080`), sem `/` final. |
 | **evolution_api_key** | Cabeçalho `apikey` da Evolution. |
 | **gemini_api_key** | Chave da API Google AI (Gemini). |
@@ -35,6 +36,10 @@ Variáveis de ambiente opcionais (dev): `HA_URL`, `HOMEASSISTANT_TOKEN`, `EVOLUT
 | `input_text.whatsapp_bot_permitidos` | Telefones **só com dígitos**, separados por vírgula (ex: `553191119016,553198946418`). |
 
 Chaves Gemini/Evolution **não** são mais lidas de `input_text`.
+
+### Log «SUPERVISOR_TOKEN ausente»
+
+Alguns setups não expõem `SUPERVISOR_TOKEN` no container no arranque. **Solução imediata:** na configuração do add-on Shakira preencher **homeassistant_long_lived_token** e guardar; usar **ha_url** `http://supervisor/core`. Depois **reinicia** o Shakira.
 
 ---
 

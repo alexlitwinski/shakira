@@ -28,9 +28,11 @@ async def lifespan(app: FastAPI):
     app.state.settings = settings
 
     if not settings.supervisor_token:
-        log.error(
-            "SUPERVISOR_TOKEN ausente. Habilitacao homeassistant_api e reinicio necessarios. "
-            "Para teste local use HOMEASSISTANT_TOKEN e HA_URL."
+        log.warning(
+            "Nenhum token da API encontrado (SUPERVISOR_TOKEN vazio no container). "
+            "Nas configuracoes do add-on Shakira defina homeassistant_long_lived_token "
+            "(Perfil HA > Tokens de longa duracao) ou reinstalle/reinicie depois de "
+            "guardar homeassistant_api: true."
         )
 
     timeout = httpx.Timeout(connect=10.0, read=120.0, write=60.0, pool=10.0)
