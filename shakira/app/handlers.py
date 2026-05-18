@@ -12,11 +12,18 @@ from typing import Any
 import httpx
 
 from app.config import AppSettings
+from app.conversation_history import format_for_prompt, get_recent, record_exchange
 from app.devices_catalog import DevicesCatalog
 from app.evolution import EvolutionClient
 from app.gemini import GeminiAssistant
 from app.gemini_cache import ensure_catalog_cache
 from app.homeassistant import HomeAssistantClient
+from app.photoprism import (
+    PhotoprismAuthError,
+    PhotoprismClient,
+    PhotoprismError,
+    PhotoResult,
+)
 
 log = logging.getLogger(__name__)
 
@@ -318,7 +325,188 @@ async def execute_decision(
             log.warning("Erro HA service: %s", e.response.text[:500])
             return await finalize(f"Erro ao executar: {e.response.status_code}")
 
+    if action == "search_photos":
+        return await finalize(
+            "Pedido de fotos recebido. Se nada chegar, verifique PhotoPrism nas opcoes do add-on."
+        )
+
     return reply or "Nao entendi o proximo passo."
+
+
+def _parse_photo_filters(decision: dict[str, Any]) -> dict[str, Any]:
+    raw = decision.get("filters")
+    if not isinstance(raw, dict):
+        return {}
+    out: dict[str, Any] = {}
+    for key in (
+        "person",
+        "people",
+        "city",
+        "country",
+        "state",
+        "label",
+        "album",
+        "query",
+        "after",
+        "before",
+        "taken",
+    ):
+        val = raw.get(key)
+        if isinstance(val, str) and val.strip():
+            out[key] = val.strip()
+    for key in ("year", "month", "day"):
+        val = raw.get(key)
+        if isinstance(val, int):
+            out[key] = val
+        elif isinstance(val, str) and val.strip().isdigit():
+            out[key] = int(val.strip())
+    return out
+
+
+def _parse_photo_count(decision: dict[str, Any], default: int, maximum: int) -> int:
+    count = decision.get("count")
+    if isinstance(count, int):
+        n = count
+    elif isinstance(count, str) and count.strip().isdigit():
+        n = int(count.strip())
+    else:
+        n = default
+    return max(1, min(n, maximum))
+
+
+def _photo_caption(photo: PhotoResult, index: int, total: int) -> str:
+    parts: list[str] = []
+    if photo.title:
+        parts.append(photo.title)
+    if photo.taken_at:
+        parts.append(photo.taken_at[:10] if len(photo.taken_at) >= 10 else photo.taken_at)
+    if photo.place_label:
+        parts.append(photo.place_label)
+    base = " — ".join(parts) if parts else f"Foto {index}/{total}"
+    return f"{index}/{total}: {base}"[:1024]
+
+
+async def handle_search_photos(
+    decision: dict[str, Any],
+    *,
+    settings: AppSettings,
+    evo: EvolutionClient,
+    http: httpx.AsyncClient,
+    phone: str,
+    instance: str,
+) -> None:
+    """Busca fotos no PhotoPrism e envia pelo WhatsApp."""
+    evo_base = settings.evolution_base_url.strip()
+    evo_key = settings.evolution_api_key.strip()
+    if not evo_base or not evo_key or not instance:
+        log.error("Envio de fotos bloqueado: Evolution nao configurado")
+        return
+
+    intro = str(decision.get("response") or "").strip()
+    if not settings.photoprism_url or not settings.photoprism_token:
+        msg = (
+            intro + "\n\nPhotoPrism nao configurado. "
+            "Defina photoprism_url e photoprism_token nas opcoes do add-on."
+        ).strip()
+        await evo.send_text(
+            base_url=evo_base,
+            api_key=evo_key,
+            instance=instance,
+            number=phone,
+            text=_truncate_whatsapp(msg),
+        )
+        return
+
+    filters = _parse_photo_filters(decision)
+    count = _parse_photo_count(
+        decision,
+        default=5,
+        maximum=settings.photoprism_max_photos,
+    )
+    pp = PhotoprismClient(
+        http,
+        base_url=settings.photoprism_url,
+        token=settings.photoprism_token,
+    )
+
+    try:
+        photos, preview_token = await pp.search_photos(filters=filters, count=count)
+    except PhotoprismAuthError:
+        msg = (intro + "\n\nErro de autenticacao no PhotoPrism. Verifique o token.").strip()
+        await evo.send_text(
+            base_url=evo_base, api_key=evo_key, instance=instance, number=phone, text=msg
+        )
+        return
+    except PhotoprismError as e:
+        msg = (intro + f"\n\nNao consegui buscar fotos: {e}").strip()
+        await evo.send_text(
+            base_url=evo_base, api_key=evo_key, instance=instance, number=phone, text=msg
+        )
+        return
+
+    if not photos:
+        msg = (intro + "\n\nNao encontrei fotos com esses criterios.").strip() or (
+            "Nao encontrei fotos com esses criterios."
+        )
+        await evo.send_text(
+            base_url=evo_base, api_key=evo_key, instance=instance, number=phone, text=msg
+        )
+        return
+
+    if intro:
+        await evo.send_text(
+            base_url=evo_base,
+            api_key=evo_key,
+            instance=instance,
+            number=phone,
+            text=_truncate_whatsapp(intro),
+        )
+
+    token = preview_token or "public"
+    sent = 0
+    total = len(photos)
+    for i, photo in enumerate(photos, start=1):
+        try:
+            data = await pp.get_thumbnail_bytes(
+                file_hash=photo.file_hash,
+                preview_token=token,
+            )
+        except PhotoprismError as e:
+            log.warning("Thumbnail falhou %s: %s", photo.file_hash[:12], e)
+            continue
+
+        caption = _photo_caption(photo, i, total)
+        fname = f"shakira_{photo.uid or photo.file_hash[:8]}_{i}.jpg"
+        ok = await evo.send_image_bytes(
+            base_url=evo_base,
+            api_key=evo_key,
+            instance=instance,
+            number=phone,
+            image_bytes=data,
+            filename=fname,
+            caption=caption,
+        )
+        if ok is not None:
+            sent += 1
+        if i < total:
+            await asyncio.sleep(0.5)
+
+    if sent == 0:
+        await evo.send_text(
+            base_url=evo_base,
+            api_key=evo_key,
+            instance=instance,
+            number=phone,
+            text="Encontrei fotos mas nao consegui enviar as imagens.",
+        )
+    elif sent < total:
+        await evo.send_text(
+            base_url=evo_base,
+            api_key=evo_key,
+            instance=instance,
+            number=phone,
+            text=f"Enviei {sent} de {total} fotos.",
+        )
 
 
 async def handle_evolution_payload(
@@ -328,6 +516,7 @@ async def handle_evolution_payload(
     evo: EvolutionClient,
     settings: AppSettings,
     gemini_cache_name: str | None = None,
+    http: httpx.AsyncClient | None = None,
 ) -> None:
     gemini_key = settings.gemini_api_key.strip()
     if not gemini_key:
@@ -380,6 +569,7 @@ async def handle_evolution_payload(
                     number=phone_norm,
                     text=reply_text,
                 )
+                record_exchange(phone_norm, user_text or "", reply_text)
             continue
 
         states = await ha.get_states()
@@ -393,11 +583,33 @@ async def handle_evolution_payload(
             total,
         )
 
+        history_text = format_for_prompt(get_recent(phone_norm))
+
         decision = await asyncio.to_thread(
             assistant.decide,
             user_message=user_text or "",
             entities_context=ctx,
+            conversation_history=history_text,
         )
+
+        hint = _inst_hint if isinstance(_inst_hint, str) and _inst_hint.strip() else ""
+        action = str(decision.get("action") or "reply").lower()
+        if action == "search_photos" and http is not None:
+            send_instance = (
+                hint or str(webhook_instance) or default_inst or settings.evolution_instance
+            ).strip()
+            if send_instance:
+                await handle_search_photos(
+                    decision,
+                    settings=settings,
+                    evo=evo,
+                    http=http,
+                    phone=phone_norm,
+                    instance=send_instance,
+                )
+                photo_reply = str(decision.get("response") or "").strip() or "Fotos enviadas."
+                record_exchange(phone_norm, user_text or "", photo_reply)
+            continue
 
         reply_text = await execute_decision(
             decision,
@@ -410,7 +622,6 @@ async def handle_evolution_payload(
 
         reply_text = _truncate_whatsapp(reply_text)
 
-        hint = _inst_hint if isinstance(_inst_hint, str) and _inst_hint.strip() else ""
         send_instance = (hint or str(webhook_instance) or default_inst or settings.evolution_instance).strip()
 
         if not phone_norm or not reply_text.strip():
@@ -431,3 +642,4 @@ async def handle_evolution_payload(
             number=phone_norm,
             text=reply_text,
         )
+        record_exchange(phone_norm, user_text or "", reply_text)

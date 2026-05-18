@@ -56,11 +56,21 @@ class GeminiAssistant:
             system_instruction=system,
         )
 
-    def decide(self, *, user_message: str, entities_context: str) -> dict[str, Any]:
-        prompt = f"""Estados atuais (resumo dinamico - todas as entidades para consulta):
+    def decide(
+        self,
+        *,
+        user_message: str,
+        entities_context: str,
+        conversation_history: str = "",
+    ) -> dict[str, Any]:
+        history_block = ""
+        if conversation_history.strip():
+            history_block = f"{conversation_history.strip()}\n\n"
+
+        prompt = f"""{history_block}Estados atuais (resumo dinamico - todas as entidades para consulta):
 {entities_context}
 
-Mensagem do usuario:
+Mensagem atual do usuario:
 {user_message}
 """
         try:

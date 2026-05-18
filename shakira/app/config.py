@@ -51,6 +51,9 @@ class AppSettings:
     evolution_instance: str
     devices_config_path: str
     gemini_cache_ttl_hours: int
+    photoprism_url: str
+    photoprism_token: str
+    photoprism_max_photos: int
 
     @classmethod
     def load(cls) -> AppSettings:
@@ -86,6 +89,9 @@ class AppSettings:
             evolution_instance=_opts_str(opts, "evolution_instance", "EVOLUTION_INSTANCE"),
             devices_config_path=devices_path,
             gemini_cache_ttl_hours=_opts_int(opts, "gemini_cache_ttl_hours", 24),
+            photoprism_url=_opts_str(opts, "photoprism_url", "PHOTOPRISM_URL").rstrip("/"),
+            photoprism_token=_opts_str(opts, "photoprism_token", "PHOTOPRISM_TOKEN"),
+            photoprism_max_photos=min(10, max(1, _opts_int(opts, "photoprism_max_photos", 10))),
         )
 
     @property

@@ -87,13 +87,18 @@ async def status(request: Request) -> dict[str, Any]:
     exists = bool(resolved and resolved.is_file())
     actionable = sorted(catalog.actionable_entity_ids())
     return {
-        "version": "1.0.6",
+        "version": "1.1.0",
         "devices_config_path": path,
         "file_exists": exists,
         "resolved_path": str(resolved) if resolved else None,
         "devices_count": len(catalog.devices),
         "actionable_entities": actionable,
         "gemini_cache": getattr(request.app.state, "gemini_cache_name", None),
+        "photoprism_configured": bool(
+            settings.photoprism_url.strip() and settings.photoprism_token.strip()
+        ),
+        "photoprism_url": settings.photoprism_url or None,
+        "photoprism_max_photos": settings.photoprism_max_photos,
     }
 
 
@@ -103,13 +108,19 @@ async def _run_webhook(
     ha: HomeAssistantClient,
     evo: EvolutionClient,
     gemini_cache_name: str | None,
+    http: httpx.AsyncClient,
 ) -> None:
     try:
         if isinstance(body, list):
             for item in body:
                 if isinstance(item, dict):
                     await handle_evolution_payload(
-                        item, ha=ha, evo=evo, settings=settings, gemini_cache_name=gemini_cache_name
+                        item,
+                        ha=ha,
+                        evo=evo,
+                        settings=settings,
+                        gemini_cache_name=gemini_cache_name,
+                        http=http,
                     )
         elif isinstance(body, dict):
             ev = str(body.get("event") or "").upper()
@@ -117,7 +128,12 @@ async def _run_webhook(
                 log.debug("Evento ignorado: %s", ev)
                 return
             await handle_evolution_payload(
-                body, ha=ha, evo=evo, settings=settings, gemini_cache_name=gemini_cache_name
+                body,
+                ha=ha,
+                evo=evo,
+                settings=settings,
+                gemini_cache_name=gemini_cache_name,
+                http=http,
             )
         else:
             log.warning("Payload webhook inesperado: %s", type(body))
@@ -149,5 +165,6 @@ async def evolution_webhook(
     evo: EvolutionClient = request.app.state.evo
     cache_name: str | None = getattr(request.app.state, "gemini_cache_name", None)
 
-    background_tasks.add_task(_run_webhook, body, settings, ha, evo, cache_name)
+    http: httpx.AsyncClient = request.app.state.http
+    background_tasks.add_task(_run_webhook, body, settings, ha, evo, cache_name, http)
     return {"ok": "true"}
