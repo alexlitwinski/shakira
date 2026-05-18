@@ -55,6 +55,7 @@ class AppSettings:
     photoprism_token: str
     photoprism_max_photos: int
     photoprism_api_prefix: str
+    shakira_api_token: str
 
     @classmethod
     def load(cls) -> AppSettings:
@@ -94,6 +95,7 @@ class AppSettings:
             photoprism_token=_opts_str(opts, "photoprism_token", "PHOTOPRISM_TOKEN"),
             photoprism_max_photos=min(10, max(1, _opts_int(opts, "photoprism_max_photos", 10))),
             photoprism_api_prefix=_opts_str(opts, "photoprism_api_prefix", "PHOTOPRISM_API_PREFIX"),
+            shakira_api_token=_opts_str(opts, "shakira_api_token", "SHAKIRA_API_TOKEN"),
         )
 
     @property

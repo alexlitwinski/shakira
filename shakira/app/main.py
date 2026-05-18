@@ -24,6 +24,7 @@ from app.gemini_cache import ensure_catalog_cache
 from app.handlers import handle_evolution_payload
 from app.homeassistant import HomeAssistantClient
 from app.status_report import build_status_report
+from app.whatsapp_outbound import WhatsAppSendError, send_whatsapp_text
 
 _log_level_name = os.environ.get("SHAKIRA_LOG_LEVEL", "INFO").upper()
 _log_level = getattr(logging, _log_level_name, logging.INFO)
@@ -124,6 +125,26 @@ class DevicesYamlBody(BaseModel):
     content: str = Field(..., min_length=1)
 
 
+class WhatsAppSendBody(BaseModel):
+    number: str = Field(..., min_length=8, description="Telefone (DDI+DDD+numero, somente digitos)")
+    message: str = Field(..., min_length=1, description="Texto da mensagem")
+    instance: str | None = Field(None, description="Instancia Evolution (opcional)")
+
+
+def _check_shakira_api_token(request: Request, settings: AppSettings) -> None:
+    expected = settings.shakira_api_token.strip()
+    if not expected:
+        log.warning("POST /api/whatsapp/send sem shakira_api_token configurado (endpoint aberto)")
+        return
+    auth = request.headers.get("Authorization", "").strip()
+    header_token = request.headers.get("X-Shakira-Token", "").strip()
+    if auth == f"Bearer {expected}" or auth == expected:
+        return
+    if header_token == expected:
+        return
+    raise HTTPException(status_code=401, detail="Token invalido ou ausente")
+
+
 @app.get("/api/devices-yaml")
 async def get_devices_yaml(request: Request) -> dict[str, Any]:
     """Conteudo do shakira_devices.yaml para o editor do painel."""
@@ -198,6 +219,24 @@ async def _run_webhook(
             log.warning("Payload webhook inesperado: %s", type(body))
     except Exception:
         log.exception("Erro ao processar webhook Evolution")
+
+
+@app.post("/api/whatsapp/send")
+async def api_whatsapp_send(request: Request, body: WhatsAppSendBody) -> dict[str, Any]:
+    """Envia mensagem WhatsApp (para rest_command / automacoes do Home Assistant)."""
+    settings: AppSettings = request.app.state.settings
+    _check_shakira_api_token(request, settings)
+    evo: EvolutionClient = request.app.state.evo
+    try:
+        return await send_whatsapp_text(
+            settings=settings,
+            evo=evo,
+            number=body.number,
+            message=body.message,
+            instance=body.instance,
+        )
+    except WhatsAppSendError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
 
 
 @app.post("/webhook")

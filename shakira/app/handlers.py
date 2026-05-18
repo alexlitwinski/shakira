@@ -30,6 +30,18 @@ log = logging.getLogger(__name__)
 
 ENTITY_PERMITTED = "input_text.whatsapp_bot_permitidos"
 
+VALID_GEMINI_ACTIONS = frozenset(
+    {"reply", "call_service", "get_state", "list_entities", "search_photos"}
+)
+
+_PLACEHOLDER_RESPONSE_MARKERS = (
+    "verificando",
+    "aguarde",
+    "um momento",
+    "vou verificar",
+    "deixa eu ver",
+)
+
 _pending_unlock: dict[str, "PendingUnlock"] = {}
 
 
@@ -210,6 +222,63 @@ def _log_service_payload(label: str, payload: dict[str, Any]) -> None:
     log.info("%s payload=%s", label, safe)
 
 
+def _password_prompt_message(reply: str, prompt: str) -> str:
+    """Combina texto do Gemini com o prompt do catalogo sem repetir a mesma pergunta."""
+    reply = reply.strip()
+    prompt = prompt.strip()
+    if not prompt:
+        return reply
+    if not reply:
+        return prompt
+    norm_reply = " ".join(reply.lower().split())
+    norm_prompt = " ".join(prompt.lower().split())
+    if norm_reply == norm_prompt or norm_prompt in norm_reply:
+        return reply
+    if norm_reply in norm_prompt:
+        return prompt
+    return f"{reply}\n\n{prompt}"
+
+
+def _is_placeholder_scenario_response(text: str) -> bool:
+    t = text.lower()
+    return any(m in t for m in _PLACEHOLDER_RESPONSE_MARKERS)
+
+
+def normalize_gemini_action(
+    decision: dict[str, Any], catalog: DevicesCatalog
+) -> tuple[dict[str, Any], str | None]:
+    """Corrige action invalida (ex.: id de cenario). Retorna (decision, scenario_id para retry)."""
+    action = str(decision.get("action") or "reply").lower()
+    if action in VALID_GEMINI_ACTIONS:
+        return decision, None
+
+    scenario_ids = {s.id for s in catalog.scenarios}
+    if action in scenario_ids:
+        log.warning(
+            "Gemini usou id de cenario como action='%s'; esperado reply/get_state/call_service",
+            action,
+        )
+        fixed = dict(decision)
+        fixed["action"] = "reply"
+        if _is_placeholder_scenario_response(str(decision.get("response") or "")):
+            fixed["response"] = ""
+        return fixed, action
+
+    log.warning("Acao Gemini desconhecida '%s'; convertendo para reply", action)
+    fixed = dict(decision)
+    fixed["action"] = "reply"
+    return fixed, None
+
+
+def _scenario_retry_suffix(scenario_id: str) -> str:
+    return (
+        f"\n\n[Correcao do sistema] O campo action deve ser reply, get_state ou call_service — "
+        f"nunca '{scenario_id}'. Siga o cenario [{scenario_id}] no catalogo: use os estados no "
+        f"contexto ou get_state, responda de forma completa agora (temperatura, sim/nao, pergunta "
+        f"se deve aquecer). Nao envie apenas mensagens do tipo 'verificando...'."
+    )
+
+
 def _log_gemini_decision(phone: str, decision: dict[str, Any]) -> None:
     safe = dict(decision)
     if safe.get("provided_password"):
@@ -352,6 +421,9 @@ async def execute_decision(
     entities_context_used: bool,
 ) -> str:
     action = str(decision.get("action") or "reply").lower()
+    if action not in VALID_GEMINI_ACTIONS:
+        log.warning("execute_decision: acao '%s' invalida; tratando como reply", action)
+        action = "reply"
     reply = str(decision.get("response") or "").strip()
     log.info("execute_decision phone=%s action=%s", phone, action)
 
@@ -435,9 +507,7 @@ async def execute_decision(
                 )
                 log.info("Unlock pendente registrado phone=%s entity=%s", phone, target)
                 prompt = catalog.password_prompt_for(target)
-                if reply:
-                    return f"{reply}\n\n{prompt}"
-                return prompt
+                return _password_prompt_message(reply, prompt)
 
         log.info("Chamando HA phone=%s %s/%s entity=%s", phone, domain, service, target)
         _log_service_payload("call_service", svc_data)
@@ -766,6 +836,15 @@ async def handle_evolution_payload(
             entities_context=ctx,
             conversation_history=history_text,
         )
+        decision, retry_scenario_id = normalize_gemini_action(decision, catalog)
+        if retry_scenario_id:
+            decision = await asyncio.to_thread(
+                assistant.decide,
+                user_message=(user_text or "") + _scenario_retry_suffix(retry_scenario_id),
+                entities_context=ctx,
+                conversation_history=history_text,
+            )
+            decision, _ = normalize_gemini_action(decision, catalog)
         _log_gemini_decision(phone_norm, decision)
 
         hint = _inst_hint if isinstance(_inst_hint, str) and _inst_hint.strip() else ""

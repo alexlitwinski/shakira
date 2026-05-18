@@ -1,0 +1,57 @@
+# Pacote Home Assistant — enviar WhatsApp via add-on Shakira
+#
+# 1. Nas opcoes do add-on Shakira, defina shakira_api_token (ex.: um UUID).
+# 2. Em secrets.yaml:
+#      shakira_whatsapp_token: "Bearer SEU_TOKEN_AQUI"
+# 3. Ajuste a URL do add-on (Supervisor → Shakira → abrir painel → veja host/porta).
+#    Exemplos comuns: http://ccab4aaf-shakira:8099  ou  http://172.30.32.1:PORTA
+# 4. Em configuration.yaml:  homeassistant:  packages:  shakira_whatsapp: !include shakira_whatsapp.yaml
+#    (ou copie este ficheiro para config/packages/)
+
+rest_command:
+  shakira_whatsapp_send:
+    url: "http://ccab4aaf-shakira:8099/api/whatsapp/send"
+    method: post
+    content_type: "application/json"
+    headers:
+      Authorization: !secret shakira_whatsapp_token
+    payload: '{"number": "{{ number }}", "message": "{{ message }}", "instance": "{{ instance | default("") }}"}'
+
+script:
+  shakira_enviar_whatsapp:
+    alias: Shakira - Enviar WhatsApp
+    description: Envia texto para um numero via Evolution API (add-on Shakira).
+    mode: single
+    icon: mdi:whatsapp
+    fields:
+      numero:
+        name: Numero
+        description: Telefone com DDI (somente digitos, ex. 5548999999999)
+        required: true
+        example: "5548999999999"
+        selector:
+          text:
+      mensagem:
+        name: Mensagem
+        required: true
+        selector:
+          text:
+            multiline: true
+      instancia:
+        name: Instancia Evolution
+        description: Opcional; usa a padrao do add-on se vazio
+        required: false
+        selector:
+          text:
+    sequence:
+      - action: rest_command.shakira_whatsapp_send
+        data:
+          number: "{{ numero }}"
+          message: "{{ mensagem }}"
+          instance: "{{ instancia | default('') }}"
+
+# Uso em automacao:
+#   - action: script.shakira_enviar_whatsapp
+#     data:
+#       numero: "5548999999999"
+#       mensagem: "Porta trancada."
