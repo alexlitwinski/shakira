@@ -16,6 +16,18 @@ log = logging.getLogger(__name__)
 DEFAULT_DEVICES_PATH = "/config/shakira_devices.yaml"
 
 
+def _log_config_dir_hint(target: Path) -> None:
+    """Ajuda a diagnosticar ficheiro no sítio errado."""
+    for parent in (target.parent, Path("/config"), Path("/homeassistant")):
+        if not parent.is_dir():
+            continue
+        try:
+            names = sorted(p.name for p in parent.iterdir() if p.is_file())[:25]
+            log.warning("Ficheiros em %s: %s", parent, names or "(vazio)")
+        except OSError:
+            pass
+
+
 @dataclass
 class SecurityConfig:
     require_password_for_services: list[str] = field(default_factory=list)
@@ -47,7 +59,8 @@ class DevicesCatalog:
     def load(cls, path: str | Path | None = None) -> DevicesCatalog:
         resolved = Path(path or os.environ.get("SHAKIRA_DEVICES_PATH", DEFAULT_DEVICES_PATH))
         if not resolved.is_file():
-            log.warning("Arquivo de dispositivos nao encontrado: %s", resolved)
+            log.warning("Arquivo de dispositivos NAO encontrado: %s", resolved)
+            _log_config_dir_hint(resolved)
             return cls(devices=[], source_path=resolved, content_hash="")
 
         raw_bytes = resolved.read_bytes()
@@ -93,6 +106,14 @@ class DevicesCatalog:
                     )
                 devices.append(DeviceConfig(name=name, entities=entities))
 
+        actionable = sum(1 for d in devices for e in d.entities if e.allow_actions)
+        log.info(
+            "Catalogo carregado: %s (%s dispositivos, %s entidades, %s acionaveis)",
+            resolved,
+            len(devices),
+            sum(len(d.entities) for d in devices),
+            actionable,
+        )
         return cls(devices=devices, source_path=resolved, content_hash=content_hash)
 
     def entity_map(self) -> dict[str, EntityConfig]:

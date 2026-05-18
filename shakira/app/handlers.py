@@ -208,10 +208,13 @@ async def try_handle_pending_password(
     return await _execute_unlock_pending(phone, pending, ha=ha)
 
 
-def build_gemini_assistant(settings: AppSettings, catalog: DevicesCatalog) -> GeminiAssistant:
+def build_gemini_assistant(
+    settings: AppSettings,
+    catalog: DevicesCatalog,
+    cache_name: str | None = None,
+) -> GeminiAssistant:
     model_name = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
-    cache_name = None
-    if settings.gemini_api_key:
+    if cache_name is None and settings.gemini_api_key and catalog.devices:
         cache_name = ensure_catalog_cache(
             api_key=settings.gemini_api_key,
             model=model_name,
@@ -324,6 +327,7 @@ async def handle_evolution_payload(
     ha: HomeAssistantClient,
     evo: EvolutionClient,
     settings: AppSettings,
+    gemini_cache_name: str | None = None,
 ) -> None:
     gemini_key = settings.gemini_api_key.strip()
     if not gemini_key:
@@ -342,7 +346,7 @@ async def handle_evolution_payload(
     if not evo_base or not evo_key:
         log.warning("Evolution URL ou api key ausentes nas opcoes do add-on")
 
-    assistant = build_gemini_assistant(settings, catalog)
+    assistant = build_gemini_assistant(settings, catalog, cache_name=gemini_cache_name)
 
     normalized = normalize_evolution_payload(payload)
     webhook_instance = payload.get("instance") or payload.get("instanceName") or ""
