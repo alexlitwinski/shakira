@@ -1,4 +1,4 @@
-"""Integracao com Google Gemini para interpretar comandos e devolver JSON."""
+"""Integracao com Google Gemini (cache de catalogo + estados dinamicos por mensagem)."""
 
 from __future__ import annotations
 
@@ -9,35 +9,9 @@ from typing import Any
 
 import google.generativeai as genai
 
+from app.prompts import SYSTEM_INSTRUCTION
+
 log = logging.getLogger(__name__)
-
-SYSTEM_INSTRUCTION = """Voce e o assistente da casa conectada ao Home Assistant.
-O usuario fala em portugues. Responda sempre em portugues do Brasil.
-
-Voce recebe:
-- A mensagem do usuario
-- Um resumo das entidades do Home Assistant (entity_id, estado, nome amigavel)
-
-Sua tarefa e decidir o que fazer e responder SOMENTE com um JSON valido (sem markdown, sem ```), no formato:
-{
-  "action": "reply" | "call_service" | "get_state" | "list_entities",
-  "domain": "light",
-  "service": "turn_on",
-  "service_data": { "entity_id": "light.sala" },
-  "entity_id": "sensor.temperatura",
-  "response": "Texto curto e claro para o usuario no WhatsApp"
-}
-
-Regras:
-- Use "reply" quando for conversa, ajuda ou explicacao sem acao no HA.
-- Use "call_service" para acionar servicos (ex: light.turn_on, switch.turn_off, climate.set_temperature).
-  Preencha domain, service e service_data com os campos exigidos pelo HA (geralmente entity_id ou area_id, etc).
-- Use "get_state" quando precisar informar o estado de UMA entidade; preencha entity_id.
-- Use "list_entities" raramente; response pode explicar que muitas entidades existem.
-- Se o pedido envolver varias acoes, escolha a principal ou use call_service com dados coerentes; se impossivel, reply pedindo detalhe.
-- Nunca invente entity_id: use apenas ids presentes no contexto fornecido.
-- Se nao tiver certeza, action=reply e peca esclarecimento.
-"""
 
 
 def _strip_code_fence(text: str) -> str:
@@ -49,15 +23,41 @@ def _strip_code_fence(text: str) -> str:
 
 
 class GeminiAssistant:
-    def __init__(self, api_key: str, model: str = "gemini-2.0-flash") -> None:
+    def __init__(
+        self,
+        api_key: str,
+        model: str = "gemini-2.0-flash",
+        *,
+        cache_name: str | None = None,
+        catalog_fallback: str = "",
+    ) -> None:
         genai.configure(api_key=api_key)
-        self._model = genai.GenerativeModel(
-            model_name=model,
-            system_instruction=SYSTEM_INSTRUCTION,
+        self._model_name = model
+        self._cache_name = cache_name
+        self._catalog_fallback = catalog_fallback
+        self._model = self._build_model()
+
+    def _build_model(self) -> genai.GenerativeModel:
+        if self._cache_name:
+            try:
+                from google.generativeai import caching
+
+                cache = caching.CachedContent.get(self._cache_name)
+                log.debug("Modelo com cache Gemini: %s", self._cache_name)
+                return genai.GenerativeModel.from_cached_content(cached_content=cache)
+            except Exception:
+                log.warning("Cache Gemini indisponivel; fallback inline")
+
+        system = SYSTEM_INSTRUCTION
+        if self._catalog_fallback:
+            system = f"{system}\n\n{self._catalog_fallback}"
+        return genai.GenerativeModel(
+            model_name=self._model_name,
+            system_instruction=system,
         )
 
     def decide(self, *, user_message: str, entities_context: str) -> dict[str, Any]:
-        prompt = f"""Contexto de entidades (resumo):
+        prompt = f"""Estados atuais (resumo dinamico - todas as entidades para consulta):
 {entities_context}
 
 Mensagem do usuario:

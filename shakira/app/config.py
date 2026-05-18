@@ -27,6 +27,18 @@ def _opts_str(opts: dict, key: str, env_fallback: str) -> str:
     return os.environ.get(env_fallback, "").strip()
 
 
+def _opts_int(opts: dict, key: str, default: int) -> int:
+    v = opts.get(key)
+    if isinstance(v, int):
+        return v
+    if isinstance(v, str) and v.strip().isdigit():
+        return int(v.strip())
+    env = os.environ.get(key.upper(), "")
+    if env.isdigit():
+        return int(env)
+    return default
+
+
 @dataclass
 class AppSettings:
     """Configuracao em runtime."""
@@ -37,6 +49,8 @@ class AppSettings:
     evolution_api_key: str
     gemini_api_key: str
     evolution_instance: str
+    devices_config_path: str
+    gemini_cache_ttl_hours: int
 
     @classmethod
     def load(cls) -> AppSettings:
@@ -59,6 +73,10 @@ class AppSettings:
             or opts.get("ha_url")
             or "http://supervisor/core"
         )
+        devices_path = (
+            _opts_str(opts, "devices_config_path", "SHAKIRA_DEVICES_PATH")
+            or "/config/shakira_devices.yaml"
+        )
 
         return cls(
             supervisor_token=token.strip(),
@@ -67,6 +85,8 @@ class AppSettings:
             evolution_api_key=_opts_str(opts, "evolution_api_key", "EVOLUTION_API_KEY"),
             gemini_api_key=_opts_str(opts, "gemini_api_key", "GEMINI_API_KEY"),
             evolution_instance=_opts_str(opts, "evolution_instance", "EVOLUTION_INSTANCE"),
+            devices_config_path=devices_path,
+            gemini_cache_ttl_hours=_opts_int(opts, "gemini_cache_ttl_hours", 24),
         )
 
     @property

@@ -5,18 +5,32 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
+from dataclasses import dataclass
 from typing import Any
 
 import httpx
 
 from app.config import AppSettings
+from app.devices_catalog import DevicesCatalog
 from app.evolution import EvolutionClient
 from app.gemini import GeminiAssistant
+from app.gemini_cache import ensure_catalog_cache
 from app.homeassistant import HomeAssistantClient
 
 log = logging.getLogger(__name__)
 
 ENTITY_PERMITTED = "input_text.whatsapp_bot_permitidos"
+
+_pending_unlock: dict[str, "PendingUnlock"] = {}
+
+
+@dataclass
+class PendingUnlock:
+    entity_id: str
+    domain: str
+    service: str
+    service_data: dict[str, Any]
 
 
 def normalize_phone_digits(value: str) -> str:
@@ -38,8 +52,6 @@ def parse_allowed_numbers(raw: str) -> set[str]:
 
 
 def normalize_evolution_payload(payload: dict[str, Any]) -> list[tuple[str | None, dict[str, Any]]]:
-    """Retorna lista (instance_opcional, registro_msg)."""
-
     root_instance = payload.get("instance") or payload.get("instanceName")
     records: list[tuple[str | None, dict[str, Any]]] = []
 
@@ -102,8 +114,6 @@ def extract_text_and_sender(record: dict[str, Any]) -> tuple[str | None, str | N
 
 
 def build_entities_context(states: list[dict[str, Any]]) -> tuple[str, int]:
-    """Limita tamanho do contexto por seguranca/memoria."""
-
     max_chars = int(os.environ.get("ENTITY_CONTEXT_MAX_CHARS", "120000"))
     lines: list[str] = []
     for s in sorted(states, key=lambda x: x.get("entity_id", "")):
@@ -136,12 +146,94 @@ def _truncate_whatsapp(text: str, limit: int = 3800) -> str:
     return text[: limit - 3] + "..."
 
 
+def extract_target_entity_id(
+    domain: str,
+    service: str,
+    service_data: dict[str, Any] | None,
+    decision_entity_id: Any = None,
+) -> str | None:
+    if isinstance(decision_entity_id, str) and decision_entity_id.strip():
+        return decision_entity_id.strip()
+    if not service_data:
+        return None
+    eid = service_data.get("entity_id")
+    if isinstance(eid, str) and eid.strip():
+        return eid.strip()
+    if isinstance(eid, list) and eid:
+        return str(eid[0]).strip()
+    return None
+
+
+def _extract_password_from_message(user_text: str, decision: dict[str, Any]) -> str | None:
+    pwd = decision.get("provided_password")
+    if isinstance(pwd, str) and pwd.strip():
+        return pwd.strip()
+    text = user_text.strip()
+    if re.fullmatch(r"\d{4,8}", text):
+        return text
+    return None
+
+
+async def _execute_unlock_pending(
+    phone: str,
+    pending: PendingUnlock,
+    *,
+    ha: HomeAssistantClient,
+) -> str:
+    try:
+        await ha.call_service(pending.domain, pending.service, pending.service_data)
+        _pending_unlock.pop(phone, None)
+        return "Porta destrancada com sucesso."
+    except httpx.HTTPStatusError as e:
+        log.warning("Erro HA unlock: %s", e.response.text[:500])
+        return f"Nao foi possivel destrancar: {e.response.status_code}"
+
+
+async def try_handle_pending_password(
+    phone: str,
+    user_text: str,
+    *,
+    ha: HomeAssistantClient,
+    catalog: DevicesCatalog,
+) -> str | None:
+    """Se ha destrancar pendente, tenta validar senha. Retorna resposta ou None."""
+    pending = _pending_unlock.get(phone)
+    if not pending:
+        return None
+
+    candidate = user_text.strip()
+    if not catalog.verify_password(pending.entity_id, candidate):
+        return "Senha incorreta. Tente novamente ou cancele enviando outro comando."
+
+    return await _execute_unlock_pending(phone, pending, ha=ha)
+
+
+def build_gemini_assistant(settings: AppSettings, catalog: DevicesCatalog) -> GeminiAssistant:
+    model_name = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
+    cache_name = None
+    if settings.gemini_api_key:
+        cache_name = ensure_catalog_cache(
+            api_key=settings.gemini_api_key,
+            model=model_name,
+            catalog=catalog,
+            ttl_hours=settings.gemini_cache_ttl_hours,
+        )
+    return GeminiAssistant(
+        settings.gemini_api_key,
+        model=model_name,
+        cache_name=cache_name,
+        catalog_fallback=catalog.build_catalog_context(),
+    )
+
+
 async def execute_decision(
     decision: dict[str, Any],
     *,
     ha: HomeAssistantClient,
+    catalog: DevicesCatalog,
+    phone: str,
+    user_text: str,
     entities_context_used: bool,
-    _states_snapshot: list[dict[str, Any]],
 ) -> str:
     action = str(decision.get("action") or "reply").lower()
     reply = str(decision.get("response") or "").strip()
@@ -178,12 +270,41 @@ async def execute_decision(
             return await finalize("Comando incompleto (domain/service).")
         if svc_data is not None and not isinstance(svc_data, dict):
             return await finalize("service_data invalido.")
-        try:
-            result = await ha.call_service(
-                domain.strip(),
-                service.strip(),
-                svc_data if isinstance(svc_data, dict) else None,
+
+        domain = domain.strip()
+        service = service.strip()
+        svc_data = dict(svc_data) if isinstance(svc_data, dict) else {}
+
+        target = extract_target_entity_id(domain, service, svc_data, decision.get("entity_id"))
+        if not target:
+            return await finalize("Informe entity_id no comando.")
+
+        allowed = catalog.actionable_entity_ids()
+        if not allowed:
+            return "Nenhum dispositivo configurado para acoes. Edite /config/shakira_devices.yaml."
+        if target not in allowed:
+            return (
+                f"Nao posso alterar `{target}`. "
+                "So posso agir nas entidades marcadas como acionaveis no catalogo."
             )
+
+        if catalog.service_requires_password(target, service):
+            password = _extract_password_from_message(user_text, decision)
+            if not password or not catalog.verify_password(target, password):
+                _pending_unlock[phone] = PendingUnlock(
+                    entity_id=target,
+                    domain=domain,
+                    service=service,
+                    service_data=svc_data,
+                )
+                prompt = catalog.password_prompt_for(target)
+                if reply:
+                    return f"{reply}\n\n{prompt}"
+                return prompt
+
+        try:
+            result = await ha.call_service(domain, service, svc_data or None)
+            _pending_unlock.pop(phone, None)
             extra = ""
             if isinstance(result, dict) and result.get("service_response"):
                 extra = str(result["service_response"])[:1500]
@@ -209,6 +330,7 @@ async def handle_evolution_payload(
         log.warning("Chave Gemini ausente nas opcoes do add-on")
         return
 
+    catalog = DevicesCatalog.load(settings.devices_config_path)
     permitted_raw = await fetch_permitted_phones_raw(ha)
     permitted = parse_allowed_numbers(permitted_raw)
     evo_base = settings.evolution_base_url.strip()
@@ -220,8 +342,7 @@ async def handle_evolution_payload(
     if not evo_base or not evo_key:
         log.warning("Evolution URL ou api key ausentes nas opcoes do add-on")
 
-    model_name = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
-    assistant = GeminiAssistant(gemini_key, model=model_name)
+    assistant = build_gemini_assistant(settings, catalog)
 
     normalized = normalize_evolution_payload(payload)
     webhook_instance = payload.get("instance") or payload.get("instanceName") or ""
@@ -235,6 +356,26 @@ async def handle_evolution_payload(
 
         if not permitted or phone_norm not in permitted:
             log.info("Telefone nao autorizado: %s", phone_norm)
+            continue
+
+        pending_reply = await try_handle_pending_password(
+            phone_norm,
+            user_text or "",
+            ha=ha,
+            catalog=catalog,
+        )
+        if pending_reply is not None:
+            reply_text = _truncate_whatsapp(pending_reply)
+            hint = _inst_hint if isinstance(_inst_hint, str) and _inst_hint.strip() else ""
+            send_instance = (hint or str(webhook_instance) or default_inst or settings.evolution_instance).strip()
+            if evo_base and evo_key and send_instance:
+                await evo.send_text(
+                    base_url=evo_base,
+                    api_key=evo_key,
+                    instance=send_instance,
+                    number=phone_norm,
+                    text=reply_text,
+                )
             continue
 
         states = await ha.get_states()
@@ -257,8 +398,10 @@ async def handle_evolution_payload(
         reply_text = await execute_decision(
             decision,
             ha=ha,
+            catalog=catalog,
+            phone=phone_norm,
+            user_text=user_text or "",
             entities_context_used=True,
-            _states_snapshot=states,
         )
 
         reply_text = _truncate_whatsapp(reply_text)

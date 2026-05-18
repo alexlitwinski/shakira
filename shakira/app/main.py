@@ -40,6 +40,7 @@ async def lifespan(app: FastAPI):
     app.state.http = client
     app.state.ha = HomeAssistantClient(settings, client)
     app.state.evo = EvolutionClient(client)
+    app.state.settings = settings
 
     yield
 
