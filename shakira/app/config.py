@@ -54,6 +54,7 @@ class AppSettings:
     photoprism_url: str
     photoprism_token: str
     photoprism_max_photos: int
+    photoprism_api_prefix: str
 
     @classmethod
     def load(cls) -> AppSettings:
@@ -92,6 +93,7 @@ class AppSettings:
             photoprism_url=_opts_str(opts, "photoprism_url", "PHOTOPRISM_URL").rstrip("/"),
             photoprism_token=_opts_str(opts, "photoprism_token", "PHOTOPRISM_TOKEN"),
             photoprism_max_photos=min(10, max(1, _opts_int(opts, "photoprism_max_photos", 10))),
+            photoprism_api_prefix=_opts_str(opts, "photoprism_api_prefix", "PHOTOPRISM_API_PREFIX"),
         )
 
     @property

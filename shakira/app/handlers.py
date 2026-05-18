@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import re
@@ -171,6 +172,52 @@ def extract_target_entity_id(
     return None
 
 
+def _log_service_payload(label: str, payload: dict[str, Any]) -> None:
+    safe = dict(payload)
+    if "code" in safe:
+        safe["code"] = "***"
+    log.info("%s payload=%s", label, safe)
+
+
+def _log_gemini_decision(phone: str, decision: dict[str, Any]) -> None:
+    safe = dict(decision)
+    if safe.get("provided_password"):
+        safe["provided_password"] = "***"
+    try:
+        text = json.dumps(safe, ensure_ascii=False)
+    except (TypeError, ValueError):
+        text = repr(safe)
+    log.info("Gemini decisao phone=%s: %s", phone, text[:1000])
+
+
+def build_ha_service_data(
+    domain: str,
+    service: str,
+    entity_id: str,
+    raw: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Monta payload aceito pela API REST do HA (evita campos extras do JSON do Gemini)."""
+    data: dict[str, Any] = {"entity_id": entity_id}
+    if not raw:
+        return data
+    # PIN da integracao lock no HA (diferente da senha Shakira no catalogo)
+    if domain == "lock" and service in ("unlock", "lock", "open"):
+        code = raw.get("code")
+        if isinstance(code, str) and code.strip():
+            data["code"] = code.strip()
+    return data
+
+
+def _ha_error_detail(exc: httpx.HTTPStatusError) -> str:
+    try:
+        body = exc.response.text.strip()
+        if body:
+            return body[:300]
+    except Exception:
+        pass
+    return str(exc.response.status_code)
+
+
 def _extract_password_from_message(user_text: str, decision: dict[str, Any]) -> str | None:
     pwd = decision.get("provided_password")
     if isinstance(pwd, str) and pwd.strip():
@@ -187,13 +234,28 @@ async def _execute_unlock_pending(
     *,
     ha: HomeAssistantClient,
 ) -> str:
+    log.info(
+        "Executando unlock pendente phone=%s entity=%s %s/%s",
+        phone,
+        pending.entity_id,
+        pending.domain,
+        pending.service,
+    )
+    _log_service_payload("unlock pendente", pending.service_data)
     try:
         await ha.call_service(pending.domain, pending.service, pending.service_data)
         _pending_unlock.pop(phone, None)
+        log.info("Unlock OK phone=%s entity=%s", phone, pending.entity_id)
         return "Porta destrancada com sucesso."
     except httpx.HTTPStatusError as e:
-        log.warning("Erro HA unlock: %s", e.response.text[:500])
-        return f"Nao foi possivel destrancar: {e.response.status_code}"
+        log.warning(
+            "Unlock falhou phone=%s entity=%s status=%s body=%s",
+            phone,
+            pending.entity_id,
+            e.response.status_code,
+            e.response.text[:500],
+        )
+        return f"Nao foi possivel destrancar: {_ha_error_detail(e)}"
 
 
 async def try_handle_pending_password(
@@ -208,10 +270,19 @@ async def try_handle_pending_password(
     if not pending:
         return None
 
+    log.info(
+        "Senha pendente phone=%s entity=%s servico=%s/%s",
+        phone,
+        pending.entity_id,
+        pending.domain,
+        pending.service,
+    )
     candidate = user_text.strip()
     if not catalog.verify_password(pending.entity_id, candidate):
+        log.info("Senha incorreta phone=%s entity=%s (len=%s)", phone, pending.entity_id, len(candidate))
         return "Senha incorreta. Tente novamente ou cancele enviando outro comando."
 
+    log.info("Senha OK phone=%s entity=%s, executando unlock", phone, pending.entity_id)
     return await _execute_unlock_pending(phone, pending, ha=ha)
 
 
@@ -247,6 +318,7 @@ async def execute_decision(
 ) -> str:
     action = str(decision.get("action") or "reply").lower()
     reply = str(decision.get("response") or "").strip()
+    log.info("execute_decision phone=%s action=%s", phone, action)
 
     async def finalize(extra: str) -> str:
         base = reply or ""
@@ -283,11 +355,20 @@ async def execute_decision(
 
         domain = domain.strip()
         service = service.strip()
-        svc_data = dict(svc_data) if isinstance(svc_data, dict) else {}
+        raw_svc_data = dict(svc_data) if isinstance(svc_data, dict) else {}
 
-        target = extract_target_entity_id(domain, service, svc_data, decision.get("entity_id"))
+        target = extract_target_entity_id(domain, service, raw_svc_data, decision.get("entity_id"))
         if not target:
             return await finalize("Informe entity_id no comando.")
+
+        svc_data = build_ha_service_data(domain, service, target, raw_svc_data)
+        if raw_svc_data != svc_data:
+            log.info(
+                "service_data normalizado entity=%s raw=%s -> ha=%s",
+                target,
+                raw_svc_data,
+                svc_data,
+            )
 
         allowed = catalog.actionable_entity_ids()
         if not allowed:
@@ -300,21 +381,35 @@ async def execute_decision(
 
         if catalog.service_requires_password(target, service):
             password = _extract_password_from_message(user_text, decision)
-            if not password or not catalog.verify_password(target, password):
+            has_pwd = bool(password)
+            pwd_ok = bool(password and catalog.verify_password(target, password))
+            log.info(
+                "Seguranca entity=%s servico=%s tem_senha=%s senha_ok=%s provided_password=%s",
+                target,
+                service,
+                has_pwd,
+                pwd_ok,
+                bool(decision.get("provided_password")),
+            )
+            if not password or not pwd_ok:
                 _pending_unlock[phone] = PendingUnlock(
                     entity_id=target,
                     domain=domain,
                     service=service,
                     service_data=svc_data,
                 )
+                log.info("Unlock pendente registrado phone=%s entity=%s", phone, target)
                 prompt = catalog.password_prompt_for(target)
                 if reply:
                     return f"{reply}\n\n{prompt}"
                 return prompt
 
+        log.info("Chamando HA phone=%s %s/%s entity=%s", phone, domain, service, target)
+        _log_service_payload("call_service", svc_data)
         try:
             result = await ha.call_service(domain, service, svc_data or None)
             _pending_unlock.pop(phone, None)
+            log.info("HA call_service OK phone=%s %s/%s entity=%s", phone, domain, service, target)
             extra = ""
             if isinstance(result, dict) and result.get("service_response"):
                 extra = str(result["service_response"])[:1500]
@@ -322,8 +417,17 @@ async def execute_decision(
                 extra = str(result)[:1500]
             return await finalize(extra if extra else "")
         except httpx.HTTPStatusError as e:
-            log.warning("Erro HA service: %s", e.response.text[:500])
-            return await finalize(f"Erro ao executar: {e.response.status_code}")
+            log.warning(
+                "HA call_service falhou phone=%s %s/%s entity=%s status=%s body=%s payload=%s",
+                phone,
+                domain,
+                service,
+                target,
+                e.response.status_code,
+                e.response.text[:500],
+                svc_data,
+            )
+            return await finalize(f"Erro ao executar: {_ha_error_detail(e)}")
 
     if action == "search_photos":
         return await finalize(
@@ -427,6 +531,14 @@ async def handle_search_photos(
         http,
         base_url=settings.photoprism_url,
         token=settings.photoprism_token,
+        api_prefix=settings.photoprism_api_prefix,
+    )
+    log.info(
+        "PhotoPrism busca: url=%s api_base=%s count=%s filters=%s",
+        settings.photoprism_url,
+        pp.api_base,
+        count,
+        filters,
     )
 
     try:
@@ -438,9 +550,14 @@ async def handle_search_photos(
         )
         return
     except PhotoprismError as e:
-        msg = (intro + f"\n\nNao consegui buscar fotos: {e}").strip()
+        log.error("PhotoPrism falhou: %s", e, exc_info=True)
+        extra = ""
+        diag = getattr(e, "diagnostic", None) or {}
+        if isinstance(diag, dict) and diag.get("hints"):
+            extra = f"\n\nDica: {diag['hints'][0]}"
+        msg = (intro + f"\n\nNao consegui buscar fotos: {e}{extra}").strip()
         await evo.send_text(
-            base_url=evo_base, api_key=evo_key, instance=instance, number=phone, text=msg
+            base_url=evo_base, api_key=evo_key, instance=instance, number=phone, text=_truncate_whatsapp(msg)
         )
         return
 
@@ -558,6 +675,7 @@ async def handle_evolution_payload(
             catalog=catalog,
         )
         if pending_reply is not None:
+            log.info("Resposta senha pendente phone=%s: %s", phone_norm, pending_reply[:120])
             reply_text = _truncate_whatsapp(pending_reply)
             hint = _inst_hint if isinstance(_inst_hint, str) and _inst_hint.strip() else ""
             send_instance = (hint or str(webhook_instance) or default_inst or settings.evolution_instance).strip()
@@ -583,7 +701,14 @@ async def handle_evolution_payload(
             total,
         )
 
-        history_text = format_for_prompt(get_recent(phone_norm))
+        history_entries = get_recent(phone_norm)
+        history_text = format_for_prompt(history_entries)
+        log.info(
+            "Historico phone=%s mensagens=%s chars=%s",
+            phone_norm,
+            len(history_entries),
+            len(history_text),
+        )
 
         decision = await asyncio.to_thread(
             assistant.decide,
@@ -591,6 +716,7 @@ async def handle_evolution_payload(
             entities_context=ctx,
             conversation_history=history_text,
         )
+        _log_gemini_decision(phone_norm, decision)
 
         hint = _inst_hint if isinstance(_inst_hint, str) and _inst_hint.strip() else ""
         action = str(decision.get("action") or "reply").lower()

@@ -1,6 +1,6 @@
 name: Shakira - Assistente WhatsApp
 description: Assistente pessoal via WhatsApp para Home Assistant (Evolution API + Gemini)
-version: "1.1.0"
+version: "1.1.1"
 slug: shakira
 init: false
 arch:
@@ -29,6 +29,7 @@ options:
   photoprism_url: ""
   photoprism_token: ""
   photoprism_max_photos: 10
+  photoprism_api_prefix: ""
 schema:
   ha_url: url
   homeassistant_long_lived_token: password?
@@ -41,3 +42,4 @@ schema:
   photoprism_url: str?
   photoprism_token: password?
   photoprism_max_photos: int(1,10)?
+  photoprism_api_prefix: str?

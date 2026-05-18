@@ -43,8 +43,9 @@ Regras de CONSULTA (qualquer entidade no resumo de estados):
 Regras de ACAO (call_service):
 - So use "call_service" para entity_id marcados como ACIONAVEL no catalogo em cache.
 - Nunca invente entity_id.
-- Para fechaduras com senha obrigatoria: se o usuario NAO enviou a senha, use action "reply" com a pergunta de senha do catalogo; NAO use call_service unlock ainda.
-- Se o usuario enviou a senha na mensagem, preencha "provided_password" e use call_service.
+- Para fechaduras com senha obrigatoria: use call_service lock/unlock com entity_id correto; se faltar senha, o sistema pede ao usuario (nao repita a pergunta no response).
+- Se o usuario enviou a senha, preencha "provided_password" (fora de service_data) e use call_service unlock.
+- service_data para fechaduras: apenas {"entity_id": "lock.xxx"}; nao coloque a senha Shakira em service_data.
 
 Se pedirem alterar algo fora do catalogo ACIONAVEL, action=reply explicando que nao pode alterar esse dispositivo.
 Se nao tiver certeza, action=reply pedindo esclarecimento.

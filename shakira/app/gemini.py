@@ -98,6 +98,8 @@ Mensagem atual do usuario:
             data = json.loads(raw)
             if not isinstance(data, dict):
                 raise ValueError("not a dict")
+            action = str(data.get("action") or "reply")
+            log.info("Gemini JSON action=%s entity_id=%s domain=%s service=%s", action, data.get("entity_id"), data.get("domain"), data.get("service"))
             return data
         except (json.JSONDecodeError, ValueError):
             log.warning("Resposta Gemini nao-JSON: %s", raw[:300])

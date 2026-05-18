@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from contextlib import asynccontextmanager
 from typing import Any
 
@@ -16,12 +17,17 @@ from app.evolution import EvolutionClient
 from app.gemini_cache import ensure_catalog_cache
 from app.handlers import handle_evolution_payload
 from app.homeassistant import HomeAssistantClient
+from app.photoprism import PhotoprismClient
+
+_log_level_name = os.environ.get("SHAKIRA_LOG_LEVEL", "INFO").upper()
+_log_level = getattr(logging, _log_level_name, logging.INFO)
 
 logging.basicConfig(
-    level=logging.INFO,
+    level=_log_level,
     format="%(asctime)s %(levelname)s %(name)s %(message)s",
 )
 log = logging.getLogger("shakira")
+log.info("Nivel de log: %s", logging.getLevelName(_log_level))
 
 
 @asynccontextmanager
@@ -86,8 +92,8 @@ async def status(request: Request) -> dict[str, Any]:
     resolved = catalog.source_path
     exists = bool(resolved and resolved.is_file())
     actionable = sorted(catalog.actionable_entity_ids())
-    return {
-        "version": "1.1.0",
+    out: dict[str, Any] = {
+        "version": "1.1.1",
         "devices_config_path": path,
         "file_exists": exists,
         "resolved_path": str(resolved) if resolved else None,
@@ -98,8 +104,22 @@ async def status(request: Request) -> dict[str, Any]:
             settings.photoprism_url.strip() and settings.photoprism_token.strip()
         ),
         "photoprism_url": settings.photoprism_url or None,
+        "photoprism_api_prefix": settings.photoprism_api_prefix or None,
         "photoprism_max_photos": settings.photoprism_max_photos,
     }
+    if settings.photoprism_url.strip() and settings.photoprism_token.strip():
+        http: httpx.AsyncClient = request.app.state.http
+        pp = PhotoprismClient(
+            http,
+            base_url=settings.photoprism_url,
+            token=settings.photoprism_token,
+            api_prefix=settings.photoprism_api_prefix,
+        )
+        try:
+            out["photoprism_probe"] = await pp.probe()
+        except Exception as e:
+            out["photoprism_probe"] = {"summary": "error", "error": str(e)}
+    return out
 
 
 async def _run_webhook(
