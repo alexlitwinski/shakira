@@ -1,78 +1,88 @@
 # Shakira — Assistente WhatsApp para Home Assistant
 
-Add-on que recebe webhooks da **Evolution API**, valida números em `input_text.whatsapp_bot_permitidos`, consulta todas as entidades via API do Home Assistant e usa o **Gemini** para decidir comandos ou respostas.
+Add-on que recebe webhooks da **Evolution API**, valida números vindos apenas de `input_text.whatsapp_bot_permitidos`, consulta entidades pela API REST do Home Assistant e usa o **Gemini** (chave configurada no add-on) para comandos ou respostas.
 
-## Layout do repositório (obrigatório para a loja do HA)
+## Layout do repositório (Home Assistant Supervisor)
 
-O Home Assistant só aceita repositórios em que **cada add-on é uma subpasta** com `config.yaml` e `Dockerfile` dentro — não na raiz do GitHub.
+Cada **app** deve estar numa subpasta. Os ficheiros do add-on ficam em [`shakira/`](shakira/).
 
-Este repo está assim:
+Na loja utilize: **`https://github.com/alexlitwinski/shakira`**
 
-- [`repository.yaml`](repository.yaml) — metadados do repositório (opcional mas recomendado)
-- **`shakira/`** — pasta do add-on (nome alinhado ao `slug` em `config.yaml`)
-  - código Python em `shakira/app/`, Docker, etc.
+### Build da imagem (Supervisor ≥ 2026.04)
 
-Ao adicionar a loja, use apenas: **`https://github.com/alexlitwinski/shakira`** (sem subpath).
+Usa **`FROM ghcr.io/home-assistant/base:latest`** (sem `build.yaml`). O erro `amd64-base-python:3.12: not found` vinha das imagens Python antigas; o fluxo atual instala Python 3 na base Alpine oficial.
 
-## Entidades obrigatórias no HA
+---
+
+## Opções do add-on (Configuração)
+
+| Opção | Descrição |
+|-------|-----------|
+| **ha_url** | URL da API Core (HA OS: `http://supervisor/core`). |
+| **evolution_base_url** | URL base da Evolution (ex: `http://192.168.1.50:8080`), sem `/` final. |
+| **evolution_api_key** | Cabeçalho `apikey` da Evolution. |
+| **gemini_api_key** | Chave da API Google AI (Gemini). |
+| **evolution_instance** | Nome da instância Evolution (opcional se o webhook já enviar `instance`). |
+
+Variáveis de ambiente opcionais (dev): `HA_URL`, `HOMEASSISTANT_TOKEN`, `EVOLUTION_BASE_URL`, `EVOLUTION_API_KEY`, `GEMINI_API_KEY`, `EVOLUTION_INSTANCE`.
+
+---
+
+## Só obtido das entidades do HA
 
 | Entidade | Conteúdo |
 |----------|----------|
-| `input_text.whatsapp_bot_permitidos` | Números só com dígitos, separados por vírgula (ex: `553191119016,553198946418`). |
-| `input_text.integracao_evolution` | URL base da Evolution (ex: `http://evo:8080`). Opcional: `URL|nome_instancia` se a instância não vier no webhook. |
-| `input_text.api_key_evolution` | Chave `apikey` da Evolution. |
-| `input_text.api_key_gemini` | API key do Google AI Studio para o Gemini. |
+| `input_text.whatsapp_bot_permitidos` | Telefones **só com dígitos**, separados por vírgula (ex: `553191119016,553198946418`). |
 
-## Opções do add-on
+Chaves Gemini/Evolution **não** são mais lidas de `input_text`.
 
-- **ha_url**: em instalações normais Supervisor, usar `http://supervisor/core` (padrão).
-- **evolution_instance**: nome da instância Evolution, se não estiver codificado como `URL|instancia` em `input_text.integracao_evolution` nem no campo `instance` do webhook.
+---
 
 ## Evolution — Webhook
 
-Configure o webhook da instância para **POST**:
+**POST** `http://<IP_HOME_ASSISTANT>:8099/webhook`
 
-`http://<IP_HOME_ASSISTANT>:8099/webhook`
+Incluir eventos do tipo **`messages.upsert`** (nome do evento que contenha `UPSERT`).
 
-Eventos: inclua **`messages.upsert`** (ou equivalente que contenha “UPSERT” no nome).
+---
 
-## Variáveis de ambiente opcionais (teste local)
+## Variáveis de ambiente opcionais
 
-- `HA_URL`: URL da API do HA (ex: `http://localhost:8123`).
-- `HOMEASSISTANT_TOKEN`: Long-Lived Access Token (substitui o `SUPERVISOR_TOKEN` fora do add-on).
-- `OPTIONS_PATH`: caminho para um `options.json` de desenvolvimento.
-- `GEMINI_MODEL`: modelo Gemini (padrão `gemini-2.0-flash`).
-- `ENTITY_CONTEXT_MAX_CHARS`: limite do resumo enviado ao modelo (padrão `120000`).
+| Variável | Efeito |
+|----------|--------|
+| `GEMINI_MODEL` | Modelo Gemini (pré-definido `gemini-2.0-flash`). |
+| `ENTITY_CONTEXT_MAX_CHARS` | Limite do resumo das entidades (pré-definido `120000`). |
 
-## Execução local (desenvolvimento)
+---
 
-A partir da pasta do add-on:
+## Execução local (`shakira/app`)
 
 ```bash
 cd shakira
 pip install -r requirements.txt
 set HA_URL=http://localhost:8123
 set HOMEASSISTANT_TOKEN=seu_token
+set GEMINI_API_KEY=...
+set EVOLUTION_BASE_URL=...
+set EVOLUTION_API_KEY=...
 python -m uvicorn app.main:app --host 0.0.0.0 --port 8099
 ```
 
-## Instalação como repositório de add-ons
+(Linux/macOS substitua `set` por `export`.)
 
-1. Confirme que o repositório GitHub está **público** (a loja clona por HTTPS sem credenciais).
-2. Em **Settings → Add-ons → Add-on store → ⋮ → Repositories**, adicione **`https://github.com/alexlitwinski/shakira`**.
-3. Procure pelo add-on **Shakira** e instale.
-4. Configure as entidades `input_text` e o webhook na Evolution.
+---
 
-### Erro «not a valid add-on repository»
+## Instalação
 
-Quase sempre significa estrutura errada na raiz. Tem de existir uma subpasta (aqui **`shakira/`**) contendo pelo menos **`config.yaml`** e **`Dockerfile`**.
+1. Repo **GitHub público**.
+2. **Add-on Store** → **Repositories** → `https://github.com/alexlitwinski/shakira`.
+3. Instalar **Shakira**, preencher opções Evolution + Gemini e reiniciar.
+4. Garantir a entidade `input_text.whatsapp_bot_permitidos` e configurar o webhook na Evolution.
 
-### Erro ao clonar (pedir usuário/password)
-
-Repositório **privado** — torne público ou use instalação local copiando a pasta `shakira/` para `/addons`.
+---
 
 ## Observações
 
-- O filtro `/webhook` ignora eventos que não contenham **`UPSERT`** no nome.
-- Conversas em **grupo** são ignoradas; apenas chats privados.
-- Lista grande de entidades pode ser truncada pelo limite de caracteres (configurável).
+- Filtro `/webhook`: só processa payloads cujo campo `event` contenha **`UPSERT`** (ou está vazio).
+- Grupos `@g.us` são ignorados.
+- Listas grandes de entidades podem ser truncadas.

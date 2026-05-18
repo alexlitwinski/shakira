@@ -17,9 +17,6 @@ from app.homeassistant import HomeAssistantClient
 log = logging.getLogger(__name__)
 
 ENTITY_PERMITTED = "input_text.whatsapp_bot_permitidos"
-ENTITY_EVOLUTION_URL = "input_text.integracao_evolution"
-ENTITY_EVOLUTION_KEY = "input_text.api_key_evolution"
-ENTITY_GEMINI_KEY = "input_text.api_key_gemini"
 
 
 def normalize_phone_digits(value: str) -> str:
@@ -38,20 +35,6 @@ def parse_allowed_numbers(raw: str) -> set[str]:
         if d:
             out.add(d)
     return out
-
-
-def parse_evolution_base_and_instance(raw: str, addon_instance: str) -> tuple[str, str]:
-    """Aceita BASE, BASE|instancia."""
-    text = (raw or "").strip()
-    instance = addon_instance.strip()
-    base = text
-    if "|" in text:
-        base, sep, rest = text.partition("|")
-        rest = rest.strip()
-        if rest:
-            instance = instance or rest
-    base = base.rstrip("/").strip()
-    return base, instance
 
 
 def normalize_evolution_payload(payload: dict[str, Any]) -> list[tuple[str | None, dict[str, Any]]]:
@@ -140,37 +123,11 @@ def build_entities_context(states: list[dict[str, Any]]) -> tuple[str, int]:
     return truncated + note, total
 
 
-async def load_bot_config_from_ha(ha: HomeAssistantClient, settings: AppSettings) -> dict[str, str]:
-    permitted = ""
-    evolution_raw = ""
-    evo_key = ""
-    gemini_key = ""
-
+async def fetch_permitted_phones_raw(ha: HomeAssistantClient) -> str:
     s = await ha.get_state(ENTITY_PERMITTED)
     if s and isinstance(s.get("state"), str):
-        permitted = s["state"]
-
-    s = await ha.get_state(ENTITY_EVOLUTION_URL)
-    if s and isinstance(s.get("state"), str):
-        evolution_raw = s["state"]
-
-    s = await ha.get_state(ENTITY_EVOLUTION_KEY)
-    if s and isinstance(s.get("state"), str):
-        evo_key = s["state"]
-
-    s = await ha.get_state(ENTITY_GEMINI_KEY)
-    if s and isinstance(s.get("state"), str):
-        gemini_key = s["state"]
-
-    base_url, instance = parse_evolution_base_and_instance(evolution_raw, settings.evolution_instance_addon)
-
-    return {
-        "permitted": permitted,
-        "evo_base_url": base_url,
-        "evo_instance": instance,
-        "evo_key": evo_key,
-        "gemini_key": gemini_key.strip(),
-    }
+        return s["state"]
+    return ""
 
 
 def _truncate_whatsapp(text: str, limit: int = 3800) -> str:
@@ -247,22 +204,21 @@ async def handle_evolution_payload(
     evo: EvolutionClient,
     settings: AppSettings,
 ) -> None:
-    cf = await load_bot_config_from_ha(ha, settings)
-
-    gemini_key = cf.get("gemini_key") or ""
+    gemini_key = settings.gemini_api_key.strip()
     if not gemini_key:
-        log.warning("Chave Gemini ausente (%s)", ENTITY_GEMINI_KEY)
+        log.warning("Chave Gemini ausente nas opcoes do add-on")
         return
 
-    permitted = parse_allowed_numbers(cf.get("permitted") or "")
-    evo_base = (cf.get("evo_base_url") or "").strip()
-    evo_key = (cf.get("evo_key") or "").strip()
-    default_inst = (cf.get("evo_instance") or "").strip()
+    permitted_raw = await fetch_permitted_phones_raw(ha)
+    permitted = parse_allowed_numbers(permitted_raw)
+    evo_base = settings.evolution_base_url.strip()
+    evo_key = settings.evolution_api_key.strip()
+    default_inst = settings.evolution_instance.strip()
 
     if not permitted:
         log.warning("Nenhum numero permitido em %s", ENTITY_PERMITTED)
     if not evo_base or not evo_key:
-        log.warning("Evolution URL ou api key ausentes (input_text)")
+        log.warning("Evolution URL ou api key ausentes nas opcoes do add-on")
 
     model_name = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
     assistant = GeminiAssistant(gemini_key, model=model_name)
@@ -308,7 +264,7 @@ async def handle_evolution_payload(
         reply_text = _truncate_whatsapp(reply_text)
 
         hint = _inst_hint if isinstance(_inst_hint, str) and _inst_hint.strip() else ""
-        send_instance = (hint or str(webhook_instance) or default_inst or settings.evolution_instance_addon).strip()
+        send_instance = (hint or str(webhook_instance) or default_inst or settings.evolution_instance).strip()
 
         if not phone_norm or not reply_text.strip():
             continue

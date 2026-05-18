@@ -18,13 +18,25 @@ def load_addon_options() -> dict:
     return {}
 
 
+def _opts_str(opts: dict, key: str, env_fallback: str) -> str:
+    v = opts.get(key)
+    if isinstance(v, str):
+        raw = v.strip()
+        if raw:
+            return raw
+    return os.environ.get(env_fallback, "").strip()
+
+
 @dataclass
 class AppSettings:
     """Configuracao em runtime."""
 
     supervisor_token: str
     ha_url: str
-    evolution_instance_addon: str
+    evolution_base_url: str
+    evolution_api_key: str
+    gemini_api_key: str
+    evolution_instance: str
 
     @classmethod
     def load(cls) -> AppSettings:
@@ -40,12 +52,14 @@ class AppSettings:
             or opts.get("ha_url")
             or "http://supervisor/core"
         )
-        ev_instance = opts.get("evolution_instance") or os.environ.get("EVOLUTION_INSTANCE") or ""
 
         return cls(
             supervisor_token=token.strip(),
-            ha_url=ha_url.rstrip("/"),
-            evolution_instance_addon=ev_instance.strip(),
+            ha_url=str(ha_url).rstrip("/"),
+            evolution_base_url=_opts_str(opts, "evolution_base_url", "EVOLUTION_BASE_URL").rstrip("/"),
+            evolution_api_key=_opts_str(opts, "evolution_api_key", "EVOLUTION_API_KEY"),
+            gemini_api_key=_opts_str(opts, "gemini_api_key", "GEMINI_API_KEY"),
+            evolution_instance=_opts_str(opts, "evolution_instance", "EVOLUTION_INSTANCE"),
         )
 
     @property
