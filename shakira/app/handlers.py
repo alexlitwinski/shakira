@@ -1542,6 +1542,8 @@ async def execute_decision(
     async def finalize(extra: str) -> str:
         base = polish_user_message(reply)
         extra_clean = polish_user_message(extra)
+        if extra_clean and base and extra_clean == base:
+            extra_clean = ""
         msg = (base + ("\n\n" + extra_clean if extra_clean else "")).strip()
         out = msg or extra_clean or "Feito."
         if messenger:
@@ -1550,11 +1552,20 @@ async def execute_decision(
             return ""
         return out
 
+    _NO_EARLY_REPLY_ACTIONS = frozenset(
+        {
+            "reply",
+            "list_entities",
+            "schedule_response",
+            "schedule_action",
+            "cancel_scheduled_response",
+        }
+    )
     if (
         messenger
         and reply
         and not _is_placeholder_scenario_response(reply)
-        and action not in ("reply", "list_entities")
+        and action not in _NO_EARLY_REPLY_ACTIONS
     ):
         await deliver(reply)
 

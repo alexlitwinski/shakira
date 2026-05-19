@@ -185,6 +185,53 @@ class AlertsRunner:
                 state,
                 sent,
             )
+            await self._schedule_recovery_notifications(alert, phones, state)
+
+    async def _schedule_recovery_notifications(
+        self,
+        alert: AlertConfig,
+        phones: list[str],
+        current_state: str,
+    ) -> None:
+        """Agenda resposta do agente quando a entidade voltar ao normal."""
+        if not alert.recovery_when_state or not alert.recovery_context:
+            return
+
+        from app.scheduled_responses import ensure_runner_started, get_scheduled_store
+
+        label = alert.recovery_label.strip() or f"alerta_{alert.id}_ok"
+        scheduled = 0
+        for phone in phones:
+            store = get_scheduled_store(phone)
+            if store.find_by_label(label):
+                continue
+            try:
+                store.add(
+                    context=alert.recovery_context,
+                    trigger_type="entity",
+                    label=label,
+                    entity_id=alert.entity_id,
+                    when_state=alert.recovery_when_state,
+                    trigger_on="enter",
+                    context_entities=[alert.entity_id],
+                    last_known_state=current_state,
+                )
+                scheduled += 1
+            except ValueError as e:
+                log.warning(
+                    "Alerta %s: nao agendou recuperacao phone=%s: %s",
+                    alert.id,
+                    phone,
+                    e,
+                )
+        if scheduled:
+            ensure_runner_started()
+            log.info(
+                "Alerta %s: %s resposta(s) agendada(s) para recuperacao (%s)",
+                alert.id,
+                scheduled,
+                alert.recovery_when_state,
+            )
 
     def status_snapshot(self) -> dict[str, Any]:
         now = time.monotonic()

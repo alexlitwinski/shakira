@@ -113,6 +113,9 @@ class AlertConfig:
     check_interval_seconds: int = DEFAULT_CHECK_INTERVAL_SECONDS
     cooldown_seconds: int = DEFAULT_COOLDOWN_SECONDS
     notify: AlertNotifyConfig = field(default_factory=AlertNotifyConfig)
+    recovery_when_state: str = ""
+    recovery_context: str = ""
+    recovery_label: str = ""
 
 
 @dataclass
@@ -211,6 +214,9 @@ class AlertsCatalog:
             check_interval_seconds=interval,
             cooldown_seconds=cooldown,
             notify=AlertNotifyConfig(phones=phones),
+            recovery_when_state=str(row.get("recovery_when_state") or "").strip(),
+            recovery_context=str(row.get("recovery_context") or "").strip(),
+            recovery_label=str(row.get("recovery_label") or "").strip(),
         )
 
     @classmethod
@@ -261,6 +267,9 @@ class AlertsCatalog:
             "cooldown",
             "cooldown_seconds",
             "notify",
+            "recovery_when_state",
+            "recovery_context",
+            "recovery_label",
         }
 
         for i, row in enumerate(data["alerts"]):
@@ -299,6 +308,23 @@ class AlertsCatalog:
             message = row.get("message")
             if not isinstance(message, str) or not message.strip():
                 errors.append(f"{path}: 'message' obrigatorio.")
+
+            recovery_when = row.get("recovery_when_state")
+            recovery_ctx = row.get("recovery_context")
+            has_recovery_when = isinstance(recovery_when, str) and recovery_when.strip()
+            has_recovery_ctx = isinstance(recovery_ctx, str) and recovery_ctx.strip()
+            if has_recovery_when and not has_recovery_ctx:
+                errors.append(
+                    f"{path}: 'recovery_context' obrigatorio quando 'recovery_when_state' esta definido."
+                )
+            if has_recovery_ctx and not has_recovery_when:
+                errors.append(
+                    f"{path}: 'recovery_when_state' obrigatorio quando 'recovery_context' esta definido."
+                )
+
+            recovery_label = row.get("recovery_label")
+            if recovery_label is not None and not isinstance(recovery_label, str):
+                errors.append(f"{path}: 'recovery_label' deve ser texto.")
 
             if "enabled" in row and not isinstance(row["enabled"], bool):
                 errors.append(f"{path}: 'enabled' deve ser true ou false.")

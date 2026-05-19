@@ -284,7 +284,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
           <button type="button" class="primary btn-save-yaml">Salvar</button>
           <button type="button" class="btn-reload-yaml">Recarregar do disco</button>
         </div>
-        <p class="meta">Verificacao periodica de entidades HA · aviso via WhatsApp · intervalo em 5m ou check_interval_seconds</p>
+        <p class="meta">Verificacao periodica · aviso via WhatsApp · recovery_* agenda resposta quando voltar ao normal</p>
       </div>
     </section>
 
