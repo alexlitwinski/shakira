@@ -29,15 +29,21 @@ def _opts_str(opts: dict, key: str, env_fallback: str) -> str:
     return os.environ.get(env_fallback, "").strip()
 
 
-def _opts_int(opts: dict, key: str, default: int) -> int:
+def _opts_int(
+    opts: dict, key: str, default: int, *, env_fallback: str | None = None
+) -> int:
     v = opts.get(key)
     if isinstance(v, int):
         return v
     if isinstance(v, str) and v.strip().isdigit():
         return int(v.strip())
-    env = os.environ.get(key.upper(), "")
-    if env.isdigit():
-        return int(env)
+    env_name = env_fallback or key.upper()
+    env = os.environ.get(env_name, "").strip()
+    if env:
+        try:
+            return int(float(env))
+        except ValueError:
+            pass
     return default
 
 
@@ -63,6 +69,7 @@ class AppSettings:
     evolution_instance: str
     devices_config_path: str
     gemini_cache_ttl_hours: int
+    ha_states_cache_sec: int
     photoprism_url: str
     photoprism_token: str
     photoprism_max_photos: int
@@ -104,6 +111,11 @@ class AppSettings:
         if not alerts_path:
             alerts_path = "/homeassistant/shakira_alerts.yaml"
 
+        ha_states_cache_sec = max(
+            0, _opts_int(opts, "ha_states_cache_sec", 30, env_fallback="SHAKIRA_HA_STATES_CACHE_SEC")
+        )
+        os.environ["SHAKIRA_HA_STATES_CACHE_SEC"] = str(ha_states_cache_sec)
+
         return cls(
             supervisor_token=token.strip(),
             ha_url=str(ha_url).rstrip("/"),
@@ -113,6 +125,7 @@ class AppSettings:
             evolution_instance=_opts_str(opts, "evolution_instance", "EVOLUTION_INSTANCE"),
             devices_config_path=devices_path,
             gemini_cache_ttl_hours=_opts_int(opts, "gemini_cache_ttl_hours", 24),
+            ha_states_cache_sec=ha_states_cache_sec,
             photoprism_url=_opts_str(opts, "photoprism_url", "PHOTOPRISM_URL").rstrip("/"),
             photoprism_token=_opts_str(opts, "photoprism_token", "PHOTOPRISM_TOKEN"),
             photoprism_max_photos=min(10, max(1, _opts_int(opts, "photoprism_max_photos", 10))),

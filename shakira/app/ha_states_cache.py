@@ -18,7 +18,7 @@ _by_id_at: float = 0.0
 
 
 def _ttl_sec() -> float:
-    return max(0.0, float(os.environ.get("SHAKIRA_HA_STATES_CACHE_SEC", "10")))
+    return max(0.0, float(os.environ.get("SHAKIRA_HA_STATES_CACHE_SEC", "30")))
 
 
 def invalidate_ha_states_cache() -> None:

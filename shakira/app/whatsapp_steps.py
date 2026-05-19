@@ -103,25 +103,37 @@ class TypingSession:
         self.phone = phone
         self._stop = asyncio.Event()
         self._task: asyncio.Task[None] | None = None
+        self._pulse_tasks: set[asyncio.Task[None]] = set()
         self._ctx_token: contextvars.Token[TypingSession | None] | None = None
 
     async def pulse(self) -> None:
-        await self._pulse()
+        """Renova 'digitando...' sem bloquear o caller."""
+        self._schedule_pulse()
 
     def _enabled(self) -> bool:
         return bool(self.evo_base and self.evo_key and self.instance and self.phone)
+
+    def _schedule_pulse(self) -> None:
+        if not self._enabled():
+            return
+        task = asyncio.create_task(self._pulse(), name="typing_pulse")
+        self._pulse_tasks.add(task)
+        task.add_done_callback(self._pulse_tasks.discard)
 
     async def _pulse(self) -> None:
         if not self._enabled():
             return
         delay_ms = int(os.environ.get("EVOLUTION_TYPING_DELAY_MS", "15000"))
-        await self.evo.send_typing(
-            base_url=self.evo_base,
-            api_key=self.evo_key,
-            instance=self.instance,
-            number=self.phone,
-            delay_ms=delay_ms,
-        )
+        try:
+            await self.evo.send_typing(
+                base_url=self.evo_base,
+                api_key=self.evo_key,
+                instance=self.instance,
+                number=self.phone,
+                delay_ms=delay_ms,
+            )
+        except Exception:
+            log.debug("TypingSession: send_typing falhou", exc_info=True)
 
     async def _loop(self) -> None:
         refresh_sec = float(os.environ.get("EVOLUTION_TYPING_REFRESH_SEC", "10"))
@@ -131,13 +143,13 @@ class TypingSession:
                 await asyncio.wait_for(self._stop.wait(), timeout=refresh_sec)
             except asyncio.TimeoutError:
                 if not self._stop.is_set():
-                    await self._pulse()
+                    self._schedule_pulse()
 
     async def __aenter__(self) -> TypingSession:
         self._ctx_token = _typing_session.set(self)
         if self._enabled():
-            await self._pulse()
-            self._task = asyncio.create_task(self._loop())
+            self._schedule_pulse()
+            self._task = asyncio.create_task(self._loop(), name="typing_session")
         return self
 
     async def __aexit__(self, *args: object) -> None:
@@ -148,16 +160,25 @@ class TypingSession:
                 await self._task
             except asyncio.CancelledError:
                 pass
+        for pending in list(self._pulse_tasks):
+            pending.cancel()
         if self._ctx_token is not None:
             _typing_session.reset(self._ctx_token)
             self._ctx_token = None
         if self._enabled():
-            await self.evo.send_paused(
-                base_url=self.evo_base,
-                api_key=self.evo_key,
-                instance=self.instance,
-                number=self.phone,
-            )
+
+            async def _paused() -> None:
+                try:
+                    await self.evo.send_paused(
+                        base_url=self.evo_base,
+                        api_key=self.evo_key,
+                        instance=self.instance,
+                        number=self.phone,
+                    )
+                except Exception:
+                    log.debug("TypingSession: send_paused falhou", exc_info=True)
+
+            asyncio.create_task(_paused(), name="typing_paused")
 
 
 _typing_session: contextvars.ContextVar[TypingSession | None] = contextvars.ContextVar(

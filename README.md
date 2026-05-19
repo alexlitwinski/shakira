@@ -115,6 +115,7 @@ Também é possível editar o arquivo na aba **shakira_alerts.yaml** do painel I
 | **devices_config_path** | Caminho do YAML (padrão `/config/shakira_devices.yaml`) |
 | **alerts_config_path** | Caminho do YAML de alertas (padrão `/config/shakira_alerts.yaml`) |
 | **gemini_cache_ttl_hours** | TTL do cache Gemini em horas (padrão 24) |
+| **ha_states_cache_sec** | TTL do cache em memória dos estados HA em segundos (padrão 30; `0` desativa) |
 
 ---
 

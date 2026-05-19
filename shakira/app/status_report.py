@@ -22,7 +22,7 @@ from app.message_timing import recent_averages
 
 log = logging.getLogger(__name__)
 
-VERSION = "1.7.7"
+VERSION = "1.7.8"
 
 
 def _mask_secret(value: str, visible: int = 4) -> str:
@@ -78,6 +78,7 @@ async def _check_home_assistant(ha: HomeAssistantClient, settings: AppSettings) 
                 "token": _mask_secret(settings.supervisor_token),
                 "permitted_entity": ENTITY_PERMITTED,
                 "permitted_phones_count": permitted_count,
+                "states_cache_sec": settings.ha_states_cache_sec,
             },
         }
     except httpx.RequestError as e:

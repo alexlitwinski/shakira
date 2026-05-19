@@ -18,6 +18,14 @@ _DEBUG_HTTP_LOGGERS = (
     "uvicorn.access",
 )
 
+# Bibliotecas cujo DEBUG e ruido (frames WS, etc.) — nunca util para o utilizador
+_ALWAYS_QUIET_LOGGERS = (
+    "websockets",
+    "websockets.client",
+    "websockets.server",
+    "websockets.protocol",
+)
+
 
 def normalize_log_level(raw: str | None) -> str:
     level = (raw or "info").strip().lower()
@@ -80,6 +88,9 @@ def configure_logging(level_name: str) -> str:
         logging.getLogger(name).setLevel(
             logging.DEBUG if normalized == "debug" else logging.WARNING
         )
+
+    for name in _ALWAYS_QUIET_LOGGERS:
+        logging.getLogger(name).setLevel(logging.WARNING)
 
     logging.getLogger("uvicorn.error").setLevel(
         logging.DEBUG if normalized == "debug" else logging.INFO
