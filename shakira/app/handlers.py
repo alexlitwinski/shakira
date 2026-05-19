@@ -441,6 +441,17 @@ def _log_message_timings(timings: MessageTimings, messenger: StepMessenger | Non
         timings.wa_steps,
         timings.total_ms,
     )
+    if log.isEnabledFor(logging.DEBUG):
+        overhead_ms = max(
+            0.0,
+            timings.total_ms - timings.ha_states_ms - timings.gemini_ms,
+        )
+        log.debug(
+            "timing detail phone=%s overhead_ms=%.0f gemini_avg_ms=%.0f",
+            timings.phone,
+            overhead_ms,
+            timings.gemini_ms / timings.gemini_calls if timings.gemini_calls else 0.0,
+        )
 
 
 async def fetch_catalog_entity_states(
@@ -456,18 +467,34 @@ async def fetch_catalog_entity_states(
     if cached_map is not None:
         states = [cached_map[eid] for eid in entity_ids if eid in cached_map]
         by_id = {eid: cached_map[eid] for eid in entity_ids if eid in cached_map}
+        log.debug(
+            "fetch_catalog_entity_states cache map: %s/%s entidades",
+            len(states),
+            len(entity_ids),
+        )
         return states, by_id
 
     cached_all = get_all_states_cached()
     if cached_all is not None:
         states = filter_states_for_ids(cached_all, entity_ids)
         by_id = {str(s.get("entity_id")): s for s in states if s.get("entity_id")}
+        log.debug(
+            "fetch_catalog_entity_states cache lista: %s/%s entidades",
+            len(states),
+            len(entity_ids),
+        )
         return states, by_id
 
     all_states = await ha.get_states()
     store_all_states(all_states)
     states = filter_states_for_ids(all_states, entity_ids)
     by_id = {str(s.get("entity_id")): s for s in states if s.get("entity_id")}
+    log.debug(
+        "fetch_catalog_entity_states HA fresh: %s/%s entidades (total HA=%s)",
+        len(states),
+        len(entity_ids),
+        len(all_states),
+    )
     return states, by_id
 
 

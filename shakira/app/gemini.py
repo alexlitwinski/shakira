@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time
 from typing import Any
 
 import google.generativeai as genai
@@ -101,6 +102,15 @@ class GeminiAssistant:
 Mensagem atual do usuario:
 {user_message}
 """
+        log.debug(
+            "Gemini decide prompt_chars=%s history=%s entities=%s user=%s cache=%s",
+            len(prompt),
+            len(conversation_history),
+            len(entities_context),
+            len(user_message),
+            self._cache_name or "inline",
+        )
+        t0 = time.monotonic()
         try:
             response = self._model.generate_content(
                 prompt,
@@ -115,6 +125,7 @@ Mensagem atual do usuario:
                 "action": "reply",
                 "response": "Nao consegui processar agora. Tente de novo em instantes.",
             }
+        log.debug("Gemini decide OK (%.0fms)", (time.monotonic() - t0) * 1000.0)
 
         text = getattr(response, "text", None) or ""
         if not text and response.candidates:

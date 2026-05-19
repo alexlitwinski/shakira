@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any
 from urllib.parse import quote
 
@@ -26,6 +27,7 @@ class HomeAssistantClient:
         return dict(self._settings.ha_headers)
 
     async def get_state(self, entity_id: str) -> dict[str, Any] | None:
+        t0 = time.monotonic()
         try:
             encoded = quote(entity_id, safe=".")
             r = await self._client.get(
@@ -35,17 +37,24 @@ class HomeAssistantClient:
         except httpx.RequestError as e:
             log.warning("HA get_state request error %s: %s", entity_id, e)
             return None
+        elapsed_ms = (time.monotonic() - t0) * 1000.0
         if r.status_code == 404:
+            log.debug("HA get_state %s 404 (%.0fms)", entity_id, elapsed_ms)
             return None
         r.raise_for_status()
+        log.debug("HA get_state %s OK (%.0fms)", entity_id, elapsed_ms)
         return r.json()
 
     async def get_states(self) -> list[dict[str, Any]]:
+        t0 = time.monotonic()
         r = await self._client.get(f"{self._base}/states", headers=self._headers())
         r.raise_for_status()
         data = r.json()
+        elapsed_ms = (time.monotonic() - t0) * 1000.0
         if not isinstance(data, list):
+            log.debug("HA get_states resposta invalida (%.0fms)", elapsed_ms)
             return []
+        log.debug("HA get_states OK n=%s (%.0fms)", len(data), elapsed_ms)
         return data
 
     async def call_service(
@@ -61,7 +70,7 @@ class HomeAssistantClient:
         if return_response:
             url = f"{url}?return_response"
         payload = service_data or {}
-        log.info(
+        log.debug(
             "HA call_service >> %s/%s return_response=%s payload=%s",
             domain,
             service,
@@ -73,7 +82,7 @@ class HomeAssistantClient:
         except httpx.RequestError as e:
             log.error("HA call_service rede falhou %s/%s: %s", domain, service, e)
             raise
-        log.info(
+        log.debug(
             "HA call_service << %s/%s status=%s body=%s",
             domain,
             service,

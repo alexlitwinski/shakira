@@ -14,7 +14,8 @@ from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 
-from app.config import AppSettings
+from app.config import AppSettings, load_addon_options
+from app.logging_config import configure_logging
 from app.dashboard import get_dashboard_html
 from app.cameras_catalog import CamerasCatalog, CamerasCatalogValidationError
 from app.devices_catalog import CatalogValidationError, DevicesCatalog
@@ -40,20 +41,18 @@ from app.homeassistant import HomeAssistantClient
 from app.status_report import build_status_report
 from app.whatsapp_outbound import WhatsAppSendError, send_whatsapp_text
 
-_log_level_name = os.environ.get("SHAKIRA_LOG_LEVEL", "INFO").upper()
-_log_level = getattr(logging, _log_level_name, logging.INFO)
-
-logging.basicConfig(
-    level=_log_level,
-    format="%(asctime)s %(levelname)s %(name)s %(message)s",
-)
+_opts_boot = load_addon_options()
+_boot_level = _opts_boot.get("log_level") if isinstance(_opts_boot.get("log_level"), str) else None
+if not _boot_level:
+    _boot_level = os.environ.get("SHAKIRA_LOG_LEVEL", "info")
+configure_logging(str(_boot_level))
 log = logging.getLogger("shakira")
-log.info("Nivel de log: %s", logging.getLevelName(_log_level))
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings = AppSettings.load()
+    configure_logging(settings.log_level)
     app.state.settings = settings
     app.state.started_at = time.time()
 
@@ -388,6 +387,7 @@ async def _run_webhook(
                 catalog=catalog,
                 cameras=cameras,
             )
+            log.debug("Webhook Evolution processado event=%s", ev)
         else:
             log.warning("Payload webhook inesperado: %s", type(body))
     except Exception:

@@ -7,6 +7,8 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
+from app.logging_config import normalize_log_level
+
 
 def load_addon_options() -> dict:
     path = Path(os.environ.get("OPTIONS_PATH", "/data/options.json"))
@@ -39,6 +41,16 @@ def _opts_int(opts: dict, key: str, default: int) -> int:
     return default
 
 
+def _opts_log_level(opts: dict) -> str:
+    v = opts.get("log_level")
+    if isinstance(v, str) and v.strip():
+        return normalize_log_level(v)
+    env = os.environ.get("SHAKIRA_LOG_LEVEL", "").strip()
+    if env:
+        return normalize_log_level(env)
+    return "info"
+
+
 @dataclass
 class AppSettings:
     """Configuracao em runtime."""
@@ -59,6 +71,7 @@ class AppSettings:
     frigate_cameras_config_path: str
     alerts_config_path: str
     shakira_api_token: str
+    log_level: str
 
     @classmethod
     def load(cls) -> AppSettings:
@@ -108,6 +121,7 @@ class AppSettings:
             frigate_cameras_config_path=cameras_path,
             alerts_config_path=alerts_path,
             shakira_api_token=_opts_str(opts, "shakira_api_token", "SHAKIRA_API_TOKEN"),
+            log_level=_opts_log_level(opts),
         )
 
     @property

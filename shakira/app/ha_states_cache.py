@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import threading
 import time
 from typing import Any
+
+log = logging.getLogger(__name__)
 
 _cache_lock = threading.Lock()
 _all_states: list[dict[str, Any]] | None = None
@@ -25,6 +28,7 @@ def invalidate_ha_states_cache() -> None:
         _all_states_at = 0.0
         _by_id = None
         _by_id_at = 0.0
+    log.debug("Cache HA invalidado")
 
 
 def store_all_states(states: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
@@ -41,6 +45,7 @@ def store_all_states(states: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
         _all_states_at = now
         _by_id = by_id
         _by_id_at = now
+    log.debug("Cache HA gravado: %s entidades totais", len(by_id))
     return by_id
 
 
@@ -50,7 +55,9 @@ def get_all_states_cached() -> list[dict[str, Any]] | None:
         return None
     with _cache_lock:
         if _all_states is not None and time.monotonic() - _all_states_at < ttl:
+            log.debug("Cache HA hit (lista completa, age=%.1fs)", time.monotonic() - _all_states_at)
             return _all_states
+    log.debug("Cache HA miss (lista completa)")
     return None
 
 
@@ -60,7 +67,9 @@ def get_states_map_cached() -> dict[str, dict[str, Any]] | None:
         return None
     with _cache_lock:
         if _by_id is not None and time.monotonic() - _by_id_at < ttl:
+            log.debug("Cache HA hit (mapa, age=%.1fs, n=%s)", time.monotonic() - _by_id_at, len(_by_id))
             return dict(_by_id)
+    log.debug("Cache HA miss (mapa)")
     return None
 
 

@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import threading
 import time
 
 from app.homeassistant import HomeAssistantClient
+
+log = logging.getLogger(__name__)
 
 ENTITY_PERMITTED = "input_text.whatsapp_bot_permitidos"
 
@@ -46,8 +49,10 @@ async def fetch_permitted_phones_raw(ha: HomeAssistantClient) -> str:
                 _permitted_cache_raw is not None
                 and time.monotonic() - _permitted_cache_at < ttl
             ):
+                log.debug("Cache telefones permitidos hit (age=%.0fs)", time.monotonic() - _permitted_cache_at)
                 return _permitted_cache_raw
 
+    log.debug("Cache telefones permitidos miss — consultando HA")
     s = await ha.get_state(ENTITY_PERMITTED)
     raw = s["state"] if s and isinstance(s.get("state"), str) else ""
 
