@@ -22,6 +22,14 @@ ALARM_USER_RE = re.compile(
 )
 
 
+def message_suggests_bath_scenario(user_text: str) -> bool:
+    return bool(BATH_USER_RE.search(user_text or ""))
+
+
+def message_suggests_server_health(user_text: str) -> bool:
+    return bool(SERVER_USER_RE.search(user_text or ""))
+
+
 def _scenario_applies(scenario: ScenarioConfig, user_text: str) -> bool:
     sid = scenario.id.lower()
     if sid == "saude_servidor":
