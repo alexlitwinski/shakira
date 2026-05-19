@@ -73,7 +73,12 @@ from app.user_friendly import (
     is_internal_instruction_leak,
     polish_user_message,
 )
-from app.whatsapp_steps import StepMessenger, TypingSession, truncate_whatsapp
+from app.whatsapp_steps import (
+    StepMessenger,
+    TypingSession,
+    pulse_whatsapp_typing,
+    truncate_whatsapp,
+)
 
 log = logging.getLogger(__name__)
 
@@ -461,6 +466,7 @@ async def _finish_whatsapp_exchange(
     if not evo_base or not evo_key or not instance:
         log.error("Envio Evolution bloqueado no fechamento da conversa")
         return
+    await pulse_whatsapp_typing()
     await evo.send_text(
         base_url=evo_base,
         api_key=evo_key,
@@ -1212,6 +1218,7 @@ async def handle_send_user_file(
 
     data = path.read_bytes()
     caption = (meta.caption or meta.label or meta.filename)[:1024]
+    await pulse_whatsapp_typing()
     ok = await evo.send_document_bytes(
         base_url=evo_base,
         api_key=evo_key,
@@ -1580,6 +1587,7 @@ async def handle_get_camera_snapshot(
 
     caption = f"Camera: {label}"[:1024]
     fname = f"shakira_{camera_id}.jpg"
+    await pulse_whatsapp_typing()
     ok = await evo.send_image_bytes(
         base_url=evo_base,
         api_key=evo_key,
@@ -1757,6 +1765,7 @@ async def handle_search_photos(
 
         caption = _photo_caption(photo, i, total)
         fname = f"shakira_{photo.uid or photo.file_hash[:8]}_{i}.jpg"
+        await pulse_whatsapp_typing()
         ok = await evo.send_image_bytes(
             base_url=evo_base,
             api_key=evo_key,
@@ -1835,53 +1844,56 @@ async def handle_evolution_payload(
             hint or str(webhook_instance) or default_inst or settings.evolution_instance
         ).strip()
 
-        if not inbound.media and not is_placeholder_user_text(user_text or ""):
-            messenger: StepMessenger | None = None
-            if evo_base and evo_key and send_instance:
-                messenger = StepMessenger(
-                    evo=evo,
-                    evo_base=evo_base,
-                    evo_key=evo_key,
-                    instance=send_instance,
-                    phone=phone_norm,
-                )
-            pending_media_reply = await try_handle_pending_media_reply(
-                phone_norm,
-                user_text or "",
-                settings=settings,
-                http=http,
-                on_step=messenger.step if messenger else None,
-            )
-            if pending_media_reply is not None:
-                log.info(
-                    "Resposta arquivo pendente phone=%s: %s",
+        async with TypingSession(
+            evo,
+            evo_base=evo_base,
+            evo_key=evo_key,
+            instance=send_instance,
+            phone=phone_norm,
+        ):
+            if not inbound.media and not is_placeholder_user_text(user_text or ""):
+                messenger: StepMessenger | None = None
+                if evo_base and evo_key and send_instance:
+                    messenger = StepMessenger(
+                        evo=evo,
+                        evo_base=evo_base,
+                        evo_key=evo_key,
+                        instance=send_instance,
+                        phone=phone_norm,
+                    )
+                pending_media_reply = await try_handle_pending_media_reply(
                     phone_norm,
-                    pending_media_reply[:120],
+                    user_text or "",
+                    settings=settings,
+                    http=http,
+                    on_step=messenger.step if messenger else None,
                 )
-                if messenger and messenger.sent_any:
-                    await messenger.step(pending_media_reply)
-                    record_exchange(phone_norm, user_text or "", messenger.combined())
-                else:
-                    reply_text = _truncate_whatsapp(polish_user_message(pending_media_reply))
-                    if evo_base and evo_key and send_instance:
-                        await evo.send_text(
-                            base_url=evo_base,
-                            api_key=evo_key,
-                            instance=send_instance,
-                            number=phone_norm,
-                            text=reply_text,
+                if pending_media_reply is not None:
+                    log.info(
+                        "Resposta arquivo pendente phone=%s: %s",
+                        phone_norm,
+                        pending_media_reply[:120],
+                    )
+                    if messenger and messenger.sent_any:
+                        await messenger.step(pending_media_reply)
+                        record_exchange(phone_norm, user_text or "", messenger.combined())
+                    else:
+                        reply_text = _truncate_whatsapp(
+                            polish_user_message(pending_media_reply)
                         )
-                        record_exchange(phone_norm, user_text or "", reply_text)
-                continue
+                        if evo_base and evo_key and send_instance:
+                            await pulse_whatsapp_typing()
+                            await evo.send_text(
+                                base_url=evo_base,
+                                api_key=evo_key,
+                                instance=send_instance,
+                                number=phone_norm,
+                                text=reply_text,
+                            )
+                            record_exchange(phone_norm, user_text or "", reply_text)
+                    continue
 
-        if inbound.media:
-            async with TypingSession(
-                evo,
-                evo_base=evo_base,
-                evo_key=evo_key,
-                instance=send_instance,
-                phone=phone_norm,
-            ):
+            if inbound.media:
                 log.info(
                     "Midia recebida phone=%s tipo=%s arquivo=%s",
                     phone_norm,
@@ -1907,6 +1919,7 @@ async def handle_evolution_payload(
                 if media_reply:
                     reply_text = _truncate_whatsapp(polish_user_message(media_reply))
                     if evo_base and evo_key and send_instance:
+                        await pulse_whatsapp_typing()
                         await evo.send_text(
                             base_url=evo_base,
                             api_key=evo_key,
@@ -1925,38 +1938,36 @@ async def handle_evolution_payload(
                         phone_norm,
                         inbound.media.mediatype,
                     )
-            continue
+                continue
 
-        pending_reply = await try_handle_pending_password(
-            phone_norm,
-            user_text or "",
-            ha=ha,
-            catalog=catalog,
-        )
-        if pending_reply is not None:
-            log.info("Resposta senha pendente phone=%s: %s", phone_norm, pending_reply[:120])
-            reply_text = _truncate_whatsapp(pending_reply)
-            if evo_base and evo_key and send_instance:
-                await evo.send_text(
-                    base_url=evo_base,
-                    api_key=evo_key,
-                    instance=send_instance,
-                    number=phone_norm,
-                    text=reply_text,
+            pending_reply = await try_handle_pending_password(
+                phone_norm,
+                user_text or "",
+                ha=ha,
+                catalog=catalog,
+            )
+            if pending_reply is not None:
+                log.info(
+                    "Resposta senha pendente phone=%s: %s",
+                    phone_norm,
+                    pending_reply[:120],
                 )
-                record_exchange(phone_norm, user_text or "", reply_text)
-            continue
+                reply_text = _truncate_whatsapp(pending_reply)
+                if evo_base and evo_key and send_instance:
+                    await pulse_whatsapp_typing()
+                    await evo.send_text(
+                        base_url=evo_base,
+                        api_key=evo_key,
+                        instance=send_instance,
+                        number=phone_norm,
+                        text=reply_text,
+                    )
+                    record_exchange(phone_norm, user_text or "", reply_text)
+                continue
 
-        send_instance_early = _resolve_evolution_instance(
-            _inst_hint, webhook_instance, default_inst, settings
-        )
-        async with TypingSession(
-            evo,
-            evo_base=evo_base,
-            evo_key=evo_key,
-            instance=send_instance_early,
-            phone=phone_norm,
-        ):
+            send_instance_early = _resolve_evolution_instance(
+                _inst_hint, webhook_instance, default_inst, settings
+            )
             await _process_inbound_message(
                 inbound=inbound,
                 _inst_hint=_inst_hint,
@@ -2099,6 +2110,7 @@ async def _process_inbound_message(
             phone=phone_norm,
             user_text=user_text or "",
             history_text=history_text,
+            history_entries=history_entries,
         )
 
         reply_preview = str(decision.get("response") or "").strip()

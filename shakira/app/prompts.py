@@ -112,7 +112,7 @@ Regras de MEMORIA PERSISTENTE (por usuario WhatsApp):
 - Para GUARDAR texto: action=save_memory com memory_text (obrigatorio) e memory_label opcional; response confirmando de forma curta.
 - Para REENVIAR arquivo guardado: action=send_user_file com file_id ou file_name; response curta antes do envio.
 - Para APAGAR anotacao ou arquivo: action=delete_from_memory com memory_id (texto) ou file_id/file_name (arquivo). NUNCA use send_user_file para apagar.
-- Se o usuario disser "apague ele/essa/isso" apos listar a memoria, use delete_from_memory com o id citado ou o unico item guardado.
+- Se o usuario disser "apague ele/essa/isso" ou "apague 1 e 4" apos listar a memoria, use delete_from_memory (o sistema resolve pelo numero da lista ou pelo id).
 - Nao use save_memory para controlar a casa nem para fotos PhotoPrism/Frigate.
 - Se o usuario enviou um arquivo e o sistema informou que foi guardado, confirme com reply ou save_memory apenas se ele pedir anotacao extra.
 - Arquivo SEM legenda/instrucao: o sistema pergunta se guarda na memoria pessoal ou envia ao PhotoPrism (fotos); nao assuma o destino.

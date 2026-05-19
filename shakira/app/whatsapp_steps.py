@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import logging
 import os
 from dataclasses import dataclass, field
@@ -40,6 +41,7 @@ class StepMessenger:
         return "\n\n".join(self._parts)
 
     async def step(self, text: str) -> None:
+        await pulse_whatsapp_typing()
         msg = truncate_whatsapp(polish_user_message(text))
         if not msg:
             return
@@ -94,6 +96,10 @@ class TypingSession:
         self.phone = phone
         self._stop = asyncio.Event()
         self._task: asyncio.Task[None] | None = None
+        self._ctx_token: contextvars.Token[TypingSession | None] | None = None
+
+    async def pulse(self) -> None:
+        await self._pulse()
 
     def _enabled(self) -> bool:
         return bool(self.evo_base and self.evo_key and self.instance and self.phone)
@@ -121,6 +127,7 @@ class TypingSession:
                     await self._pulse()
 
     async def __aenter__(self) -> TypingSession:
+        self._ctx_token = _typing_session.set(self)
         if self._enabled():
             await self._pulse()
             self._task = asyncio.create_task(self._loop())
@@ -134,6 +141,9 @@ class TypingSession:
                 await self._task
             except asyncio.CancelledError:
                 pass
+        if self._ctx_token is not None:
+            _typing_session.reset(self._ctx_token)
+            self._ctx_token = None
         if self._enabled():
             await self.evo.send_paused(
                 base_url=self.evo_base,
@@ -141,3 +151,15 @@ class TypingSession:
                 instance=self.instance,
                 number=self.phone,
             )
+
+
+_typing_session: contextvars.ContextVar[TypingSession | None] = contextvars.ContextVar(
+    "typing_session", default=None
+)
+
+
+async def pulse_whatsapp_typing() -> None:
+    """Renova 'digitando...' se houver TypingSession ativa no contexto."""
+    session = _typing_session.get()
+    if session is not None:
+        await session.pulse()
