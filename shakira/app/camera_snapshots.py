@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import asyncio
 import logging
-import os
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -14,11 +12,10 @@ from app.cameras_catalog import CamerasCatalog
 from app.config import AppSettings
 from app.evolution import EvolutionClient
 from app.frigate import FrigateClient, FrigateError
+from app.image_collage import build_image_grid
 from app.whatsapp_steps import StepMessenger, pulse_whatsapp_typing, truncate_whatsapp
 
 log = logging.getLogger(__name__)
-
-_SNAPSHOT_DELAY_SEC = float(os.environ.get("CAMERA_SNAPSHOT_DELAY_SEC", "0.3"))
 
 
 @dataclass
@@ -132,11 +129,12 @@ async def send_camera_snapshots(
         label = cam.name if cam else camera_ids[0]
         await say(f"Vou buscar a imagem da camera {label}...")
     else:
-        await say(f"Vou buscar imagens de {total} cameras...")
+        await say(f"Vou buscar imagens de {total} cameras e enviar numa unica mensagem...")
 
     frigate = FrigateClient(http, base_url=settings.frigate_url)
     cam_map = cameras.camera_map()
 
+    fetched: list[tuple[bytes, str, str]] = []
     for index, camera_id in enumerate(camera_ids, start=1):
         cam = cam_map.get(camera_id)
         label = cam.name if cam else camera_id
@@ -153,19 +151,25 @@ async def send_camera_snapshots(
         except FrigateError as e:
             log.error("Frigate falhou camera=%s: %s", camera_id, e, exc_info=True)
             result.failed.append(camera_id)
-            if total > 1:
-                await say(f"({index}/{total}) {label}: falhou — {e}")
-            else:
-                await say(f"Nao consegui obter a imagem: {e}", final=True)
             continue
 
-        caption = f"Camera: {label}"
-        if total > 1:
-            caption = f"{index}/{total} — {caption}"
-        caption = caption[:1024]
-        fname = f"shakira_{camera_id}.jpg"
+        fetched.append((image_bytes, label, camera_id))
 
-        await pulse_whatsapp_typing()
+    if not fetched:
+        if total == 1:
+            failed = result.failed[0] if result.failed else camera_ids[0]
+            await say(f"Nao consegui obter a imagem da camera {failed}.", final=True)
+        else:
+            await say("Nao consegui obter imagens das cameras solicitadas.", final=True)
+        result.summary = "Nao foi possivel enviar as imagens das cameras."
+        return result
+
+    await pulse_whatsapp_typing()
+
+    if len(fetched) == 1:
+        image_bytes, label, camera_id = fetched[0]
+        caption = f"Camera: {label}"[:1024]
+        fname = f"shakira_{camera_id}.jpg"
         ok = await evo.send_image_bytes(
             base_url=evo_base,
             api_key=evo_key,
@@ -177,26 +181,52 @@ async def send_camera_snapshots(
         )
         if ok is None:
             result.failed.append(camera_id)
-            await say(f"Capturei {label} mas nao consegui enviar pelo WhatsApp.")
+            await say(f"Capturei {label} mas nao consegui enviar pelo WhatsApp.", final=True)
         else:
-            result.sent += 1
+            result.sent = 1
+            result.summary = "1 imagem enviada."
+        return result
 
-        if index < total and _SNAPSHOT_DELAY_SEC > 0:
-            await asyncio.sleep(_SNAPSHOT_DELAY_SEC)
+    collage_items = [(img_bytes, label) for img_bytes, label, _cid in fetched]
+    try:
+        collage_bytes = build_image_grid(collage_items)
+    except Exception:
+        log.exception("Falha ao montar collage de %s cameras", len(collage_items))
+        await say("Nao consegui montar as imagens numa unica mensagem.", final=True)
+        result.summary = "Falha ao montar collage das cameras."
+        return result
 
-    if result.sent == total:
-        result.summary = f"{result.sent} imagem(ns) enviada(s)."
-    elif result.sent:
+    labels = [label for _, label, _ in fetched]
+    caption = "Cameras: " + ", ".join(labels)
+    if result.failed:
+        caption += f" (falharam: {', '.join(result.failed)})"
+    caption = caption[:1024]
+
+    ok = await evo.send_image_bytes(
+        base_url=evo_base,
+        api_key=evo_key,
+        instance=instance,
+        number=phone,
+        image_bytes=collage_bytes,
+        filename="shakira_cameras.jpg",
+        caption=caption,
+    )
+    if ok is None:
+        result.failed.extend(camera_id for _, _, camera_id in fetched)
+        await say("Capturei as cameras mas nao consegui enviar pelo WhatsApp.", final=True)
+        result.summary = "Nao foi possivel enviar as imagens das cameras."
+        return result
+
+    result.sent = len(fetched)
+    if result.failed:
         result.summary = (
-            f"{result.sent} de {total} imagem(ns) enviada(s)."
-            + (f" Falharam: {', '.join(result.failed)}." if result.failed else "")
+            f"{result.sent} de {total} imagem(ns) no collage."
+            f" Falharam: {', '.join(result.failed)}."
         )
     else:
-        result.summary = "Nao foi possivel enviar as imagens das cameras."
+        result.summary = f"{result.sent} imagem(ns) enviada(s) numa unica mensagem."
 
-    if total > 1 and result.sent:
-        await say(result.summary, final=True)
-
+    await say(result.summary, final=True)
     return result
 
 

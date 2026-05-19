@@ -81,9 +81,9 @@ Se nao tiver certeza, action=reply pedindo esclarecimento.
 Regras de CAMERAS ao vivo (get_camera_snapshot):
 - Use quando o usuario pedir foto, imagem ou visao de camera(s) de seguranca/CCTV (Frigate).
 - Uma camera: action=get_camera_snapshot, preencha "camera_id" (id ou nome do catalogo).
-- Varias cameras: preencha "camera_ids" com lista de ids ou nomes.
-- Grupo de cameras: preencha "camera_group" com o nome do grupo (ex.: Interna, Portao Social).
-- Todas as cameras: all_cameras=true (omitir camera_id, camera_ids e camera_group).
+- Grupo de cameras: preencha "camera_group" com o nome do grupo (ex.: Interna, Portao Social). Varias cameras sao enviadas numa unica mensagem (collage).
+- Varias cameras: preencha "camera_ids" com lista de ids ou nomes — numa unica mensagem.
+- Todas as cameras: all_cameras=true (omitir camera_id, camera_ids e camera_group) — numa unica mensagem.
 - Prioridade se varios campos: camera_id > camera_ids > camera_group > all_cameras.
 - Escolha a camera pelo nome, descricao ou grupo que o usuario mencionar (ex.: "portao", "garagem", "cameras internas").
 - Nao use para fotos antigas do acervo — isso e search_photos (PhotoPrism).

@@ -10,7 +10,7 @@ from typing import Any
 
 import httpx
 
-from app.alerts_catalog import AlertConfig, AlertsCatalog, live_alerts
+from app.alerts_catalog import AlertConfig, AlertsCatalog
 from app.camera_snapshots import send_camera_snapshots
 from app.cameras_catalog import CamerasCatalog
 from app.config import AppSettings
@@ -50,7 +50,6 @@ class AlertsRunner:
     _poll_task: asyncio.Task[None] | None = None
     _poll_stop: asyncio.Event = field(default_factory=asyncio.Event)
     _ws_listener: HaWebSocketListener | None = None
-    _ws_bootstrap_done: bool = False
 
     def reload(self, catalog: AlertsCatalog) -> None:
         self.catalog = catalog
@@ -125,27 +124,12 @@ class AlertsRunner:
             self._ws_listener.update_entity_ids(entity_ids)
 
         if not (self._ws_listener._task and not self._ws_listener._task.done()):
-            self._ws_bootstrap_done = False
             self._ws_listener.start()
-            asyncio.create_task(self._bootstrap_when_connected())
-
-    async def _bootstrap_when_connected(self) -> None:
-        """Aguarda conexao WS e faz bootstrap dos alertas live."""
-        if self._ws_bootstrap_done or not self._ws_listener:
-            return
-        for _ in range(60):
-            if self._ws_listener.is_connected():
-                await self.bootstrap_live_alerts()
-                self._ws_bootstrap_done = True
-                return
-            await asyncio.sleep(0.5)
-        log.warning("Bootstrap alertas live: WebSocket nao conectou a tempo")
 
     async def _stop_websocket(self) -> None:
         if self._ws_listener:
             await self._ws_listener.stop()
             self._ws_listener = None
-            self._ws_bootstrap_done = False
 
     async def stop(self) -> None:
         self._poll_stop.set()
@@ -241,12 +225,6 @@ class AlertsRunner:
             rt.last_check_at = now
             await self._evaluate_alert(alert, rt, now)
 
-    async def bootstrap_live_alerts(self) -> None:
-        """Avalia alertas live ao conectar WebSocket (dispara se ja em alerta)."""
-        now = time.monotonic()
-        for alert in live_alerts(self.catalog):
-            await self._evaluate_alert(alert, self._runtime(alert.id), now)
-
     async def handle_live_state_change(
         self,
         entity_id: str,
@@ -254,13 +232,27 @@ class AlertsRunner:
         new_state: str,
         _event_data: dict[str, Any],
     ) -> None:
+        """Dispara alertas live apenas em transicao real para o estado de alerta."""
         now = time.monotonic()
         for alert in self.catalog.enabled_live_alerts():
             if alert.entity_id != entity_id:
                 continue
+            rt = self._runtime(alert.id)
+            if not state_matches(new_state, alert.when_state):
+                if rt.last_matched:
+                    log.info(
+                        "Alerta %s: estado %s (condicao %s) — reset cooldown",
+                        alert.id,
+                        new_state,
+                        alert.when_state,
+                    )
+                rt.last_matched = False
+                continue
+            if state_matches(old_state, alert.when_state):
+                continue
             await self._evaluate_alert(
                 alert,
-                self._runtime(alert.id),
+                rt,
                 now,
                 state_override=new_state,
             )
