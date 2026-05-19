@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import re
+import secrets
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -16,6 +17,8 @@ import httpx
 log = logging.getLogger(__name__)
 
 DEFAULT_THUMB_SIZE = "fit_720"
+UPLOAD_TOKEN_ALPHABET = "abcdefghijklmnopqrstuvwxyz0123456789"
+UPLOAD_TOKEN_LENGTH = 7
 INGRESS_PREFIX_RE = re.compile(r"(/api/hassio_ingress/[^/]+)")
 PREFIX_CACHE_PATH = Path(os.environ.get("PHOTOPRISM_PREFIX_CACHE", "/data/photoprism_api_prefix.json"))
 
@@ -682,6 +685,10 @@ async def discover_ingress_prefix_supervisor(
     return None
 
 
+def _generate_upload_token(length: int = UPLOAD_TOKEN_LENGTH) -> str:
+    return "".join(secrets.choice(UPLOAD_TOKEN_ALPHABET) for _ in range(length))
+
+
 class PhotoprismClient:
     def __init__(
         self,
@@ -696,6 +703,7 @@ class PhotoprismClient:
         self._prefix = _normalize_prefix(api_prefix)
         self._token = token.strip()
         self._prefix_source = "config" if self._prefix else ""
+        self._user_uid = ""
 
     @property
     def api_base(self) -> str:
@@ -992,6 +1000,41 @@ class PhotoprismClient:
             return uid or None
         return None
 
+    async def _get_user_uid(self, *, supervisor_token: str = "") -> str:
+        """UID do usuario autenticado (necessario para upload via API)."""
+        if self._user_uid:
+            return self._user_uid
+
+        if not await self.ensure_api_prefix(supervisor_token=supervisor_token):
+            raise PhotoprismError("API PhotoPrism indisponivel para upload.")
+
+        url = self._url("/api/v1/session")
+        self._log_request("GET", url)
+        try:
+            r = await self._client.get(url, headers=self._headers(), timeout=15.0)
+        except httpx.RequestError as e:
+            raise PhotoprismError(f"Sessao PhotoPrism indisponivel: {e}") from e
+
+        self._log_response(r, context="session")
+        if r.status_code == 401:
+            raise PhotoprismAuthError("Token PhotoPrism invalido ou expirado")
+        if r.status_code >= 400:
+            raise PhotoprismError(f"Sessao PhotoPrism falhou: HTTP {r.status_code}")
+
+        try:
+            payload = r.json()
+        except Exception as e:
+            raise PhotoprismError("Resposta de sessao PhotoPrism invalida") from e
+
+        user = payload.get("user") if isinstance(payload, dict) else None
+        if isinstance(user, dict):
+            uid = str(user.get("UID") or user.get("uid") or "").strip()
+            if uid:
+                self._user_uid = uid
+                return uid
+
+        raise PhotoprismError("Nao foi possivel obter o usuario do PhotoPrism.")
+
     async def upload_photo(
         self,
         *,
@@ -1000,7 +1043,7 @@ class PhotoprismClient:
         album: str = "",
         supervisor_token: str = "",
     ) -> str:
-        """Envia foto ao PhotoPrism. Retorna UID da foto criada."""
+        """Envia foto ao PhotoPrism. Retorna UID da foto criada (vazio se desconhecido)."""
         if not await self.ensure_api_prefix(supervisor_token=supervisor_token):
             diag = await self.probe(supervisor_token=supervisor_token)
             raise PhotoprismError(
@@ -1008,7 +1051,10 @@ class PhotoprismClient:
                 diagnostic=diag,
             )
 
-        url = self._url("/api/v1/upload")
+        user_uid = await self._get_user_uid(supervisor_token=supervisor_token)
+        upload_token = _generate_upload_token()
+        upload_url = self._url(f"/api/v1/users/{user_uid}/upload/{upload_token}")
+
         safe_name = filename.strip() or "foto.jpg"
         if not safe_name.lower().endswith((".jpg", ".jpeg", ".png", ".gif", ".webp", ".heic")):
             safe_name = f"{safe_name}.jpg"
@@ -1021,10 +1067,6 @@ class PhotoprismClient:
         headers = self._headers(json_accept=False)
         headers.pop("Accept", None)
 
-        data: dict[str, str] = {}
-        if album_uid:
-            data["album"] = album_uid
-
         content_type = "image/jpeg"
         low = safe_name.lower()
         if low.endswith(".png"):
@@ -1035,12 +1077,11 @@ class PhotoprismClient:
             content_type = "image/gif"
         files = {"files": (safe_name, file_bytes, content_type)}
 
-        self._log_request("POST", url)
+        self._log_request("POST", upload_url)
         try:
             r = await self._client.post(
-                url,
+                upload_url,
                 headers=headers,
-                data=data or None,
                 files=files,
                 timeout=120.0,
             )
@@ -1052,17 +1093,40 @@ class PhotoprismClient:
         if r.status_code == 401:
             raise PhotoprismAuthError("Token PhotoPrism invalido ou expirado")
         if r.status_code >= 400:
-            raise PhotoprismError(f"Upload falhou: HTTP {r.status_code}")
+            body = _body_preview(r.text or "")
+            detail = f": {body}" if body else ""
+            raise PhotoprismError(f"Upload falhou: HTTP {r.status_code}{detail}")
+
+        process_url = self._url(f"/api/v1/users/{user_uid}/upload/{upload_token}")
+        process_body: dict[str, list[str]] = {}
+        if album_uid:
+            process_body["albums"] = [album_uid]
+
+        self._log_request("PUT", process_url)
+        try:
+            r2 = await self._client.put(
+                process_url,
+                headers=self._headers(),
+                json=process_body,
+                timeout=180.0,
+            )
+        except httpx.RequestError as e:
+            raise PhotoprismError(f"Importacao no PhotoPrism falhou: {e}") from e
+
+        self._log_response(r2, context="upload-process")
+
+        if r2.status_code == 401:
+            raise PhotoprismAuthError("Token PhotoPrism invalido ou expirado")
+        if r2.status_code >= 400:
+            body = _body_preview(r2.text or "")
+            detail = f": {body}" if body else ""
+            raise PhotoprismError(f"Importacao falhou: HTTP {r2.status_code}{detail}")
 
         try:
-            payload = r.json()
+            payload = r2.json()
         except Exception:
             return ""
 
-        if isinstance(payload, list) and payload:
-            row = payload[0]
-            if isinstance(row, dict):
-                return str(row.get("UID") or row.get("uid") or "")
         if isinstance(payload, dict):
             return str(payload.get("UID") or payload.get("uid") or "")
         return ""
