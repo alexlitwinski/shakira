@@ -21,7 +21,7 @@ from app.photoprism import PhotoprismClient
 
 log = logging.getLogger(__name__)
 
-VERSION = "1.7.1"
+VERSION = "1.7.2"
 
 
 def _mask_secret(value: str, visible: int = 4) -> str:
