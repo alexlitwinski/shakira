@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import re
+import threading
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -41,6 +42,7 @@ from app.photoprism import (
 from app.scenario_context import (
     build_friendly_reply_from_scenario,
     build_gemini_scenario_correction_block,
+    fetch_verified_entity_states,
     prepend_scenario_states_to_context,
 )
 from app.scheduled_responses import (
@@ -118,6 +120,17 @@ VALID_GEMINI_ACTIONS = frozenset(
     }
 )
 
+# Acoes cujo handler ja devolve a mensagem final — nao concatenar reply + result.
+_SINGLE_USER_MESSAGE_ACTIONS = frozenset(
+    {
+        "schedule_response",
+        "schedule_action",
+        "cancel_scheduled_response",
+        "save_memory",
+        "delete_from_memory",
+    }
+)
+
 _USER_MEMORY_CACHE_MIN_CHARS = int(os.environ.get("SHAKIRA_USER_MEMORY_CACHE_MIN_CHARS", "6000"))
 
 _PLACEHOLDER_RESPONSE_MARKERS = (
@@ -132,6 +145,7 @@ _pending_unlock: dict[str, "PendingUnlock"] = {}
 
 # Evita processar o mesmo texto duas vezes (webhook duplo / eco).
 _inbound_dedup: dict[str, float] = {}
+_inbound_dedup_lock = threading.Lock()
 _INBOUND_DEDUP_SEC = float(os.environ.get("INBOUND_DEDUP_SEC", "5"))
 
 _IGNORE_MESSAGE_TYPES = frozenset(
@@ -197,18 +211,23 @@ def _is_echo_of_last_assistant(phone: str, text: str) -> bool:
     return last.text.strip() == text.strip()
 
 
+def _normalize_action_name(raw: Any) -> str:
+    return str(raw or "reply").strip().lower()
+
+
 def _accept_inbound_once(phone: str, text: str) -> bool:
     key = f"{phone}:{text}"
     now = time.monotonic()
-    last = _inbound_dedup.get(key)
-    if last is not None and now - last < _INBOUND_DEDUP_SEC:
-        return False
-    _inbound_dedup[key] = now
-    if len(_inbound_dedup) > 500:
-        cutoff = now - _INBOUND_DEDUP_SEC * 2
-        for k, ts in list(_inbound_dedup.items()):
-            if ts < cutoff:
-                del _inbound_dedup[k]
+    with _inbound_dedup_lock:
+        last = _inbound_dedup.get(key)
+        if last is not None and now - last < _INBOUND_DEDUP_SEC:
+            return False
+        _inbound_dedup[key] = now
+        if len(_inbound_dedup) > 500:
+            cutoff = now - _INBOUND_DEDUP_SEC * 2
+            for k, ts in list(_inbound_dedup.items()):
+                if ts < cutoff:
+                    del _inbound_dedup[k]
     return True
 
 
@@ -402,8 +421,27 @@ def extract_text_and_sender(record: dict[str, Any]) -> tuple[str | None, str | N
     return digits, text
 
 
+async def fetch_catalog_entity_states(
+    ha: HomeAssistantClient,
+    catalog: DevicesCatalog,
+) -> list[dict[str, Any]]:
+    """Estados HA apenas das entidades definidas em shakira_devices.yaml."""
+    entity_ids = catalog.context_entity_ids()
+    if not entity_ids:
+        return []
+    verified = await fetch_verified_entity_states(ha, entity_ids)
+    return [st for eid in entity_ids if (st := verified.get(eid)) is not None]
+
+
 def build_entities_context(states: list[dict[str, Any]]) -> tuple[str, int]:
     max_chars = int(os.environ.get("ENTITY_CONTEXT_MAX_CHARS", "120000"))
+    total = len(states)
+    if total == 0:
+        return (
+            "(Nenhuma entidade configurada no catalogo shakira_devices.)\n\n"
+            "Total de entidades: 0",
+            0,
+        )
     lines: list[str] = []
     for s in sorted(states, key=lambda x: x.get("entity_id", "")):
         eid = s.get("entity_id", "")
@@ -428,7 +466,6 @@ def build_entities_context(states: list[dict[str, Any]]) -> tuple[str, int]:
                     extra = f"\t{unit}"
         lines.append(f"{eid}\t{st}\t{name}{extra}")
     body = "\n".join(lines)
-    total = len(states)
     if len(body) <= max_chars:
         return body + f"\n\nTotal de entidades: {total}", total
     truncated = body[:max_chars].rsplit("\n", 1)[0]
@@ -533,8 +570,12 @@ def normalize_gemini_action(
     decision: dict[str, Any], catalog: DevicesCatalog
 ) -> tuple[dict[str, Any], str | None]:
     """Corrige action invalida (ex.: id de cenario). Retorna (decision, scenario_id para retry)."""
-    action = str(decision.get("action") or "reply").lower()
+    action = _normalize_action_name(decision.get("action"))
     if action in VALID_GEMINI_ACTIONS:
+        if action != str(decision.get("action") or "reply").strip().lower():
+            fixed = dict(decision)
+            fixed["action"] = action
+            return fixed, None
         return decision, None
 
     scenario_ids = {s.id for s in catalog.scenarios}
@@ -1527,7 +1568,7 @@ async def execute_decision(
     entities_context_used: bool,
     messenger: StepMessenger | None = None,
 ) -> str:
-    action = str(decision.get("action") or "reply").lower()
+    action = _normalize_action_name(decision.get("action"))
     if action not in VALID_GEMINI_ACTIONS:
         log.warning("execute_decision: acao '%s' invalida; tratando como reply", action)
         action = "reply"
@@ -1539,7 +1580,18 @@ async def execute_decision(
         if t and messenger:
             await messenger.step(t)
 
+    async def send_user_message(message: str) -> str:
+        """Envia uma unica mensagem (sem concatenar reply + result)."""
+        out = polish_user_message(message) or polish_user_message(reply) or "Feito."
+        if messenger:
+            if out:
+                await messenger.step(out)
+            return ""
+        return out
+
     async def finalize(extra: str) -> str:
+        if action in _SINGLE_USER_MESSAGE_ACTIONS:
+            return await send_user_message(extra)
         base = polish_user_message(reply)
         extra_clean = polish_user_message(extra)
         if extra_clean and base and extra_clean == base:
@@ -1556,11 +1608,8 @@ async def execute_decision(
         {
             "reply",
             "list_entities",
-            "schedule_response",
-            "schedule_action",
-            "cancel_scheduled_response",
         }
-    )
+    ) | _SINGLE_USER_MESSAGE_ACTIONS
     if (
         messenger
         and reply
@@ -2326,11 +2375,11 @@ async def _process_inbound_message(
             catalog_cache_name=gemini_cache_name,
         )
 
-        states = await ha.get_states()
+        states = await fetch_catalog_entity_states(ha, catalog)
         ctx, total = build_entities_context(states)
 
         log.info(
-            "Mensagem de %s: %s (contexto chars=%s, total entidades HA=%s)",
+            "Mensagem de %s: %s (contexto chars=%s, entidades catalogo=%s)",
             phone_norm,
             user_text[:120] if user_text else "",
             len(ctx),
@@ -2455,7 +2504,7 @@ async def _process_inbound_message(
 
         _log_gemini_decision(phone_norm, decision)
 
-        action = str(decision.get("action") or "reply").lower()
+        action = _normalize_action_name(decision.get("action"))
         if action == "search_photos" and http is not None and send_instance:
             await handle_search_photos(
                 decision,

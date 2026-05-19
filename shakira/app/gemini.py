@@ -80,7 +80,7 @@ class GeminiAssistant:
             else:
                 memory_block = f"{user_memory_context.strip()}\n\n"
 
-        prompt = f"""{history_block}{memory_block}Estados atuais (resumo dinamico - todas as entidades para consulta):
+        prompt = f"""{history_block}{memory_block}Estados atuais (entidades do catalogo shakira_devices):
 {entities_context}
 
 Mensagem atual do usuario:

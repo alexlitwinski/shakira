@@ -344,6 +344,21 @@ class DevicesCatalog:
     def actionable_entity_ids(self) -> set[str]:
         return {eid for eid, ent in self.entity_map().items() if ent.allow_actions}
 
+    def context_entity_ids(self) -> list[str]:
+        """Entidades cujo estado entra no prompt Gemini (devices + citadas nos cenarios)."""
+        seen: set[str] = set()
+        out: list[str] = []
+        for eid in sorted(self.entity_map().keys()):
+            seen.add(eid)
+            out.append(eid)
+        from app.scenario_context import entity_ids_for_scenarios
+
+        for eid in entity_ids_for_scenarios(self.scenarios):
+            if eid not in seen:
+                seen.add(eid)
+                out.append(eid)
+        return out
+
     def get_entity(self, entity_id: str) -> EntityConfig | None:
         return self.entity_map().get(entity_id)
 

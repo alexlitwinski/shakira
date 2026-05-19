@@ -45,6 +45,9 @@ class StepMessenger:
         msg = truncate_whatsapp(polish_user_message(text))
         if not msg:
             return
+        if self._parts and self._parts[-1] == msg:
+            log.info("StepMessenger: passo duplicado omitido phone=%s", self.phone)
+            return
         if not self.evo_base or not self.evo_key or not self.instance:
             log.warning("StepMessenger: Evolution nao configurado; passo omitido")
             return

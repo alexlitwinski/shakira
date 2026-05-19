@@ -10,7 +10,7 @@ Voce recebe a cada mensagem:
 - O historico das ultimas mensagens trocadas neste WhatsApp (usuario e assistente), quando houver
 - O catalogo completo shakira_devices.yaml (dispositivos, cenarios com prompts, acoes permitidas) no
   system instruction em cache Gemini — use-o para interpretar o que o usuario quer
-- Um resumo ATUAL de todas as entidades (entity_id, estado, nome amigavel) para CONSULTA
+- Um resumo ATUAL das entidades do catalogo shakira_devices (entity_id, estado, nome amigavel) para CONSULTA
 - A mensagem atual do usuario, sem alteracao
 
 Interprete a intencao a partir da mensagem, do historico e do catalogo em cache; depois escolha a action.
@@ -60,7 +60,7 @@ O campo "action" deve ser EXATAMENTE um destes doze valores — nunca use o id d
   "response": "Texto curto: raciocinio ou resposta (o sistema pode enviar em mensagem separada antes de executar acoes)"
 }
 
-Regras de CONSULTA (qualquer entidade no resumo de estados):
+Regras de CONSULTA (entidades do catalogo no resumo de estados):
 - Use "reply" para conversa, explicacao ou respostas usando os estados fornecidos.
 - Use "get_state" para uma entidade especifica (preencha entity_id).
 - Use "list_entities" raramente.
