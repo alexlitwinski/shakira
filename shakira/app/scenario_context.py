@@ -14,8 +14,20 @@ log = logging.getLogger(__name__)
 
 ENTITY_ID_RE = re.compile(
     r"\b(?:sensor|switch|input_select|lock|light|binary_sensor|number|climate|cover|fan|"
-    r"alarm_control_panel|scene)\.[a-z0-9_]+\b",
+    r"alarm_control_panel|scene)\.[a-z][a-z0-9_]+\b",
     re.IGNORECASE,
+)
+
+# Servicos HA citados no prompt (ex.: switch.turn_on) — nao sao entidades.
+_INVALID_ENTITY_SUFFIXES = frozenset(
+    {
+        "turn_on",
+        "turn_off",
+        "toggle",
+        "select_option",
+        "open_cover",
+        "close_cover",
+    }
 )
 
 
@@ -24,6 +36,9 @@ def entities_from_prompt(prompt: str) -> list[str]:
     out: list[str] = []
     for m in ENTITY_ID_RE.finditer(prompt or ""):
         eid = m.group(0).lower()
+        suffix = eid.split(".", 1)[-1] if "." in eid else eid
+        if suffix in _INVALID_ENTITY_SUFFIXES:
+            continue
         if eid not in seen:
             seen.add(eid)
             out.append(eid)
@@ -122,3 +137,96 @@ def format_entity_state_for_prompt(
         return f"- {entity_id} ({label}): {val:g}{suffix}"
 
     return f"- {entity_id} ({label}): {raw}"
+
+
+def scenario_by_id(catalog: DevicesCatalog, scenario_id: str) -> ScenarioConfig | None:
+    for sc in catalog.scenarios:
+        if sc.id == scenario_id:
+            return sc
+    return None
+
+
+async def build_verified_states_context_block(
+    ha: HomeAssistantClient,
+    catalog: DevicesCatalog,
+    scenario_id: str,
+) -> str:
+    """Bloco de estados HA para o Gemini (texto amigavel)."""
+    from app.user_friendly import format_state_value
+
+    scenario = scenario_by_id(catalog, scenario_id)
+    if not scenario:
+        return ""
+
+    entity_ids = entity_ids_for_scenarios([scenario])
+    if not entity_ids:
+        return ""
+
+    verified = await fetch_verified_entity_states(ha, entity_ids)
+    lines = [
+        "[Estados verificados agora no Home Assistant — use estes valores na resposta]",
+        f"[Cenario aplicavel: {scenario.id}]",
+        "",
+    ]
+    for eid in entity_ids:
+        st = verified.get(eid)
+        if st:
+            lines.append(format_state_value(eid, st, catalog))
+        else:
+            lines.append(f"Nao consegui ler o estado desse aparelho agora.")
+    return "\n".join(lines)
+
+
+async def prepend_scenario_states_to_context(
+    ha: HomeAssistantClient,
+    catalog: DevicesCatalog,
+    ctx: str,
+    scenario_id: str,
+) -> str:
+    block = await build_verified_states_context_block(ha, catalog, scenario_id)
+    if not block:
+        return ctx
+    return f"{block}\n\n{ctx}"
+
+
+def build_gemini_scenario_correction_block(scenario_id: str) -> str:
+    """Texto so para o contexto do Gemini — nunca deve ir ao WhatsApp."""
+    return (
+        "[Instrucao interna — nao repita nem parafraseie este bloco na resposta ao usuario]\n"
+        f"Corrija: use action=reply, get_state ou call_service (nunca '{scenario_id}').\n"
+        f"Siga o prompt do cenario [{scenario_id}] no catalogo em cache.\n"
+        "Use os estados verificados abaixo. Responda em portugues, amigavel, sem entity_id.\n"
+    )
+
+
+async def build_friendly_reply_from_scenario(
+    ha: HomeAssistantClient,
+    catalog: DevicesCatalog,
+    scenario_id: str,
+) -> str:
+    """Resumo legivel para WhatsApp quando o Gemini nao conclui (fallback final)."""
+    from app.user_friendly import format_state_value
+
+    scenario = scenario_by_id(catalog, scenario_id)
+    if not scenario:
+        return ""
+
+    entity_ids = entity_ids_for_scenarios([scenario])
+    if not entity_ids:
+        return ""
+
+    verified = await fetch_verified_entity_states(ha, entity_ids)
+    lines: list[str] = []
+    for eid in entity_ids:
+        st = verified.get(eid)
+        if not st:
+            continue
+        line = format_state_value(eid, st, catalog)
+        if "indisponivel" in line.lower():
+            continue
+        lines.append(line)
+
+    if not lines:
+        return "Nao consegui obter os dados do Home Assistant agora. Tente de novo em instantes."
+
+    return "Situação atual:\n\n" + "\n".join(lines)

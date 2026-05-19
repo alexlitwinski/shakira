@@ -13,7 +13,11 @@ if TYPE_CHECKING:
 
 _PLACEHOLDER_PREFIX = "[usuario enviou"
 
-_SAVE_WORDS = ("guarda", "salva", "salvar", "lembr", "anot", "arquiva", "arquivo")
+_SAVE_WORDS = ("salva", "salvar", "lembr", "anot", "arquiva", "arquivo")
+_SAVE_WORD_RE = re.compile(
+    r"\b(guarda|guardar|salva|salvar|lembr|anot|arquiva|arquivo)\b",
+    re.IGNORECASE,
+)
 _PERSONAL_WORDS = (
     "pessoal",
     "memoria",
@@ -100,12 +104,15 @@ def _combined_intent_text(inbound: InboundContent) -> str:
 
 def media_has_explicit_intent(inbound: InboundContent) -> bool:
     """True se legenda ou texto ja indicam guardar (pessoal ou PhotoPrism)."""
-    combined = _combined_intent_text(inbound).casefold()
+    combined = _combined_intent_text(inbound)
     if not combined:
         return False
-    if any(w in combined for w in _SAVE_WORDS):
+    lower = combined.casefold()
+    if _SAVE_WORD_RE.search(combined):
         return True
-    if any(w in combined for w in _PHOTOPRISM_WORDS):
+    if any(w in lower for w in _SAVE_WORDS):
+        return True
+    if any(w in lower for w in _PHOTOPRISM_WORDS):
         return True
     return False
 

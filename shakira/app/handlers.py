@@ -16,6 +16,10 @@ import httpx
 
 from app.cameras_catalog import CamerasCatalog
 from app.config import AppSettings
+from app.confirmation_context import (
+    augment_user_message_for_affirmative,
+    correct_affirmative_misroute,
+)
 from app.conversation_history import format_for_prompt, get_recent, record_exchange
 from app.devices_catalog import DevicesCatalog
 from app.frigate import FrigateClient, FrigateError
@@ -34,7 +38,11 @@ from app.photoprism import (
     normalize_photo_filters,
     photo_matches_place,
 )
-from app.scenario_fallback import try_scenario_fallback_reply
+from app.scenario_context import (
+    build_friendly_reply_from_scenario,
+    build_gemini_scenario_correction_block,
+    prepend_scenario_states_to_context,
+)
 from app.user_memory import InboundContent, InboundMedia, UserMemoryStore, get_store
 from app.user_memory_cache import ensure_user_memory_cache, invalidate_user_memory_cache
 from app.user_memory_prompts import USER_MEMORY_ACTIONS_INSTRUCTION
@@ -62,9 +70,10 @@ from app.user_friendly import (
     format_checking,
     format_ha_error_user,
     format_state_value,
+    is_internal_instruction_leak,
     polish_user_message,
 )
-from app.whatsapp_steps import StepMessenger, truncate_whatsapp
+from app.whatsapp_steps import StepMessenger, TypingSession, truncate_whatsapp
 
 log = logging.getLogger(__name__)
 
@@ -196,43 +205,59 @@ def _accept_inbound_once(phone: str, text: str) -> bool:
     return True
 
 
+def _unwrap_whatsapp_message(msg: dict[str, Any]) -> dict[str, Any]:
+    """Desembrulha ephemeral/viewOnce/documentWithCaption etc."""
+    current = msg
+    for _ in range(6):
+        if not isinstance(current, dict):
+            break
+        nested: dict[str, Any] | None = None
+        for key in (
+            "ephemeralMessage",
+            "viewOnceMessage",
+            "viewOnceMessageV2",
+            "documentWithCaptionMessage",
+        ):
+            wrap = current.get(key)
+            if isinstance(wrap, dict):
+                inner = wrap.get("message")
+                nested = inner if isinstance(inner, dict) else wrap
+                break
+        if nested is None:
+            break
+        current = nested
+    return current if isinstance(current, dict) else msg
+
+
+def _media_from_part(part: dict[str, Any], mediatype: str) -> InboundMedia:
+    defaults = {
+        "image": ("imagem.jpg", "image/jpeg"),
+        "document": ("documento", "application/octet-stream"),
+        "video": ("video.mp4", "video/mp4"),
+        "audio": ("audio.ogg", "audio/ogg"),
+    }
+    default_name, default_mime = defaults.get(mediatype, ("arquivo", "application/octet-stream"))
+    return InboundMedia(
+        mediatype=mediatype,
+        filename=str(part.get("fileName") or part.get("title") or default_name),
+        mimetype=str(part.get("mimetype") or part.get("mimeType") or default_mime),
+        caption=str(part.get("caption") or "").strip(),
+        message_record={},
+    )
+
+
 def _extract_media_from_message(msg: dict[str, Any]) -> InboundMedia | None:
-    if isinstance(msg.get("imageMessage"), dict):
-        im = msg["imageMessage"]
-        return InboundMedia(
-            mediatype="image",
-            filename=str(im.get("fileName") or "imagem.jpg"),
-            mimetype=str(im.get("mimetype") or im.get("mimeType") or "image/jpeg"),
-            caption=str(im.get("caption") or "").strip(),
-            message_record={},
-        )
-    if isinstance(msg.get("documentMessage"), dict):
-        dm = msg["documentMessage"]
-        return InboundMedia(
-            mediatype="document",
-            filename=str(dm.get("fileName") or dm.get("title") or "documento"),
-            mimetype=str(dm.get("mimetype") or dm.get("mimeType") or "application/octet-stream"),
-            caption=str(dm.get("caption") or "").strip(),
-            message_record={},
-        )
-    if isinstance(msg.get("videoMessage"), dict):
-        vm = msg["videoMessage"]
-        return InboundMedia(
-            mediatype="video",
-            filename=str(vm.get("fileName") or "video.mp4"),
-            mimetype=str(vm.get("mimetype") or vm.get("mimeType") or "video/mp4"),
-            caption=str(vm.get("caption") or "").strip(),
-            message_record={},
-        )
-    if isinstance(msg.get("audioMessage"), dict):
-        am = msg["audioMessage"]
-        return InboundMedia(
-            mediatype="audio",
-            filename=str(am.get("fileName") or "audio.ogg"),
-            mimetype=str(am.get("mimetype") or am.get("mimeType") or "audio/ogg"),
-            caption="",
-            message_record={},
-        )
+    body = _unwrap_whatsapp_message(msg)
+    if isinstance(body.get("imageMessage"), dict):
+        return _media_from_part(body["imageMessage"], "image")
+    if isinstance(body.get("documentMessage"), dict):
+        return _media_from_part(body["documentMessage"], "document")
+    if isinstance(body.get("videoMessage"), dict):
+        return _media_from_part(body["videoMessage"], "video")
+    if isinstance(body.get("audioMessage"), dict):
+        return _media_from_part(body["audioMessage"], "audio")
+    if isinstance(body.get("stickerMessage"), dict):
+        return _media_from_part(body["stickerMessage"], "image")
     return None
 
 
@@ -262,9 +287,8 @@ def extract_inbound_content(record: dict[str, Any]) -> InboundContent | None:
     if not digits:
         return None
 
-    msg = record.get("message") or {}
-    if isinstance(msg.get("ephemeralMessage"), dict):
-        msg = msg["ephemeralMessage"].get("message") or msg
+    raw_msg = record.get("message") or {}
+    msg = _unwrap_whatsapp_message(raw_msg) if isinstance(raw_msg, dict) else {}
 
     text = ""
     if isinstance(msg.get("conversation"), str):
@@ -278,7 +302,22 @@ def extract_inbound_content(record: dict[str, Any]) -> InboundContent | None:
         d = msg["listResponseMessage"].get("description")
         text = f"{t or ''} {d or ''}".strip()
 
-    media = _extract_media_from_message(msg)
+    media = _extract_media_from_message(msg if isinstance(msg, dict) else {})
+    if not media:
+        msg_type = str(record.get("messageType") or "").strip()
+        if msg_type in (
+            "documentMessage",
+            "imageMessage",
+            "videoMessage",
+            "audioMessage",
+            "stickerMessage",
+            "documentWithCaptionMessage",
+        ):
+            log.warning(
+                "messageType=%s mas midia nao extraida; chaves message=%s",
+                msg_type,
+                list(msg.keys()) if isinstance(msg, dict) else type(msg),
+            )
     if media:
         media.message_record = record
         if not text.strip() and media.caption:
@@ -442,45 +481,6 @@ def _resolve_evolution_instance(
     return (hint or str(webhook_instance) or default_inst or settings.evolution_instance).strip()
 
 
-async def _notify_typing(
-    evo: EvolutionClient,
-    *,
-    evo_base: str,
-    evo_key: str,
-    instance: str,
-    phone: str,
-) -> None:
-    """Envia 'digitando...' no WhatsApp enquanto o agente processa."""
-    if not evo_base or not evo_key or not instance or not phone:
-        return
-    delay_ms = int(os.environ.get("EVOLUTION_TYPING_DELAY_MS", "12000"))
-    await evo.send_typing(
-        base_url=evo_base,
-        api_key=evo_key,
-        instance=instance,
-        number=phone,
-        delay_ms=delay_ms,
-    )
-
-
-async def _stop_typing(
-    evo: EvolutionClient,
-    *,
-    evo_base: str,
-    evo_key: str,
-    instance: str,
-    phone: str,
-) -> None:
-    if not evo_base or not evo_key or not instance or not phone:
-        return
-    await evo.send_paused(
-        base_url=evo_base,
-        api_key=evo_key,
-        instance=instance,
-        number=phone,
-    )
-
-
 def extract_target_entity_id(
     domain: str,
     service: str,
@@ -554,13 +554,59 @@ def normalize_gemini_action(
     return fixed, None
 
 
-def _scenario_retry_suffix(scenario_id: str) -> str:
-    return (
-        f"\n\n[Correcao do sistema] O campo action deve ser reply, get_state ou call_service — "
-        f"nunca '{scenario_id}'. Siga o cenario [{scenario_id}] no catalogo: use os estados no "
-        f"contexto ou get_state, responda de forma completa agora (temperatura, sim/nao, pergunta "
-        f"se deve aquecer). Nao envie apenas mensagens do tipo 'verificando...'."
+async def _apply_scenario_context_for_retry(
+    ha: HomeAssistantClient,
+    catalog: DevicesCatalog,
+    ctx: str,
+    scenario_id: str,
+) -> str:
+    ctx = await prepend_scenario_states_to_context(ha, catalog, ctx, scenario_id)
+    correction = build_gemini_scenario_correction_block(scenario_id)
+    return f"{correction}\n\n{ctx}"
+
+
+async def _ensure_user_friendly_decision(
+    decision: dict[str, Any],
+    *,
+    ha: HomeAssistantClient,
+    catalog: DevicesCatalog,
+    scenario_id: str | None,
+) -> dict[str, Any]:
+    """Garante resposta amigavel; nunca envia instrucao interna ou dump tecnico."""
+    raw = str(decision.get("response") or "").strip()
+    action = str(decision.get("action") or "reply").lower()
+    if action not in VALID_GEMINI_ACTIONS:
+        action = "reply"
+
+    cleaned = polish_user_message(raw)
+    needs_friendly = (
+        not cleaned
+        or is_internal_instruction_leak(raw)
+        or _is_placeholder_scenario_response(raw)
     )
+
+    if needs_friendly and scenario_id:
+        friendly = await build_friendly_reply_from_scenario(ha, catalog, scenario_id)
+        if friendly:
+            log.info("Resposta amigavel HA cenario=%s (Gemini nao concluiu)", scenario_id)
+            out = dict(decision)
+            out["action"] = "reply"
+            out["response"] = friendly
+            return out
+
+    if cleaned:
+        out = dict(decision)
+        out["action"] = action if action in VALID_GEMINI_ACTIONS else "reply"
+        out["response"] = cleaned
+        return out
+
+    if raw and is_internal_instruction_leak(raw):
+        log.warning("Bloqueada resposta com instrucao interna vazada")
+
+    out = dict(decision)
+    out["action"] = "reply"
+    out["response"] = "Nao consegui concluir a resposta agora. Tente de novo em instantes."
+    return out
 
 
 def _log_gemini_decision(phone: str, decision: dict[str, Any]) -> None:
@@ -1829,35 +1875,37 @@ async def handle_evolution_payload(
                 continue
 
         if inbound.media:
-            if media_has_explicit_intent(inbound):
-                routed = await route_explicit_inbound_media(
-                    inbound,
-                    settings=settings,
-                    evo=evo,
-                    http=http,
-                    instance=send_instance,
+            async with TypingSession(
+                evo,
+                evo_base=evo_base,
+                evo_key=evo_key,
+                instance=send_instance,
+                phone=phone_norm,
+            ):
+                log.info(
+                    "Midia recebida phone=%s tipo=%s arquivo=%s",
+                    phone_norm,
+                    inbound.media.mediatype,
+                    inbound.media.filename[:80],
                 )
-                if routed:
-                    reply_text = _truncate_whatsapp(polish_user_message(routed))
-                    if evo_base and evo_key and send_instance:
-                        await evo.send_text(
-                            base_url=evo_base,
-                            api_key=evo_key,
-                            instance=send_instance,
-                            number=phone_norm,
-                            text=reply_text,
-                        )
-                        record_exchange(phone_norm, user_text or "", reply_text)
-                    continue
-            else:
-                ask_msg = await handle_ambiguous_inbound_media(
-                    inbound,
-                    settings=settings,
-                    evo=evo,
-                    instance=send_instance,
-                )
-                if ask_msg:
-                    reply_text = _truncate_whatsapp(polish_user_message(ask_msg))
+                media_reply: str | None = None
+                if media_has_explicit_intent(inbound):
+                    media_reply = await route_explicit_inbound_media(
+                        inbound,
+                        settings=settings,
+                        evo=evo,
+                        http=http,
+                        instance=send_instance,
+                    )
+                if not media_reply:
+                    media_reply = await handle_ambiguous_inbound_media(
+                        inbound,
+                        settings=settings,
+                        evo=evo,
+                        instance=send_instance,
+                    )
+                if media_reply:
+                    reply_text = _truncate_whatsapp(polish_user_message(media_reply))
                     if evo_base and evo_key and send_instance:
                         await evo.send_text(
                             base_url=evo_base,
@@ -1871,7 +1919,13 @@ async def handle_evolution_payload(
                             user_text or "[arquivo]",
                             reply_text,
                         )
-                    continue
+                else:
+                    log.error(
+                        "Midia sem resposta phone=%s tipo=%s",
+                        phone_norm,
+                        inbound.media.mediatype,
+                    )
+            continue
 
         pending_reply = await try_handle_pending_password(
             phone_norm,
@@ -1896,15 +1950,13 @@ async def handle_evolution_payload(
         send_instance_early = _resolve_evolution_instance(
             _inst_hint, webhook_instance, default_inst, settings
         )
-        await _notify_typing(
+        async with TypingSession(
             evo,
             evo_base=evo_base,
             evo_key=evo_key,
             instance=send_instance_early,
             phone=phone_norm,
-        )
-
-        try:
+        ):
             await _process_inbound_message(
                 inbound=inbound,
                 _inst_hint=_inst_hint,
@@ -1920,14 +1972,6 @@ async def handle_evolution_payload(
                 http=http,
                 send_instance_early=send_instance_early,
                 gemini_cache_name=gemini_cache_name,
-            )
-        finally:
-            await _stop_typing(
-                evo,
-                evo_base=evo_base,
-                evo_key=evo_key,
-                instance=send_instance_early,
-                phone=phone_norm,
             )
 
 
@@ -1948,6 +1992,14 @@ async def _process_inbound_message(
     send_instance_early: str,
     gemini_cache_name: str | None = None,
 ) -> None:
+        if inbound.media:
+            log.error(
+                "Midia nao deveria chegar ao Gemini phone=%s tipo=%s",
+                inbound.phone,
+                inbound.media.mediatype,
+            )
+            return
+
         phone_norm = inbound.phone
         user_text = inbound.text
 
@@ -1978,6 +2030,9 @@ async def _process_inbound_message(
 
         history_entries = get_recent(phone_norm)
         history_text = format_for_prompt(history_entries)
+        gemini_user_message = augment_user_message_for_affirmative(
+            user_text or "", history_entries
+        )
         log.info(
             "Historico phone=%s mensagens=%s chars=%s",
             phone_norm,
@@ -1997,23 +2052,47 @@ async def _process_inbound_message(
 
         decision = await asyncio.to_thread(
             assistant.decide,
-            user_message=user_text or "",
+            user_message=gemini_user_message,
             entities_context=ctx,
             conversation_history=history_text,
             user_memory_context=memory_context,
             memory_in_cache=memory_in_cache,
         )
+        decision = correct_affirmative_misroute(
+            decision,
+            user_text=user_text or "",
+            history_entries=history_entries,
+            catalog=catalog,
+        )
         decision, retry_scenario_id = normalize_gemini_action(decision, catalog)
+        active_scenario_id = retry_scenario_id
+
         if retry_scenario_id:
+            ctx_retry = await _apply_scenario_context_for_retry(
+                ha, catalog, ctx, retry_scenario_id
+            )
+            log.info(
+                "Retry Gemini com estados HA phone=%s cenario=%s",
+                phone_norm,
+                retry_scenario_id,
+            )
             decision = await asyncio.to_thread(
                 assistant.decide,
-                user_message=(user_text or "") + _scenario_retry_suffix(retry_scenario_id),
-                entities_context=ctx,
+                user_message=gemini_user_message,
+                entities_context=ctx_retry,
                 conversation_history=history_text,
                 user_memory_context=memory_context,
                 memory_in_cache=memory_in_cache,
             )
-            decision, _ = normalize_gemini_action(decision, catalog)
+            decision = correct_affirmative_misroute(
+                decision,
+                user_text=user_text or "",
+                history_entries=history_entries,
+                catalog=catalog,
+            )
+            decision, retry_scenario_id = normalize_gemini_action(decision, catalog)
+            if retry_scenario_id:
+                active_scenario_id = retry_scenario_id
 
         decision = try_memory_delete_override(
             decision,
@@ -2023,28 +2102,43 @@ async def _process_inbound_message(
         )
 
         reply_preview = str(decision.get("response") or "").strip()
-        needs_fallback = (
+        needs_retry = (
             _is_placeholder_scenario_response(reply_preview)
+            or is_internal_instruction_leak(reply_preview)
             or (str(decision.get("action") or "reply").lower() not in VALID_GEMINI_ACTIONS)
             or (str(decision.get("action") or "reply").lower() == "reply" and not reply_preview)
         )
-        skip_execute = False
-        if needs_fallback and retry_scenario_id:
-            fb = await try_scenario_fallback_reply(
-                ha=ha,
-                catalog=catalog,
-                scenario_id=retry_scenario_id,
-                on_step=messenger.step if messenger else None,
+        if needs_retry and active_scenario_id:
+            ctx_retry = await _apply_scenario_context_for_retry(
+                ha, catalog, ctx, active_scenario_id
             )
-            if fb is not None:
-                log.info(
-                    "Fallback de cenario phone=%s scenario=%s",
-                    phone_norm,
-                    retry_scenario_id,
-                )
-                decision = {"action": "reply", "response": fb}
-            elif messenger and messenger.sent_any:
-                skip_execute = True
+            log.info(
+                "Segundo retry Gemini phone=%s cenario=%s",
+                phone_norm,
+                active_scenario_id,
+            )
+            decision = await asyncio.to_thread(
+                assistant.decide,
+                user_message=gemini_user_message,
+                entities_context=ctx_retry,
+                conversation_history=history_text,
+                user_memory_context=memory_context,
+                memory_in_cache=memory_in_cache,
+            )
+            decision = correct_affirmative_misroute(
+                decision,
+                user_text=user_text or "",
+                history_entries=history_entries,
+                catalog=catalog,
+            )
+            decision, _ = normalize_gemini_action(decision, catalog)
+
+        decision = await _ensure_user_friendly_decision(
+            decision,
+            ha=ha,
+            catalog=catalog,
+            scenario_id=active_scenario_id,
+        )
 
         _log_gemini_decision(phone_norm, decision)
 
@@ -2129,23 +2223,20 @@ async def _process_inbound_message(
             )
             return
 
-        reply_text = ""
-        if not skip_execute:
-            reply_text = await execute_decision(
-                decision,
-                ha=ha,
-                catalog=catalog,
-                phone=phone_norm,
-                user_text=user_text or "",
-                entities_context_used=True,
-                messenger=messenger,
-            )
+        reply_text = await execute_decision(
+            decision,
+            ha=ha,
+            catalog=catalog,
+            phone=phone_norm,
+            user_text=user_text or "",
+            entities_context_used=True,
+            messenger=messenger,
+        )
 
         if not phone_norm:
             return
         if (
-            not skip_execute
-            and not reply_text.strip()
+            not reply_text.strip()
             and not (messenger and messenger.sent_any)
         ):
             return

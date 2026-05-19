@@ -65,7 +65,7 @@ class StepMessenger:
     async def typing(self) -> None:
         if not self.evo_base or not self.evo_key or not self.instance:
             return
-        delay_ms = int(os.environ.get("EVOLUTION_TYPING_DELAY_MS", "120000"))
+        delay_ms = int(os.environ.get("EVOLUTION_TYPING_DELAY_MS", "15000"))
         await self.evo.send_typing(
             base_url=self.evo_base,
             api_key=self.evo_key,
@@ -73,3 +73,71 @@ class StepMessenger:
             number=self.phone,
             delay_ms=delay_ms,
         )
+
+
+class TypingSession:
+    """Mantem 'digitando...' no WhatsApp enquanto o agente processa (renova ate parar)."""
+
+    def __init__(
+        self,
+        evo: EvolutionClient,
+        *,
+        evo_base: str,
+        evo_key: str,
+        instance: str,
+        phone: str,
+    ) -> None:
+        self.evo = evo
+        self.evo_base = evo_base.strip()
+        self.evo_key = evo_key.strip()
+        self.instance = instance.strip()
+        self.phone = phone
+        self._stop = asyncio.Event()
+        self._task: asyncio.Task[None] | None = None
+
+    def _enabled(self) -> bool:
+        return bool(self.evo_base and self.evo_key and self.instance and self.phone)
+
+    async def _pulse(self) -> None:
+        if not self._enabled():
+            return
+        delay_ms = int(os.environ.get("EVOLUTION_TYPING_DELAY_MS", "15000"))
+        await self.evo.send_typing(
+            base_url=self.evo_base,
+            api_key=self.evo_key,
+            instance=self.instance,
+            number=self.phone,
+            delay_ms=delay_ms,
+        )
+
+    async def _loop(self) -> None:
+        refresh_sec = float(os.environ.get("EVOLUTION_TYPING_REFRESH_SEC", "10"))
+        refresh_sec = max(3.0, refresh_sec)
+        while not self._stop.is_set():
+            try:
+                await asyncio.wait_for(self._stop.wait(), timeout=refresh_sec)
+            except asyncio.TimeoutError:
+                if not self._stop.is_set():
+                    await self._pulse()
+
+    async def __aenter__(self) -> TypingSession:
+        if self._enabled():
+            await self._pulse()
+            self._task = asyncio.create_task(self._loop())
+        return self
+
+    async def __aexit__(self, *args: object) -> None:
+        self._stop.set()
+        if self._task is not None:
+            self._task.cancel()
+            try:
+                await self._task
+            except asyncio.CancelledError:
+                pass
+        if self._enabled():
+            await self.evo.send_paused(
+                base_url=self.evo_base,
+                api_key=self.evo_key,
+                instance=self.instance,
+                number=self.phone,
+            )

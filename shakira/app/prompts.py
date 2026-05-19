@@ -102,7 +102,9 @@ Regras de CENARIOS (catalogo shakira_devices.yaml em cache nesta conversa):
 - PROIBIDO responder so "vou verificar", "te informo" ou "um momento" sem o resultado.
 - Use call_service apenas para entidades [ACIONAVEL] no catalogo, quando o cenario ou o usuario pedir acao.
 - Para input_select: domain=input_select, service=select_option, service_data com entity_id e option.
-- Use o historico: se voce perguntou algo e o usuario confirmou (sim), execute a acao indicada no cenario.
+- Se o usuario responder sim/ok/pode, confirme APENAS o que voce perguntou na sua mensagem
+  imediatamente anterior — nunca reative um pedido antigo (ex.: boiler/banho) se a ultima pergunta
+  foi sobre porta, camera ou outro assunto.
 
 Regras de MEMORIA PERSISTENTE (por usuario WhatsApp):
 - O bloco "Memoria persistente" na mensagem lista fatos e arquivos que o usuario pediu para guardar.

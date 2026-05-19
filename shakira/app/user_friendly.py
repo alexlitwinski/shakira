@@ -18,6 +18,31 @@ TECHNICAL_LINE_RE = re.compile(
     re.IGNORECASE | re.MULTILINE,
 )
 
+INTERNAL_INSTRUCTION_MARKERS = (
+    "siga o prompt",
+    "dados atuais (cenario",
+    "conforme o cenario configurado",
+    "vou consultar o",
+    "[estados verificados",
+    "[instrucao interna",
+    "[correcao do sistema]",
+    "[cenario aplicavel:",
+    "no catalogo para responder",
+    "no catalogo em cache",
+)
+
+
+def is_internal_instruction_leak(text: str) -> bool:
+    """Detecta texto de instrucao interna ou dump de cenario vazado para o usuario."""
+    lower = (text or "").lower()
+    if not lower.strip():
+        return False
+    if any(m in lower for m in INTERNAL_INSTRUCTION_MARKERS):
+        return True
+    if lower.startswith("- ") and "cenario" in lower and ("°c" in lower or " indisponivel" in lower):
+        return True
+    return False
+
 
 def humanize_entity_id(entity_id: str) -> str:
     if "." in entity_id:
@@ -74,6 +99,26 @@ def format_state_value(entity_id: str, state: dict[str, Any], catalog: DevicesCa
             return f"{label}: {val:g}{unit}."
         except ValueError:
             pass
+
+    if domain == "binary_sensor" and "ping" in entity_id.lower():
+        if str(raw).lower() == "on":
+            return f"{label}: online."
+        if str(raw).lower() == "off":
+            return f"{label}: offline."
+        return f"{label}: {raw}."
+
+    if domain == "climate":
+        attrs = state.get("attributes") or {}
+        parts: list[str] = []
+        if isinstance(attrs, dict):
+            cur = attrs.get("current_temperature")
+            tgt = attrs.get("temperature")
+            if cur is not None:
+                parts.append(f"agora {cur:g}°C")
+            if tgt is not None:
+                parts.append(f"alvo {tgt:g}°C")
+        extra = f" ({', '.join(parts)})" if parts else ""
+        return f"{label}: {raw}{extra}."
 
     if domain in ("switch", "input_boolean", "light", "fan"):
         on = str(raw).lower() in ("on", "true", "ligado", "open", "unlocked")
@@ -216,6 +261,9 @@ def polish_user_message(text: str) -> str:
     """Remove termos tecnicos e dumps JSON antes de enviar ao WhatsApp."""
     t = (text or "").strip()
     if not t:
+        return ""
+
+    if is_internal_instruction_leak(t):
         return ""
 
     if t.startswith("[{") or t.startswith("[{'") or "'entity_id'" in t[:200]:
