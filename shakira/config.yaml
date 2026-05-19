@@ -52,15 +52,4 @@ schema:
   frigate_cameras_config_path: str?
   alerts_config_path: str?
   shakira_api_token: password?
-  log_level:
-    name: Nivel de log
-    description: >
-      Detalhe dos registos do add-on. Debug inclui tempos de resposta (HA, Gemini),
-      cache, webhooks e pedidos HTTP para diagnostico de performance.
-    optional: true
-    default: info
-    options:
-      - none
-      - error
-      - info
-      - debug
+  log_level: list(none|error|info|debug)?
