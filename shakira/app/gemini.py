@@ -10,6 +10,7 @@ from typing import Any
 import google.generativeai as genai
 
 from app.prompts import SYSTEM_INSTRUCTION
+from app.scheduled_response_prompts import SCHEDULED_REPLY_SYSTEM, build_scheduled_reply_prompt
 
 log = logging.getLogger(__name__)
 
@@ -119,3 +120,39 @@ Mensagem atual do usuario:
                 "action": "reply",
                 "response": raw[:2000] if raw else "Sem resposta do modelo.",
             }
+
+    def generate_scheduled_reply(
+        self,
+        *,
+        context: str,
+        trigger_summary: str,
+        entity_states_block: str = "",
+        conversation_history: str = "",
+    ) -> str:
+        """Gera texto proactivo para disparo de agendamento (reply-only, sem JSON)."""
+        prompt = build_scheduled_reply_prompt(
+            context=context,
+            trigger_summary=trigger_summary,
+            entity_states_block=entity_states_block,
+            conversation_history=conversation_history,
+        )
+        try:
+            model = genai.GenerativeModel(
+                model_name=self._model_name,
+                system_instruction=SCHEDULED_REPLY_SYSTEM,
+            )
+            response = model.generate_content(
+                prompt,
+                generation_config=genai.GenerationConfig(
+                    temperature=0.3,
+                ),
+            )
+        except Exception:
+            log.exception("Gemini generate_scheduled_reply falhou")
+            return ""
+
+        text = getattr(response, "text", None) or ""
+        if not text and response.candidates:
+            parts = response.candidates[0].content.parts
+            text = "".join(getattr(p, "text", "") for p in parts)
+        return text.strip()[:2000]

@@ -4,18 +4,16 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import re
 import time
 from dataclasses import dataclass, field
 from typing import Any
-
-_NUMERIC_WHEN_RE = re.compile(r"^(>=|<=|>|<|==?)\s*([\d.]+)$", re.IGNORECASE)
 
 from app.alerts_catalog import AlertConfig, AlertsCatalog
 from app.config import AppSettings
 from app.evolution import EvolutionClient
 from app.handlers import ENTITY_PERMITTED, fetch_permitted_phones_raw, normalize_phone_digits, parse_allowed_numbers
 from app.homeassistant import HomeAssistantClient
+from app.state_conditions import state_matches
 from app.whatsapp_outbound import WhatsAppSendError, send_whatsapp_text
 
 log = logging.getLogger(__name__)
@@ -106,36 +104,6 @@ class AlertsRunner:
         raw = await fetch_permitted_phones_raw(self.ha)
         return sorted(parse_allowed_numbers(raw))
 
-    def _state_matches(self, state: str | None, when_state: str) -> bool:
-        if state is None:
-            return False
-        st = state.strip()
-        cond = when_state.strip()
-        if not cond:
-            return False
-
-        m = _NUMERIC_WHEN_RE.match(cond)
-        if m:
-            try:
-                val = float(st.replace(",", "."))
-                threshold = float(m.group(2))
-            except ValueError:
-                return False
-            op = m.group(1)
-            if op == ">":
-                return val > threshold
-            if op == ">=":
-                return val >= threshold
-            if op == "<":
-                return val < threshold
-            if op == "<=":
-                return val <= threshold
-            if op in ("==", "="):
-                return val == threshold
-            return False
-
-        return st.lower() == cond.lower()
-
     async def _run_due_checks(self) -> None:
         now = time.monotonic()
         for alert in self.catalog.enabled_alerts():
@@ -156,7 +124,7 @@ class AlertsRunner:
             return
 
         state = str(state_data.get("state", ""))
-        matched = self._state_matches(state, alert.when_state)
+        matched = state_matches(state, alert.when_state)
 
         if not matched:
             if rt.last_matched:

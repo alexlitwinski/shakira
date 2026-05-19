@@ -156,6 +156,65 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     .msg.error { display: block; background: rgba(248,113,113,.1); border: 1px solid var(--err); color: var(--err); white-space: pre-wrap; }
     .msg.ok { display: block; background: rgba(61,214,140,.1); border: 1px solid var(--ok); color: var(--ok); white-space: pre-wrap; }
     .footer { margin-top: 1.5rem; font-size: 0.8rem; color: var(--muted); text-align: center; }
+    .section-title {
+      font-size: 1rem;
+      font-weight: 600;
+      margin: 1.25rem 0 0.65rem;
+      color: var(--text);
+    }
+    .pending-card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 1rem;
+      margin-top: 0.5rem;
+      overflow-x: auto;
+    }
+    .pending-empty {
+      color: var(--muted);
+      font-size: 0.9rem;
+      margin: 0;
+    }
+    .pending-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.82rem;
+    }
+    .pending-table th,
+    .pending-table td {
+      text-align: left;
+      padding: 0.55rem 0.65rem;
+      border-bottom: 1px solid var(--border);
+      vertical-align: top;
+    }
+    .pending-table th {
+      color: var(--muted);
+      font-weight: 600;
+      font-size: 0.75rem;
+      text-transform: uppercase;
+      letter-spacing: 0.03em;
+    }
+    .pending-table tr:last-child td { border-bottom: none; }
+    .pending-table .mono {
+      font-family: "Cascadia Code", "Consolas", monospace;
+      font-size: 0.78rem;
+      color: var(--accent);
+    }
+    .pending-table .ctx {
+      color: var(--muted);
+      max-width: 280px;
+    }
+    .tag {
+      display: inline-block;
+      padding: 0.15rem 0.45rem;
+      border-radius: 6px;
+      font-size: 0.72rem;
+      font-weight: 600;
+      background: rgba(37, 211, 102, 0.12);
+      color: var(--accent);
+    }
+    .tag.time { background: rgba(245, 197, 66, 0.12); color: var(--warn); }
+    .tag.action { background: rgba(96, 165, 250, 0.12); color: #93c5fd; }
   </style>
 </head>
 <body>
@@ -183,6 +242,8 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         <span class="meta">Atualizacao automatica a cada 30s</span>
       </div>
       <div class="grid" id="grid"></div>
+      <h2 class="section-title">Agendamentos pendentes (avisos e acoes)</h2>
+      <div class="pending-card" id="scheduled-pending"></div>
     </section>
 
     <section id="panel-yaml-devices" class="panel">
@@ -303,6 +364,56 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       return s + "s";
     }
 
+    function formatDate(iso) {
+      if (!iso) return "—";
+      try {
+        return new Date(iso).toLocaleString("pt-BR");
+      } catch (e) {
+        return iso;
+      }
+    }
+
+    function formatPhone(phone) {
+      if (!phone) return "—";
+      const s = String(phone);
+      if (s.length <= 4) return s;
+      return "+" + s;
+    }
+
+    function renderScheduledPending(items) {
+      const box = document.getElementById("scheduled-pending");
+      if (!items || !items.length) {
+        box.innerHTML = '<p class="pending-empty">Nenhum agendamento pendente.</p>';
+        return;
+      }
+      const rows = items.map(function(item) {
+        const isAction = item.kind === "action";
+        const tagClass = isAction ? "tag action" : (item.trigger_type === "time" ? "tag time" : "tag");
+        const typeLabel = isAction ? "Acao" : "Aviso";
+        const triggerLabel = item.trigger_type === "time" ? "Tempo" : "Entidade";
+        const label = item.label ? esc(item.label) : '<span class="meta">—</span>';
+        const actionHint = isAction && item.action_entity_id
+          ? '<br><span class="mono">' + esc(item.action_domain + "/" + item.action_service) +
+            " @ " + esc(item.action_entity_id) + '</span>'
+          : "";
+        return '<tr>' +
+          '<td class="mono">' + esc(item.id) + '</td>' +
+          '<td><span class="' + tagClass + '">' + esc(typeLabel) + '</span></td>' +
+          '<td>' + esc(formatPhone(item.phone)) + '</td>' +
+          '<td>' + label + '</td>' +
+          '<td><span class="tag">' + esc(triggerLabel) + '</span><br>' +
+            esc(item.trigger_summary || "") + actionHint + '</td>' +
+          '<td class="ctx">' + esc(item.context || "") + '</td>' +
+          '<td>' + esc(formatDate(item.created_at)) + '</td>' +
+          '<td>' + esc(formatDate(item.expires_at)) + '</td>' +
+          '</tr>';
+      }).join("");
+      box.innerHTML = '<table class="pending-table"><thead><tr>' +
+        '<th>ID</th><th>Tipo</th><th>Telefone</th><th>Label</th><th>Trigger</th>' +
+        '<th>Contexto</th><th>Criado</th><th>Expira</th>' +
+        '</tr></thead><tbody>' + rows + '</tbody></table>';
+    }
+
     async function loadStatus() {
       try {
         const r = await fetch("api/status", { headers: { Accept: "application/json" } });
@@ -314,6 +425,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         const up = data.uptime_seconds != null ? " · Uptime " + formatUptime(data.uptime_seconds) : "";
         document.getElementById("meta").textContent = "v" + (data.version || "?") + " · " + gen + up;
         document.getElementById("grid").innerHTML = (data.services || []).map(renderCard).join("");
+        renderScheduledPending(data.scheduled_pending || []);
       } catch (e) {
         showMsg("Nao foi possivel carregar o status: " + e.message, "error");
       }

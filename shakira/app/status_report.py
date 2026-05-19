@@ -270,6 +270,35 @@ def _check_webhook() -> dict[str, Any]:
     }
 
 
+def _check_scheduled_responses(status: dict[str, Any] | None) -> dict[str, Any]:
+    if not status:
+        return {
+            "id": "scheduled_responses",
+            "name": "Respostas agendadas",
+            "status": "disabled",
+            "summary": "Executor nao inicializado",
+            "details": {},
+        }
+    pending = int(status.get("pending_count") or 0)
+    running = bool(status.get("running"))
+    if pending == 0:
+        summary = "Nenhum agendamento pending"
+        level = "ok"
+    elif running:
+        summary = f"{pending} agendamento(s) pending, executor activo"
+        level = "ok"
+    else:
+        summary = f"{pending} agendamento(s) pending, executor parado"
+        level = "warning"
+    return {
+        "id": "scheduled_responses",
+        "name": "Respostas agendadas",
+        "status": level,
+        "summary": summary,
+        "details": status,
+    }
+
+
 async def _check_frigate(
     http: httpx.AsyncClient, settings: AppSettings, cameras: CamerasCatalog
 ) -> dict[str, Any]:
@@ -318,6 +347,7 @@ async def build_status_report(
     cameras: CamerasCatalog | None = None,
     gemini_cache_name: str | None,
     started_at: float | None = None,
+    scheduled_responses_status: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     if cameras is None:
         cameras = CamerasCatalog.load(settings.frigate_cameras_config_path)
@@ -349,6 +379,7 @@ async def build_status_report(
 
     services.append(_check_catalog(catalog, settings))
     services.append(_check_webhook())
+    services.append(_check_scheduled_responses(scheduled_responses_status))
 
     uptime_s = None
     if started_at:
@@ -367,4 +398,9 @@ async def build_status_report(
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "uptime_seconds": uptime_s,
         "services": services,
+        "scheduled_pending": (
+            list(scheduled_responses_status.get("pending_items") or [])
+            if scheduled_responses_status
+            else []
+        ),
     }

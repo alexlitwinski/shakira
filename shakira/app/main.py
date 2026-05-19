@@ -20,6 +20,8 @@ from app.cameras_catalog import CamerasCatalog, CamerasCatalogValidationError
 from app.devices_catalog import CatalogValidationError, DevicesCatalog
 from app.alerts_catalog import AlertsCatalog, AlertsCatalogValidationError
 from app.alerts_runner import AlertsRunner
+from app.scheduled_responses import count_all_pending_globally
+from app.scheduled_responses_runner import ScheduledResponsesRunner, set_scheduled_runner
 from app.alerts_yaml_io import (
     read_yaml_file as read_alerts_yaml_file,
     validate_yaml_content as validate_alerts_yaml_content,
@@ -102,8 +104,24 @@ async def lifespan(app: FastAPI):
         )
     app.state.alerts_runner = alerts_runner
 
+    scheduled_runner = ScheduledResponsesRunner(
+        settings=settings,
+        ha=app.state.ha,
+        evo=app.state.evo,
+        catalog=catalog,
+        cameras=cameras,
+        gemini_cache_name=cache_name,
+    )
+    app.state.scheduled_runner = scheduled_runner
+    set_scheduled_runner(scheduled_runner)
+    if count_all_pending_globally():
+        scheduled_runner.start()
+    else:
+        log.info("Nenhum agendamento pending — executor de respostas agendadas em espera")
+
     yield
 
+    await scheduled_runner.stop()
     await alerts_runner.stop()
     await client.aclose()
 
@@ -126,6 +144,10 @@ async def _status_payload(request: Request) -> dict[str, Any]:
     http: httpx.AsyncClient = request.app.state.http
     ha: HomeAssistantClient = request.app.state.ha
     started = getattr(request.app.state, "started_at", None)
+    scheduled_runner: ScheduledResponsesRunner | None = getattr(
+        request.app.state, "scheduled_runner", None
+    )
+    scheduled_status = scheduled_runner.status_snapshot() if scheduled_runner else None
     return await build_status_report(
         settings=settings,
         http=http,
@@ -134,6 +156,7 @@ async def _status_payload(request: Request) -> dict[str, Any]:
         cameras=cameras,
         gemini_cache_name=getattr(request.app.state, "gemini_cache_name", None),
         started_at=started,
+        scheduled_responses_status=scheduled_status,
     )
 
 
@@ -316,6 +339,13 @@ async def put_alerts_yaml(request: Request, body: AlertsYamlBody) -> dict[str, A
 async def get_alerts_status(request: Request) -> dict[str, Any]:
     """Estado do executor de alertas (painel / diagnostico)."""
     runner: AlertsRunner = request.app.state.alerts_runner
+    return runner.status_snapshot()
+
+
+@app.get("/api/scheduled-responses/status")
+async def get_scheduled_responses_status(request: Request) -> dict[str, Any]:
+    """Estado do executor de respostas agendadas (painel / diagnostico)."""
+    runner: ScheduledResponsesRunner = request.app.state.scheduled_runner
     return runner.status_snapshot()
 
 

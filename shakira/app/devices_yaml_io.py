@@ -33,6 +33,8 @@ scenarios:
       Se o usuario perguntar se pode tomar banho ou se a agua do boiler esta quente,
       verifique sensor.temperatura_boiler. Abaixo de 42 graus C, pergunte se deve
       aquecer; se confirmar, ligue input_select.modo_do_boiler (option Ligado).
+      O sistema avisa automaticamente quando a temperatura chegar a 42 graus C ou mais.
+      Se estiver em 42 graus C ou mais, diga que pode tomar banho.
 """
 
 

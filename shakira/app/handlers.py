@@ -43,6 +43,13 @@ from app.scenario_context import (
     build_gemini_scenario_correction_block,
     prepend_scenario_states_to_context,
 )
+from app.scheduled_responses import (
+    MIN_ACTION_DELAY_SECONDS,
+    format_pending_for_prompt,
+    get_scheduled_store,
+)
+from app.scheduled_responses_runner import ensure_scheduled_runner_running
+from app.state_conditions import state_matches
 from app.user_memory import InboundContent, InboundMedia, UserMemoryStore, get_store
 from app.user_memory_cache import ensure_user_memory_cache, invalidate_user_memory_cache
 from app.user_memory_prompts import USER_MEMORY_ACTIONS_INSTRUCTION
@@ -84,6 +91,11 @@ log = logging.getLogger(__name__)
 
 ENTITY_PERMITTED = "input_text.whatsapp_bot_permitidos"
 
+BOILER_MODE_ENTITY = "input_select.modo_do_boiler"
+BOILER_TEMP_ENTITY = "sensor.temperatura_boiler"
+BOILER_READY_WHEN = ">=42"
+BOILER_SCHEDULE_LABEL = "aviso boiler banho"
+
 VALID_GEMINI_ACTIONS = frozenset(
     {
         "reply",
@@ -95,6 +107,9 @@ VALID_GEMINI_ACTIONS = frozenset(
         "save_memory",
         "send_user_file",
         "delete_from_memory",
+        "schedule_response",
+        "schedule_action",
+        "cancel_scheduled_response",
     }
 )
 
@@ -1252,6 +1267,276 @@ def handle_save_memory(decision: dict[str, Any], phone: str) -> str:
     return f"Guardei na sua memoria: {short}"
 
 
+async def handle_schedule_response(
+    decision: dict[str, Any],
+    *,
+    phone: str,
+    ha: HomeAssistantClient,
+) -> str:
+    context = str(decision.get("context") or "").strip()
+    if not context:
+        reply = str(decision.get("response") or "").strip()
+        return reply or "Nao entendi o que devo agendar."
+
+    trigger_type = str(decision.get("trigger_type") or "entity").lower()
+    if trigger_type not in ("time", "entity"):
+        return "Tipo de agendamento invalido."
+
+    label = str(decision.get("label") or decision.get("schedule_label") or "").strip()
+    trigger_on = str(decision.get("trigger_on") or "enter").lower()
+    if trigger_on not in ("enter", "match"):
+        trigger_on = "enter"
+
+    entities_raw = decision.get("context_entities")
+    context_entities: list[str] = []
+    if isinstance(entities_raw, list):
+        for e in entities_raw:
+            if isinstance(e, str) and e.strip():
+                context_entities.append(e.strip())
+
+    store = get_scheduled_store(phone)
+    last_known_state: str | None = None
+    entity_id: str | None = None
+    when_state: str | None = None
+    fire_at: str | None = None
+    fire_after_seconds: int | None = None
+
+    if trigger_type == "entity":
+        entity_id = str(decision.get("entity_id") or "").strip()
+        when_state = str(decision.get("when_state") or "").strip()
+        if not entity_id or not when_state:
+            return "Para agendar por entidade, preciso do aparelho e da condicao."
+        st = await ha.get_state(entity_id)
+        if st:
+            last_known_state = str(st.get("state", ""))
+        if entity_id not in context_entities:
+            context_entities.insert(0, entity_id)
+    else:
+        raw_fire_at = decision.get("fire_at")
+        if isinstance(raw_fire_at, str) and raw_fire_at.strip():
+            fire_at = raw_fire_at.strip()
+        raw_after = decision.get("fire_after_seconds")
+        if isinstance(raw_after, (int, float)):
+            fire_after_seconds = int(raw_after)
+        elif isinstance(raw_after, str) and raw_after.strip().isdigit():
+            fire_after_seconds = int(raw_after.strip())
+        if not fire_at and not fire_after_seconds:
+            return "Para agendar por tempo, preciso de fire_at ou fire_after_seconds."
+
+    try:
+        entry = store.add(
+            context=context,
+            trigger_type=trigger_type,  # type: ignore[arg-type]
+            label=label,
+            fire_at=fire_at,
+            fire_after_seconds=fire_after_seconds,
+            entity_id=entity_id,
+            when_state=when_state,
+            trigger_on=trigger_on,  # type: ignore[arg-type]
+            context_entities=context_entities,
+            last_known_state=last_known_state,
+        )
+    except ValueError as e:
+        return str(e)
+
+    ensure_scheduled_runner_running()
+    confirm = str(decision.get("response") or "").strip()
+    if confirm:
+        return confirm
+    return f"Agendado (id {entry.id}): {entry.summary()}."
+
+
+async def handle_schedule_action(
+    decision: dict[str, Any],
+    *,
+    phone: str,
+    ha: HomeAssistantClient,
+    catalog: DevicesCatalog,
+) -> str:
+    domain = str(decision.get("domain") or "").strip()
+    service = str(decision.get("service") or "").strip()
+    if not domain or not service:
+        reply = str(decision.get("response") or "").strip()
+        return reply or "Comando incompleto para agendar acao (domain/service)."
+
+    raw_svc_data = decision.get("service_data")
+    if raw_svc_data is not None and not isinstance(raw_svc_data, dict):
+        return "service_data invalido."
+    raw_svc_data = dict(raw_svc_data) if isinstance(raw_svc_data, dict) else {}
+
+    target = extract_target_entity_id(domain, service, raw_svc_data, decision.get("entity_id"))
+    if not target:
+        return "Informe entity_id no comando agendado."
+
+    allowed = catalog.actionable_entity_ids()
+    if not allowed:
+        return "Ainda nao tenho nenhum aparelho autorizado para controlar por aqui."
+    if target not in allowed:
+        return (
+            "Nao tenho permissao para agendar alteracao nesse aparelho. "
+            "So posso controlar o que esta na lista de dispositivos do assistente."
+        )
+
+    if catalog.service_requires_password(target, service):
+        return (
+            "Nao consigo agendar acoes que exigem senha. "
+            "Faca agora ou peca para executar imediatamente."
+        )
+
+    svc_data = build_ha_service_data(domain, service, target, raw_svc_data)
+    svc_data = catalog.apply_service_defaults(target, svc_data)
+
+    context = str(decision.get("context") or "").strip()
+    if not context:
+        context = f"Agendar {domain}/{service} em {target}"
+
+    label = str(decision.get("label") or decision.get("schedule_label") or "").strip()
+    trigger_type = str(decision.get("trigger_type") or "time").lower()
+    if trigger_type not in ("time", "entity"):
+        trigger_type = "time"
+    trigger_on = str(decision.get("trigger_on") or "enter").lower()
+    if trigger_on not in ("enter", "match"):
+        trigger_on = "enter"
+
+    entities_raw = decision.get("context_entities")
+    context_entities: list[str] = []
+    if isinstance(entities_raw, list):
+        for e in entities_raw:
+            if isinstance(e, str) and e.strip():
+                context_entities.append(e.strip())
+    if target not in context_entities:
+        context_entities.insert(0, target)
+
+    store = get_scheduled_store(phone)
+    last_known_state: str | None = None
+    entity_id: str | None = None
+    when_state: str | None = None
+    fire_at: str | None = None
+    fire_after_seconds: int | None = None
+
+    if trigger_type == "entity":
+        entity_id = str(decision.get("entity_id") or "").strip()
+        when_state = str(decision.get("when_state") or "").strip()
+        if not entity_id or not when_state:
+            return "Para agendar acao por entidade, preciso do gatilho (entity_id e when_state)."
+        st = await ha.get_state(entity_id)
+        if st:
+            last_known_state = str(st.get("state", ""))
+        if entity_id not in context_entities:
+            context_entities.insert(0, entity_id)
+    else:
+        raw_fire_at = decision.get("fire_at")
+        if isinstance(raw_fire_at, str) and raw_fire_at.strip():
+            fire_at = raw_fire_at.strip()
+        raw_after = decision.get("fire_after_seconds")
+        if isinstance(raw_after, (int, float)):
+            fire_after_seconds = int(raw_after)
+        elif isinstance(raw_after, str) and raw_after.strip().isdigit():
+            fire_after_seconds = int(raw_after.strip())
+        if not fire_at and not fire_after_seconds:
+            return "Para agendar acao, preciso de fire_after_seconds ou fire_at."
+        if fire_after_seconds is not None and fire_after_seconds < MIN_ACTION_DELAY_SECONDS:
+            mins = max(1, MIN_ACTION_DELAY_SECONDS // 60)
+            return f"Agendamento minimo de {mins} minuto(s)."
+
+    try:
+        entry = store.add(
+            context=context,
+            trigger_type=trigger_type,  # type: ignore[arg-type]
+            label=label,
+            kind="action",
+            fire_at=fire_at,
+            fire_after_seconds=fire_after_seconds,
+            entity_id=entity_id,
+            when_state=when_state,
+            trigger_on=trigger_on,  # type: ignore[arg-type]
+            context_entities=context_entities,
+            last_known_state=last_known_state,
+            action_domain=domain,
+            action_service=service,
+            action_service_data=svc_data,
+            action_entity_id=target,
+        )
+    except ValueError as e:
+        return str(e)
+
+    ensure_scheduled_runner_running()
+    confirm = str(decision.get("response") or "").strip()
+    if confirm:
+        return confirm
+    return f"Acao agendada (id {entry.id}): {entry.summary()}."
+
+
+async def _maybe_auto_schedule_boiler_ready(
+    *,
+    phone: str,
+    ha: HomeAssistantClient,
+    target: str,
+    domain: str,
+    service: str,
+    svc_data: dict[str, Any],
+) -> str | None:
+    """Apos ligar o boiler, agenda aviso quando a temperatura atingir 42C."""
+    if target != BOILER_MODE_ENTITY:
+        return None
+    if domain != "input_select" or service != "select_option":
+        return None
+    option = str(svc_data.get("option") or "").strip().lower()
+    if option != "ligado":
+        return None
+
+    store = get_scheduled_store(phone)
+    existing = store.find_by_label(BOILER_SCHEDULE_LABEL)
+    if existing and existing.is_pending():
+        return None
+
+    st = await ha.get_state(BOILER_TEMP_ENTITY)
+    last_known = str(st.get("state", "")) if st else None
+    if last_known and state_matches(last_known, BOILER_READY_WHEN):
+        return None
+
+    try:
+        store.add(
+            context=(
+                "Usuario pediu aquecer a agua do boiler para banho; "
+                "avisar quando atingir 42 graus C ou mais."
+            ),
+            trigger_type="entity",
+            label=BOILER_SCHEDULE_LABEL,
+            entity_id=BOILER_TEMP_ENTITY,
+            when_state=BOILER_READY_WHEN,
+            trigger_on="enter",
+            context_entities=[BOILER_TEMP_ENTITY, BOILER_MODE_ENTITY],
+            last_known_state=last_known,
+        )
+    except ValueError:
+        return None
+
+    ensure_scheduled_runner_running()
+    return "Te aviso quando a agua chegar a 42 graus."
+
+
+def handle_cancel_scheduled_response(decision: dict[str, Any], phone: str) -> str:
+    store = get_scheduled_store(phone)
+    schedule_id = str(decision.get("schedule_id") or "").strip()
+    schedule_label = str(decision.get("schedule_label") or decision.get("label") or "").strip()
+
+    target = store.get_by_id(schedule_id) if schedule_id else None
+    if not target and schedule_label:
+        target = store.find_by_label(schedule_label)
+
+    if not target or not target.is_pending():
+        reply = str(decision.get("response") or "").strip()
+        return reply or "Nao encontrei nenhum agendamento pendente com esse identificador."
+
+    store.cancel(target.id)
+    confirm = str(decision.get("response") or "").strip()
+    if confirm:
+        return confirm
+    desc = target.label or target.context[:60]
+    return f"Cancelado o agendamento: {desc}."
+
+
 async def execute_decision(
     decision: dict[str, Any],
     *,
@@ -1402,6 +1687,16 @@ async def execute_decision(
                 result=result,
                 state_after=st_after,
             )
+            notify_extra = await _maybe_auto_schedule_boiler_ready(
+                phone=phone,
+                ha=ha,
+                target=target,
+                domain=domain,
+                service=service,
+                svc_data=svc_data,
+            )
+            if notify_extra:
+                done = f"{done}\n\n{notify_extra}"
             if messenger:
                 await deliver(done)
                 return ""
@@ -1440,6 +1735,18 @@ async def execute_decision(
 
     if action == "delete_from_memory":
         result = handle_delete_from_memory(decision, phone)
+        return await finalize(result)
+
+    if action == "schedule_response":
+        result = await handle_schedule_response(decision, phone=phone, ha=ha)
+        return await finalize(result)
+
+    if action == "schedule_action":
+        result = await handle_schedule_action(decision, phone=phone, ha=ha, catalog=catalog)
+        return await finalize(result)
+
+    if action == "cancel_scheduled_response":
+        result = handle_cancel_scheduled_response(decision, phone)
         return await finalize(result)
 
     fallback = reply or "Nao entendi o proximo passo."
@@ -2044,6 +2351,9 @@ async def _process_inbound_message(
         gemini_user_message = augment_user_message_for_affirmative(
             user_text or "", history_entries
         )
+        scheduled_block = format_pending_for_prompt(get_scheduled_store(phone_norm).list_pending())
+        if scheduled_block:
+            gemini_user_message = f"{scheduled_block}\n\n{gemini_user_message}"
         log.info(
             "Historico phone=%s mensagens=%s chars=%s",
             phone_norm,
