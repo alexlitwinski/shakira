@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import re
+import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -26,8 +27,19 @@ from app.photoprism import (
     PhotoprismClient,
     PhotoprismError,
     PhotoResult,
+    build_search_attempts,
+    expand_city_variants,
+    photo_matches_place,
 )
 from app.scenario_fallback import try_scenario_fallback_reply
+from app.user_friendly import (
+    format_action_in_progress,
+    format_action_success,
+    format_checking,
+    format_ha_error_user,
+    format_state_value,
+    polish_user_message,
+)
 from app.whatsapp_steps import StepMessenger, truncate_whatsapp
 
 log = logging.getLogger(__name__)
@@ -54,6 +66,20 @@ _PLACEHOLDER_RESPONSE_MARKERS = (
 )
 
 _pending_unlock: dict[str, "PendingUnlock"] = {}
+
+# Evita processar o mesmo texto duas vezes (webhook duplo / eco).
+_inbound_dedup: dict[str, float] = {}
+_INBOUND_DEDUP_SEC = float(os.environ.get("INBOUND_DEDUP_SEC", "5"))
+
+_IGNORE_MESSAGE_TYPES = frozenset(
+    {
+        "protocolMessage",
+        "reactionMessage",
+        "senderKeyDistributionMessage",
+        "pollUpdateMessage",
+        "ephemeralMessage",
+    }
+)
 
 
 @dataclass
@@ -112,8 +138,45 @@ def normalize_evolution_payload(payload: dict[str, Any]) -> list[tuple[str | Non
     return records
 
 
+def _is_outbound_evolution_message(record: dict[str, Any], key: dict[str, Any]) -> bool:
+    return key.get("fromMe") is True or record.get("fromMe") is True
+
+
+def _is_echo_of_last_assistant(phone: str, text: str) -> bool:
+    entries = get_recent(phone)
+    if not entries:
+        return False
+    last = entries[-1]
+    if last.role != "assistant":
+        return False
+    return last.text.strip() == text.strip()
+
+
+def _accept_inbound_once(phone: str, text: str) -> bool:
+    key = f"{phone}:{text}"
+    now = time.monotonic()
+    last = _inbound_dedup.get(key)
+    if last is not None and now - last < _INBOUND_DEDUP_SEC:
+        return False
+    _inbound_dedup[key] = now
+    if len(_inbound_dedup) > 500:
+        cutoff = now - _INBOUND_DEDUP_SEC * 2
+        for k, ts in list(_inbound_dedup.items()):
+            if ts < cutoff:
+                del _inbound_dedup[k]
+    return True
+
+
 def extract_text_and_sender(record: dict[str, Any]) -> tuple[str | None, str | None]:
     key = record.get("key") or {}
+    if not isinstance(key, dict):
+        key = {}
+
+    msg_type = str(record.get("messageType") or "").strip()
+    if msg_type in _IGNORE_MESSAGE_TYPES:
+        log.debug("Ignorando messageType=%s", msg_type)
+        return None, None
+
     remote = key.get("remoteJid") or record.get("remoteJid") or ""
     if not remote:
         return None, None
@@ -121,9 +184,16 @@ def extract_text_and_sender(record: dict[str, Any]) -> tuple[str | None, str | N
         log.debug("Ignorando grupo: %s", remote)
         return None, None
 
+    if _is_outbound_evolution_message(record, key):
+        log.debug("Ignorando mensagem enviada pelo bot (fromMe/status)")
+        return None, None
+
     digits = normalize_phone_digits(remote.split("@")[0])
 
     msg = record.get("message") or {}
+    if isinstance(msg.get("ephemeralMessage"), dict):
+        msg = msg["ephemeralMessage"].get("message") or msg
+
     text = ""
     if isinstance(msg.get("conversation"), str):
         text = msg["conversation"]
@@ -139,8 +209,15 @@ def extract_text_and_sender(record: dict[str, Any]) -> tuple[str | None, str | N
     text = text.strip()
     if not digits or not text:
         return None, None
-    if key.get("fromMe"):
+
+    if _is_echo_of_last_assistant(digits, text):
+        log.info("Ignorando eco da ultima resposta do assistente phone=%s", digits)
         return None, None
+
+    if not _accept_inbound_once(digits, text):
+        log.info("Ignorando mensagem duplicada phone=%s", digits)
+        return None, None
+
     return digits, text
 
 
@@ -190,7 +267,7 @@ async def _finish_whatsapp_exchange(
     if messenger and messenger.sent_any:
         record_exchange(phone, user_text, messenger.combined())
         return
-    text = _truncate_whatsapp(reply_text.strip())
+    text = _truncate_whatsapp(polish_user_message(reply_text))
     if not text:
         return
     if not evo_base or not evo_key or not instance:
@@ -227,13 +304,31 @@ async def _notify_typing(
     """Envia 'digitando...' no WhatsApp enquanto o agente processa."""
     if not evo_base or not evo_key or not instance or not phone:
         return
-    delay_ms = int(os.environ.get("EVOLUTION_TYPING_DELAY_MS", "120000"))
+    delay_ms = int(os.environ.get("EVOLUTION_TYPING_DELAY_MS", "12000"))
     await evo.send_typing(
         base_url=evo_base,
         api_key=evo_key,
         instance=instance,
         number=phone,
         delay_ms=delay_ms,
+    )
+
+
+async def _stop_typing(
+    evo: EvolutionClient,
+    *,
+    evo_base: str,
+    evo_key: str,
+    instance: str,
+    phone: str,
+) -> None:
+    if not evo_base or not evo_key or not instance or not phone:
+        return
+    await evo.send_paused(
+        base_url=evo_base,
+        api_key=evo_key,
+        instance=instance,
+        number=phone,
     )
 
 
@@ -399,7 +494,7 @@ async def _execute_unlock_pending(
             e.response.status_code,
             e.response.text[:500],
         )
-        return f"Nao foi possivel destrancar: {_ha_error_detail(e)}"
+        return "Nao foi possivel destrancar a porta. Tente novamente em instantes."
 
 
 async def try_handle_pending_password(
@@ -474,21 +569,27 @@ async def execute_decision(
     log.info("execute_decision phone=%s action=%s steps=%s", phone, action, bool(messenger))
 
     async def deliver(text: str) -> None:
-        t = (text or "").strip()
+        t = polish_user_message(text)
         if t and messenger:
             await messenger.step(t)
 
     async def finalize(extra: str) -> str:
-        base = reply or ""
-        msg = (base + ("\n\n" + extra if extra else "")).strip()
-        out = msg or extra or "Feito."
+        base = polish_user_message(reply)
+        extra_clean = polish_user_message(extra)
+        msg = (base + ("\n\n" + extra_clean if extra_clean else "")).strip()
+        out = msg or extra_clean or "Feito."
         if messenger:
             if out:
                 await messenger.step(out)
             return ""
         return out
 
-    if messenger and reply and not _is_placeholder_scenario_response(reply):
+    if (
+        messenger
+        and reply
+        and not _is_placeholder_scenario_response(reply)
+        and action not in ("reply", "list_entities")
+    ):
         await deliver(reply)
 
     if action in ("reply", "list_entities"):
@@ -501,18 +602,13 @@ async def execute_decision(
     if action == "get_state":
         eid = decision.get("entity_id")
         if not isinstance(eid, str) or not eid.strip():
-            return await finalize("Informe uma entidade valida.")
+            return await finalize("Nao entendi qual aparelho devo verificar.")
         eid = eid.strip()
-        await deliver(f"Consultando `{eid}` no Home Assistant...")
+        await deliver(format_checking(eid, catalog))
         st = await ha.get_state(eid)
         if not st:
-            return await finalize(f"Entidade nao encontrada: {eid}")
-        fname = ""
-        attrs = st.get("attributes") or {}
-        if isinstance(attrs, dict):
-            fname = str(attrs.get("friendly_name") or "")
-        label = f" ({fname})" if fname else ""
-        result = f"Estado de `{eid}`: {st.get('state')}{label}."
+            return await finalize("Nao encontrei esse aparelho na casa.")
+        result = format_state_value(eid, st, catalog)
         if messenger:
             await deliver(result)
             return ""
@@ -547,12 +643,12 @@ async def execute_decision(
         allowed = catalog.actionable_entity_ids()
         if not allowed:
             return await finalize(
-                "Nenhum dispositivo configurado para acoes. Edite /config/shakira_devices.yaml."
+                "Ainda nao tenho nenhum aparelho autorizado para controlar por aqui."
             )
         if target not in allowed:
             return await finalize(
-                f"Nao posso alterar `{target}`. "
-                "So posso agir nas entidades marcadas como acionaveis no catalogo."
+                "Nao tenho permissao para alterar esse aparelho. "
+                "So posso controlar o que esta na lista de dispositivos do assistente."
             )
 
         if catalog.service_requires_password(target, service):
@@ -582,21 +678,28 @@ async def execute_decision(
                     return ""
                 return msg
 
-        await deliver(f"Executando `{domain}.{service}` em `{target}`...")
+        st_before = await ha.get_state(target)
+        await deliver(
+            format_action_in_progress(
+                domain, service, target, svc_data, catalog, st_before
+            )
+        )
         log.info("Chamando HA phone=%s %s/%s entity=%s", phone, domain, service, target)
         _log_service_payload("call_service", svc_data)
         try:
             result = await ha.call_service(domain, service, svc_data or None)
             _pending_unlock.pop(phone, None)
             log.info("HA call_service OK phone=%s %s/%s entity=%s", phone, domain, service, target)
-            extra = ""
-            if isinstance(result, dict) and result.get("service_response"):
-                extra = str(result["service_response"])[:1500]
-            elif result not in (None, "", []):
-                extra = str(result)[:1500]
-            done = f"Pronto: `{domain}.{service}` executado em `{target}`."
-            if extra:
-                done = f"{done}\n{extra}"
+            st_after = await ha.get_state(target)
+            done = format_action_success(
+                domain,
+                service,
+                target,
+                svc_data,
+                catalog,
+                result=result,
+                state_after=st_after,
+            )
             if messenger:
                 await deliver(done)
                 return ""
@@ -612,7 +715,7 @@ async def execute_decision(
                 e.response.text[:500],
                 svc_data,
             )
-            return await finalize(f"Erro ao executar: {_ha_error_detail(e)}")
+            return await finalize(format_ha_error_user())
 
     if action == "search_photos":
         return await finalize(
@@ -652,6 +755,9 @@ def _parse_photo_filters(decision: dict[str, Any]) -> dict[str, Any]:
         val = raw.get(key)
         if isinstance(val, str) and val.strip():
             out[key] = val.strip()
+    variants = raw.get("city_variants")
+    if isinstance(variants, list):
+        out["city_variants"] = [str(v).strip() for v in variants if isinstance(v, str) and v.strip()]
     for key in ("year", "month", "day"):
         val = raw.get(key)
         if isinstance(val, int):
@@ -748,7 +854,7 @@ async def handle_get_camera_snapshot(
     label = cam.name if cam else camera_id
     if intro:
         await say(intro)
-    await say(f"A obter imagem da camera `{label}`...")
+    await say(f"Vou buscar a imagem da camera {label}...")
 
     try:
         image_bytes = await frigate.get_latest_snapshot(camera_id)
@@ -842,12 +948,49 @@ async def handle_search_photos(
 
     await say("A procurar fotos no acervo PhotoPrism...")
 
+    city = filters.get("city") if isinstance(filters.get("city"), str) else ""
+    place_terms = expand_city_variants(city) if city else []
+    if city and len(place_terms) > 1:
+        others = [t for t in place_terms if t.casefold() != city.casefold()]
+        if others:
+            await say(
+                f"Incluindo variantes do local: {city} / {others[0]}"
+                + (f" (+{len(others) - 1})" if len(others) > 1 else "")
+                + "."
+            )
+
+    photos: list[PhotoResult] = []
+    preview_token: str | None = None
+    attempts = build_search_attempts(filters)
+
     try:
-        photos, preview_token = await pp.search_photos(
-            filters=filters,
-            count=count,
-            supervisor_token=settings.supervisor_token,
-        )
+        for i, (label, attempt_filters, client_place) in enumerate(attempts):
+            if i > 0:
+                if client_place and city:
+                    await say(
+                        f"Nada na busca anterior. Tentando {label}..."
+                    )
+                else:
+                    await say(f"Tentando outra busca ({label})...")
+
+            batch, preview_token = await pp.search_photos(
+                filters=attempt_filters,
+                count=count,
+                supervisor_token=settings.supervisor_token,
+            )
+            if client_place and city:
+                batch = [p for p in batch if photo_matches_place(p, place_terms)]
+                batch = batch[:count]
+
+            if batch:
+                photos = batch
+                log.info(
+                    "PhotoPrism busca OK tentativa=%s resultados=%s filtros=%s",
+                    label,
+                    len(photos),
+                    attempt_filters,
+                )
+                break
     except PhotoprismAuthError:
         await say("Erro de autenticacao no PhotoPrism. Verifique o token.")
         return
@@ -861,7 +1004,10 @@ async def handle_search_photos(
         return
 
     if not photos:
-        await say("Nao encontrei fotos com esses criterios.")
+        detail = ""
+        if city:
+            detail = f" (pessoa + {city})"
+        await say(f"Nao encontrei fotos com esses criterios{detail}.")
         return
 
     await say(f"Encontrei {len(photos)} foto(s). A enviar...")
@@ -991,6 +1137,52 @@ async def handle_evolution_payload(
             phone=phone_norm,
         )
 
+        try:
+            await _process_inbound_message(
+                phone_norm=phone_norm,
+                user_text=user_text,
+                _inst_hint=_inst_hint,
+                webhook_instance=webhook_instance,
+                default_inst=default_inst,
+                settings=settings,
+                ha=ha,
+                evo=evo,
+                evo_base=evo_base,
+                evo_key=evo_key,
+                assistant=assistant,
+                catalog=catalog,
+                cameras=cameras,
+                http=http,
+                send_instance_early=send_instance_early,
+            )
+        finally:
+            await _stop_typing(
+                evo,
+                evo_base=evo_base,
+                evo_key=evo_key,
+                instance=send_instance_early,
+                phone=phone_norm,
+            )
+
+
+async def _process_inbound_message(
+    *,
+    phone_norm: str,
+    user_text: str | None,
+    _inst_hint: str | None,
+    webhook_instance: Any,
+    default_inst: str,
+    settings: AppSettings,
+    ha: HomeAssistantClient,
+    evo: EvolutionClient,
+    evo_base: str,
+    evo_key: str,
+    assistant: GeminiAssistant,
+    catalog: DevicesCatalog,
+    cameras: CamerasCatalog,
+    http: httpx.AsyncClient | None,
+    send_instance_early: str,
+) -> None:
         states = await ha.get_states()
         ctx, total = build_entities_context(states)
 
@@ -1090,7 +1282,7 @@ async def handle_evolution_payload(
                 evo_key=evo_key,
                 instance=send_instance,
             )
-            continue
+            return
 
         if action == "get_camera_snapshot" and http is not None and send_instance:
             await handle_get_camera_snapshot(
@@ -1113,7 +1305,7 @@ async def handle_evolution_payload(
                 evo_key=evo_key,
                 instance=send_instance,
             )
-            continue
+            return
 
         reply_text = ""
         if not skip_execute:
@@ -1128,13 +1320,13 @@ async def handle_evolution_payload(
             )
 
         if not phone_norm:
-            continue
+            return
         if (
             not skip_execute
             and not reply_text.strip()
             and not (messenger and messenger.sent_any)
         ):
-            continue
+            return
         if not evo_base or not evo_key or not send_instance:
             log.error(
                 "Envio Evolution bloqueado: base_ok=%s key_ok=%s inst=%s",
@@ -1142,7 +1334,7 @@ async def handle_evolution_payload(
                 bool(evo_key),
                 repr(send_instance),
             )
-            continue
+            return
 
         await _finish_whatsapp_exchange(
             phone=phone_norm,

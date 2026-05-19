@@ -64,7 +64,7 @@ class EvolutionClient:
         api_key: str,
         instance: str,
         number: str,
-        delay_ms: int = 120_000,
+        delay_ms: int = 12_000,
     ) -> dict[str, Any] | None:
         return await self.send_presence(
             base_url=base_url,
@@ -73,6 +73,24 @@ class EvolutionClient:
             number=number,
             presence="composing",
             delay_ms=delay_ms,
+        )
+
+    async def send_paused(
+        self,
+        *,
+        base_url: str,
+        api_key: str,
+        instance: str,
+        number: str,
+    ) -> dict[str, Any] | None:
+        """Encerra o indicador 'digitando...' no WhatsApp."""
+        return await self.send_presence(
+            base_url=base_url,
+            api_key=api_key,
+            instance=instance,
+            number=number,
+            presence="paused",
+            delay_ms=1000,
         )
 
     async def send_text(

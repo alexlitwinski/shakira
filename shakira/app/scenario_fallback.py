@@ -9,6 +9,7 @@ from typing import Any
 
 from app.devices_catalog import DevicesCatalog, ScenarioConfig
 from app.homeassistant import HomeAssistantClient
+from app.user_friendly import entity_display_name, format_ha_error_user
 
 log = logging.getLogger(__name__)
 
@@ -117,7 +118,7 @@ async def try_scenario_fallback_reply(
         log.warning("Cenario %s sem sensor no prompt; fallback ignorado", scenario.id)
         return None
 
-    await _emit("Vou verificar isso com os sensores da casa...", on_step)
+    await _emit("Vou verificar a agua do boiler para voce...", on_step)
 
     sensor_id = sensors[0]
     threshold = _temp_threshold_c(scenario.prompt)
@@ -125,16 +126,14 @@ async def try_scenario_fallback_reply(
     if _user_confirmed_heat(user_text, history_text):
         select_id = selects[0] if selects else ""
         if not select_id:
-            msg = "Ok, mas nao encontrei a entidade do modo do boiler no cenario."
+            msg = "Nao encontrei o controle do boiler na configuracao."
             await _emit(msg, on_step)
             return None if on_step else msg
         if select_id not in catalog.actionable_entity_ids():
-            msg = (
-                f"Nao posso ligar `{select_id}`. Marque allow_actions: true no shakira_devices.yaml."
-            )
+            msg = "Nao tenho permissao para ligar o boiler por aqui."
             await _emit(msg, on_step)
             return None if on_step else msg
-        await _emit(f"A ligar o boiler (`{select_id}` → Ligado)...", on_step)
+        await _emit("Vou ligar o aquecimento do boiler...", on_step)
         try:
             await ha.call_service(
                 "input_select",
@@ -147,19 +146,17 @@ async def try_scenario_fallback_reply(
             return None if on_step else msg
         except Exception as e:
             log.warning("Fallback call_service falhou: %s", e)
-            msg = "Tentei ligar o boiler mas houve um erro no Home Assistant."
+            msg = format_ha_error_user()
             await _emit(msg, on_step)
             return None if on_step else msg
 
-    await _emit(f"A consultar a temperatura em `{sensor_id}`...", on_step)
+    await _emit("Vou medir a temperatura da agua...", on_step)
     st = await ha.get_state(sensor_id)
     temp = _state_float(st)
 
     if temp is None:
-        msg = (
-            f"Nao consegui ler a temperatura em {sensor_id} agora "
-            f"(estado: {st.get('state') if st else 'indisponivel'})."
-        )
+        label = entity_display_name(sensor_id, catalog, st)
+        msg = f"Nao consegui ler a temperatura de {label} agora."
         await _emit(msg, on_step)
         return None if on_step else msg
 

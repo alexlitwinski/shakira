@@ -1,0 +1,219 @@
+"""Textos amigaveis para WhatsApp (sem jargao do Home Assistant)."""
+
+from __future__ import annotations
+
+import re
+from typing import Any
+
+from app.devices_catalog import DevicesCatalog
+
+ENTITY_ID_RE = re.compile(
+    r"\b(?:sensor|switch|input_select|lock|light|binary_sensor|number|climate|cover|fan|media_player)\."
+    r"[a-z0-9_]+\b",
+    re.IGNORECASE,
+)
+
+TECHNICAL_LINE_RE = re.compile(
+    r"^\s*(\[?\{.*entity_id|input_select\.|call_service|domain\.|service_data|last_changed)",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+
+def humanize_entity_id(entity_id: str) -> str:
+    if "." in entity_id:
+        entity_id = entity_id.split(".", 1)[1]
+    return entity_id.replace("_", " ").strip().title()
+
+
+def entity_display_name(
+    entity_id: str,
+    catalog: DevicesCatalog | None = None,
+    state: dict[str, Any] | None = None,
+) -> str:
+    if state:
+        attrs = state.get("attributes") or {}
+        if isinstance(attrs, dict):
+            fn = attrs.get("friendly_name")
+            if isinstance(fn, str) and fn.strip():
+                return fn.strip()
+    if catalog:
+        ent = catalog.get_entity(entity_id)
+        if ent and ent.description:
+            desc = ent.description.strip()
+            if desc:
+                return desc.split("—")[0].split("-")[0].strip()[:80]
+        for dev in catalog.devices:
+            for ent in dev.entities:
+                if ent.entity_id == entity_id:
+                    if ent.description:
+                        return ent.description.split("—")[0].split("-")[0].strip()[:80]
+                    if dev.name:
+                        return dev.name
+    return humanize_entity_id(entity_id)
+
+
+def format_state_value(entity_id: str, state: dict[str, Any], catalog: DevicesCatalog | None) -> str:
+    raw = state.get("state")
+    label = entity_display_name(entity_id, catalog, state)
+    domain = entity_id.split(".", 1)[0] if "." in entity_id else ""
+
+    if raw in (None, "unknown", "unavailable", ""):
+        return f"Nao consegui obter o estado de {label} agora."
+
+    if domain == "sensor":
+        unit = ""
+        attrs = state.get("attributes") or {}
+        if isinstance(attrs, dict):
+            u = attrs.get("unit_of_measurement")
+            if u:
+                unit = f" {u}"
+        try:
+            val = float(str(raw).replace(",", "."))
+            if "temp" in entity_id.lower() or unit.strip() in ("°C", "C"):
+                return f"A temperatura de {label} esta em {val:g}°C."
+            return f"{label}: {val:g}{unit}."
+        except ValueError:
+            pass
+
+    if domain in ("switch", "input_boolean", "light", "fan"):
+        on = str(raw).lower() in ("on", "true", "ligado", "open", "unlocked")
+        if on:
+            return f"{label} esta ligado(a)."
+        return f"{label} esta desligado(a)."
+
+    if domain == "input_select":
+        return f"{label} esta em «{raw}»."
+
+    if domain == "lock":
+        if str(raw).lower() == "unlocked":
+            return f"{label} esta destrancada."
+        if str(raw).lower() == "locked":
+            return f"{label} esta trancada."
+        return f"{label}: {raw}."
+
+    return f"{label}: {raw}."
+
+
+def format_checking(entity_id: str, catalog: DevicesCatalog | None, state: dict[str, Any] | None = None) -> str:
+    label = entity_display_name(entity_id, catalog, state)
+    domain = entity_id.split(".", 1)[0] if "." in entity_id else ""
+    if domain == "sensor" and "temp" in entity_id.lower():
+        return "Vou verificar a temperatura da agua..."
+    return f"Vou verificar {label}..."
+
+
+def format_action_in_progress(
+    domain: str,
+    service: str,
+    entity_id: str,
+    service_data: dict[str, Any] | None,
+    catalog: DevicesCatalog | None,
+    state: dict[str, Any] | None = None,
+) -> str:
+    label = entity_display_name(entity_id, catalog, state)
+    data = service_data or {}
+    option = data.get("option")
+
+    if domain == "input_select" and service == "select_option" and option:
+        if "boiler" in entity_id.lower() or "boiler" in label.lower():
+            if str(option).lower() == "ligado":
+                return "Vou ligar o aquecimento do boiler..."
+        return f"Vou ajustar {label} para «{option}»..."
+
+    if domain == "switch" and service == "turn_on":
+        return f"Vou ligar {label}..."
+    if domain == "switch" and service == "turn_off":
+        return f"Vou desligar {label}..."
+
+    if domain == "light" and service == "turn_on":
+        return f"Vou acender {label}..."
+    if domain == "light" and service == "turn_off":
+        return f"Vou apagar {label}..."
+
+    if domain == "lock" and service == "unlock":
+        return f"Vou destrancar {label}..."
+    if domain == "lock" and service == "lock":
+        return f"Vou trancar {label}..."
+
+    return f"Um momento, estou a tratar de {label}..."
+
+
+def _state_from_service_result(result: Any) -> str | None:
+    if isinstance(result, list) and result:
+        first = result[0]
+        if isinstance(first, dict) and "state" in first:
+            return str(first["state"])
+    if isinstance(result, dict) and "state" in result:
+        return str(result["state"])
+    return None
+
+
+def format_action_success(
+    domain: str,
+    service: str,
+    entity_id: str,
+    service_data: dict[str, Any] | None,
+    catalog: DevicesCatalog | None,
+    result: Any = None,
+    state_after: dict[str, Any] | None = None,
+) -> str:
+    label = entity_display_name(entity_id, catalog, state_after)
+    data = service_data or {}
+    new_state = None
+    if state_after:
+        new_state = state_after.get("state")
+    if new_state is None:
+        new_state = _state_from_service_result(result)
+
+    if domain == "input_select" and service == "select_option":
+        opt = new_state or data.get("option")
+        if opt and ("boiler" in entity_id.lower() or "boiler" in label.lower()):
+            if str(opt).lower() == "ligado":
+                return "Pronto! Liguei o aquecimento do boiler."
+        if opt:
+            return f"Pronto! {label} esta em «{opt}»."
+        return f"Pronto! Ajustei {label}."
+
+    if domain == "switch" and service == "turn_on":
+        return f"Pronto! {label} ligado(a)."
+    if domain == "switch" and service == "turn_off":
+        return f"Pronto! {label} desligado(a)."
+
+    if domain == "light" and service == "turn_on":
+        return f"Pronto! {label} aceso(a)."
+    if domain == "light" and service == "turn_off":
+        return f"Pronto! {label} apagado(a)."
+
+    if domain == "lock" and service == "unlock":
+        return f"Pronto! {label} destrancada."
+    if domain == "lock" and service == "lock":
+        return f"Pronto! {label} trancada."
+
+    return f"Pronto! Alteracao feita em {label}."
+
+
+def format_ha_error_user() -> str:
+    return "Nao consegui completar essa acao agora. Tente de novo em instantes."
+
+
+def polish_user_message(text: str) -> str:
+    """Remove termos tecnicos e dumps JSON antes de enviar ao WhatsApp."""
+    t = (text or "").strip()
+    if not t:
+        return ""
+
+    if t.startswith("[{") or t.startswith("[{'") or "'entity_id'" in t[:200]:
+        return ""
+
+    if TECHNICAL_LINE_RE.search(t):
+        lines = [ln for ln in t.splitlines() if not TECHNICAL_LINE_RE.search(ln)]
+        t = "\n".join(lines).strip()
+
+    t = ENTITY_ID_RE.sub(lambda m: entity_display_name(m.group(0)), t)
+    t = re.sub(r"`+", "", t)
+    t = re.sub(r"\bHome Assistant\b", "casa", t, flags=re.IGNORECASE)
+    t = re.sub(r"\bentity_id\b", "", t, flags=re.IGNORECASE)
+    t = re.sub(r"\binput_select\.select_option\b", "", t, flags=re.IGNORECASE)
+    t = re.sub(r"\s{2,}", " ", t)
+    t = re.sub(r"\n{3,}", "\n\n", t).strip()
+    return t

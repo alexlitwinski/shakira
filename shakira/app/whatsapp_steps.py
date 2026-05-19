@@ -8,6 +8,7 @@ import os
 from dataclasses import dataclass, field
 
 from app.evolution import EvolutionClient
+from app.user_friendly import polish_user_message
 
 log = logging.getLogger(__name__)
 
@@ -39,7 +40,7 @@ class StepMessenger:
         return "\n\n".join(self._parts)
 
     async def step(self, text: str) -> None:
-        msg = truncate_whatsapp((text or "").strip())
+        msg = truncate_whatsapp(polish_user_message(text))
         if not msg:
             return
         if not self.evo_base or not self.evo_key or not self.instance:

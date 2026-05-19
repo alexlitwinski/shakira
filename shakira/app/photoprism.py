@@ -19,6 +19,32 @@ DEFAULT_THUMB_SIZE = "fit_720"
 INGRESS_PREFIX_RE = re.compile(r"(/api/hassio_ingress/[^/]+)")
 PREFIX_CACHE_PATH = Path(os.environ.get("PHOTOPRISM_PREFIX_CACHE", "/data/photoprism_api_prefix.json"))
 
+# Cidades comuns PT -> EN (PhotoPrism indexa nomes do geocoder, em geral em ingles).
+_CITY_PT_TO_EN: dict[str, str] = {
+    "nova orleans": "New Orleans",
+    "nova iorque": "New York",
+    "nova york": "New York",
+    "san francisco": "San Francisco",
+    "los angeles": "Los Angeles",
+    "londres": "London",
+    "paris": "Paris",
+    "roma": "Rome",
+    "munique": "Munich",
+    "berlim": "Berlin",
+    "amsterdam": "Amsterdam",
+    "chicago": "Chicago",
+    "miami": "Miami",
+    "boston": "Boston",
+    "seattle": "Seattle",
+    "denver": "Denver",
+    "toronto": "Toronto",
+    "montreal": "Montreal",
+    "cidade do mexico": "Mexico City",
+    "buenos aires": "Buenos Aires",
+    "rio de janeiro": "Rio de Janeiro",
+    "sao paulo": "São Paulo",
+}
+
 
 @dataclass(frozen=True)
 class PhotoResult:
@@ -28,6 +54,126 @@ class PhotoResult:
     taken_at: str
     place_label: str
     preview_token: str
+
+
+def expand_city_variants(city: str, extra: list[str] | None = None) -> list[str]:
+    """Gera variantes de nome de cidade (PT/EN, hifen) para busca OR no PhotoPrism."""
+    raw = city.strip()
+    if not raw:
+        return []
+
+    out: list[str] = []
+    seen: set[str] = set()
+
+    def add(value: str) -> None:
+        v = value.strip()
+        if not v:
+            return
+        key = v.casefold()
+        if key in seen:
+            return
+        seen.add(key)
+        out.append(v)
+
+    add(raw)
+    for item in extra or []:
+        if isinstance(item, str):
+            add(item)
+
+    low = raw.casefold()
+    if low in _CITY_PT_TO_EN:
+        add(_CITY_PT_TO_EN[low])
+
+    nova = re.match(r"^nova\s+(.+)$", raw, re.IGNORECASE)
+    if nova:
+        add(f"New {nova.group(1)}")
+
+    for v in list(out):
+        if " " in v:
+            add(v.replace(" ", "-"))
+        if "-" in v:
+            add(v.replace("-", " "))
+
+    return out
+
+
+def _city_query_value(city: str, extra_variants: list[str] | None = None) -> str:
+    variants = expand_city_variants(city, extra_variants)
+    if not variants:
+        return ""
+    if len(variants) == 1:
+        return variants[0]
+    return "|".join(variants)
+
+
+def photo_matches_place(photo: PhotoResult, terms: list[str]) -> bool:
+    """True se titulo ou PlaceLabel contem algum termo de local (case-insensitive)."""
+    if not terms:
+        return True
+    hay = f"{photo.title} {photo.place_label}".casefold()
+    for term in terms:
+        t = term.strip().casefold()
+        if not t:
+            continue
+        if t in hay:
+            return True
+        if " " in t and t.replace(" ", "-") in hay:
+            return True
+        if "-" in t and t.replace("-", " ") in hay:
+            return True
+    return False
+
+
+def normalize_photo_filters(filters: dict[str, Any]) -> dict[str, Any]:
+    """Prefer people (flexivel) sobre person (exato); preserva demais chaves."""
+    out = dict(filters)
+    person = out.get("person")
+    if isinstance(person, str) and person.strip() and not out.get("people"):
+        out["people"] = person.strip()
+        out.pop("person", None)
+    return out
+
+
+def build_search_attempts(filters: dict[str, Any]) -> list[tuple[str, dict[str, Any], bool]]:
+    """
+    Planos de busca em ordem: (descricao, filtros, filtrar local no cliente).
+    """
+    base = normalize_photo_filters(filters)
+    city = base.get("city") if isinstance(base.get("city"), str) else ""
+    has_subject = bool(base.get("people") or base.get("person"))
+    place_terms = expand_city_variants(city) if city else []
+    attempts: list[tuple[str, dict[str, Any], bool]] = []
+
+    attempts.append(("busca com filtros informados", base, False))
+
+    if city and has_subject:
+        no_city = {k: v for k, v in base.items() if k != "city"}
+        attempts.append(
+            (
+                f"busca por pessoa, filtrando local ({city})",
+                no_city,
+                True,
+            )
+        )
+
+    if city and has_subject and place_terms:
+        kw = dict(base)
+        kw.pop("city", None)
+        kw.pop("person", None)
+        orleans_bits = [t for t in place_terms if len(t) >= 4]
+        if orleans_bits:
+            kw["query"] = " ".join(
+                filter(
+                    None,
+                    [
+                        str(kw.get("query") or "").strip(),
+                        " ".join(f"keywords:{b.replace(' ', '-')}" for b in orleans_bits[:2]),
+                    ],
+                )
+            ).strip()
+            attempts.append(("busca por pessoa e palavras-chave do local", kw, True))
+
+    return attempts
 
 
 def build_search_query(filters: dict[str, Any]) -> str:
@@ -43,15 +189,25 @@ def build_search_query(filters: dict[str, Any]) -> str:
         else:
             parts.append(f"{key}:{v}")
 
-    person = filters.get("person")
-    if isinstance(person, str) and person.strip():
-        qval("person", person)
-
     people = filters.get("people")
     if isinstance(people, str) and people.strip():
         qval("people", people)
+    else:
+        person = filters.get("person")
+        if isinstance(person, str) and person.strip():
+            qval("person", person)
 
-    for key in ("city", "country", "state", "label", "album"):
+    city = filters.get("city")
+    if isinstance(city, str) and city.strip():
+        extras_raw = filters.get("city_variants")
+        extras: list[str] | None = None
+        if isinstance(extras_raw, list):
+            extras = [str(x) for x in extras_raw if isinstance(x, str)]
+        city_q = _city_query_value(city, extras)
+        if city_q:
+            qval("city", city_q)
+
+    for key in ("country", "state", "label", "album"):
         val = filters.get(key)
         if isinstance(val, str) and val.strip():
             qval(key, val)
