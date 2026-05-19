@@ -7,7 +7,7 @@ from typing import Any
 
 from app.config import AppSettings
 from app.evolution import EvolutionClient
-from app.handlers import normalize_phone_digits
+from app.whatsapp_phones import normalize_phone_digits
 
 log = logging.getLogger(__name__)
 

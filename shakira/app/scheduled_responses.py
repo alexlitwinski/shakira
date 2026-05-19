@@ -347,6 +347,13 @@ def count_all_pending_globally() -> int:
     return len(load_all_pending_globally())
 
 
+def ensure_runner_started() -> None:
+    """Inicia o executor se houver agendamentos pending (import tardio)."""
+    from app.scheduled_responses_runner import ensure_scheduled_runner_running
+
+    ensure_scheduled_runner_running()
+
+
 def format_pending_for_prompt(entries: list[ScheduledResponse]) -> str:
     if not entries:
         return ""

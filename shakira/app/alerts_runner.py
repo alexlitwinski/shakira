@@ -11,7 +11,12 @@ from typing import Any
 from app.alerts_catalog import AlertConfig, AlertsCatalog
 from app.config import AppSettings
 from app.evolution import EvolutionClient
-from app.handlers import ENTITY_PERMITTED, fetch_permitted_phones_raw, normalize_phone_digits, parse_allowed_numbers
+from app.whatsapp_phones import (
+    ENTITY_PERMITTED,
+    fetch_permitted_phones_raw,
+    normalize_phone_digits,
+    parse_allowed_numbers,
+)
 from app.homeassistant import HomeAssistantClient
 from app.state_conditions import state_matches
 from app.whatsapp_outbound import WhatsAppSendError, send_whatsapp_text

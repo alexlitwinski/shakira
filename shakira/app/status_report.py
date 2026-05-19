@@ -15,13 +15,13 @@ from app.config import AppSettings
 from app.cameras_catalog import CamerasCatalog
 from app.devices_catalog import DevicesCatalog
 from app.frigate import FrigateClient
-from app.handlers import ENTITY_PERMITTED, fetch_permitted_phones_raw, parse_allowed_numbers
+from app.whatsapp_phones import ENTITY_PERMITTED, fetch_permitted_phones_raw, parse_allowed_numbers
 from app.homeassistant import HomeAssistantClient
 from app.photoprism import PhotoprismClient
 
 log = logging.getLogger(__name__)
 
-VERSION = "1.7.0"
+VERSION = "1.7.1"
 
 
 def _mask_secret(value: str, visible: int = 4) -> str:

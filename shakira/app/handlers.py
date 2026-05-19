@@ -45,12 +45,19 @@ from app.scenario_context import (
 )
 from app.scheduled_responses import (
     MIN_ACTION_DELAY_SECONDS,
+    ensure_runner_started,
     format_pending_for_prompt,
     get_scheduled_store,
 )
-from app.scheduled_responses_runner import ensure_scheduled_runner_running
 from app.state_conditions import state_matches
 from app.user_memory import InboundContent, InboundMedia, UserMemoryStore, get_store
+from app.whatsapp_phones import (
+    ENTITY_PERMITTED,
+    fetch_permitted_phones_raw,
+    normalize_phone_digits,
+    parse_allowed_numbers,
+)
+
 from app.user_memory_cache import ensure_user_memory_cache, invalidate_user_memory_cache
 from app.user_memory_prompts import USER_MEMORY_ACTIONS_INSTRUCTION
 from app.user_memory_actions import (
@@ -88,8 +95,6 @@ from app.whatsapp_steps import (
 )
 
 log = logging.getLogger(__name__)
-
-ENTITY_PERMITTED = "input_text.whatsapp_bot_permitidos"
 
 BOILER_MODE_ENTITY = "input_select.modo_do_boiler"
 BOILER_TEMP_ENTITY = "sensor.temperatura_boiler"
@@ -146,24 +151,6 @@ class PendingUnlock:
     domain: str
     service: str
     service_data: dict[str, Any]
-
-
-def normalize_phone_digits(value: str) -> str:
-    return "".join(c for c in value if c.isdigit())
-
-
-def parse_allowed_numbers(raw: str) -> set[str]:
-    if not raw:
-        return set()
-    parts = [p.strip() for p in raw.replace(";", ",").split(",")]
-    out: set[str] = set()
-    for p in parts:
-        if not p:
-            continue
-        d = normalize_phone_digits(p)
-        if d:
-            out.add(d)
-    return out
 
 
 def normalize_evolution_payload(payload: dict[str, Any]) -> list[tuple[str | None, dict[str, Any]]]:
@@ -447,13 +434,6 @@ def build_entities_context(states: list[dict[str, Any]]) -> tuple[str, int]:
     truncated = body[:max_chars].rsplit("\n", 1)[0]
     note = f"\n\n[Contexto truncado] Mostrando apenas parte das {total} entidades."
     return truncated + note, total
-
-
-async def fetch_permitted_phones_raw(ha: HomeAssistantClient) -> str:
-    s = await ha.get_state(ENTITY_PERMITTED)
-    if s and isinstance(s.get("state"), str):
-        return s["state"]
-    return ""
 
 
 def _truncate_whatsapp(text: str, limit: int = 3800) -> str:
@@ -1339,7 +1319,7 @@ async def handle_schedule_response(
     except ValueError as e:
         return str(e)
 
-    ensure_scheduled_runner_running()
+    ensure_runner_started()
     confirm = str(decision.get("response") or "").strip()
     if confirm:
         return confirm
@@ -1460,7 +1440,7 @@ async def handle_schedule_action(
     except ValueError as e:
         return str(e)
 
-    ensure_scheduled_runner_running()
+    ensure_runner_started()
     confirm = str(decision.get("response") or "").strip()
     if confirm:
         return confirm
@@ -1512,7 +1492,7 @@ async def _maybe_auto_schedule_boiler_ready(
     except ValueError:
         return None
 
-    ensure_scheduled_runner_running()
+    ensure_runner_started()
     return "Te aviso quando a agua chegar a 42 graus."
 
 
