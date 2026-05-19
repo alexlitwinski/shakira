@@ -19,6 +19,7 @@ Use essas informacoes para responder perguntas sobre o que ele pediu para guarda
 Nao invente fatos que nao estejam na memoria ou no contexto da conversa atual.
 Para guardar nova informacao use action=save_memory.
 Para reenviar um arquivo guardado use action=send_user_file com file_id ou file_name.
+Para apagar anotacao ou arquivo use action=delete_from_memory — nunca send_user_file.
 """
 
 

@@ -1,0 +1,47 @@
+# Copie para /config/shakira_devices.yaml (ou mescle com dispositivos existentes)
+#
+# Codigo 0504 aplicado automaticamente pelo Shakira — nao pergunta senha ao usuario.
+
+devices:
+  - name: Alarme da casa
+    entities:
+      - entity_id: alarm_control_panel.amt_8000_partition_1
+        description: Partição 1 — perímetro externo
+        allow_actions: true
+        service_defaults:
+          code: "0504"
+
+      - entity_id: alarm_control_panel.amt_8000_partition_2
+        description: Partição 2 — perímetro interno
+        allow_actions: true
+        service_defaults:
+          code: "0504"
+
+      - entity_id: alarm_control_panel.amt_8000_partition_3
+        description: Partição 3 — cozinha gourmet e quarto de hóspedes
+        allow_actions: true
+        service_defaults:
+          code: "0504"
+
+      - entity_id: alarm_control_panel.amt_8000_partition_4
+        description: Partição 4 — sensores internos
+        allow_actions: true
+        service_defaults:
+          code: "0504"
+
+      - entity_id: alarm_control_panel.amt_8000_partition_5
+        description: Partição 5 — segundo andar
+        allow_actions: true
+        service_defaults:
+          code: "0504"
+
+scenarios:
+  - id: alarme_casa
+    prompt: >
+      Alarme AMT 8000 com particoes: (1) perimetro externo, (2) perimetro interno,
+      (3) cozinha gourmet e quarto de hospedes, (4) sensores internos, (5) segundo andar.
+      Consulte estados ou get_state das entidades alarm_control_panel.amt_8000_partition_1
+      a partition_5. Responda em linguagem simples.
+      Para armar ou desarmar, use call_service (alarm_arm_away, alarm_arm_home, alarm_disarm, etc.)
+      com entity_id da particao pedida. O codigo do painel ja esta configurado no sistema —
+      nao peca senha nem codigo ao usuario. Se nao especificar a particao, pergunte qual area.

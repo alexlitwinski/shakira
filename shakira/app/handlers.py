@@ -36,14 +36,19 @@ from app.scenario_fallback import try_scenario_fallback_reply
 from app.user_memory import InboundContent, InboundMedia, UserMemoryStore, get_store
 from app.user_memory_cache import ensure_user_memory_cache, invalidate_user_memory_cache
 from app.user_memory_prompts import USER_MEMORY_ACTIONS_INSTRUCTION
+from app.user_memory_actions import (
+    handle_delete_from_memory,
+    try_memory_delete_override,
+)
 from app.pending_media import (
     build_media_choice_prompt,
     build_pending_clarification,
+    build_personal_description_prompt,
     classify_explicit_media_intent,
     classify_pending_reply,
     download_inbound_media_bytes,
     extract_album_name,
-    extract_personal_label,
+    extract_personal_description,
     is_placeholder_user_text,
     media_has_explicit_intent,
 )
@@ -71,6 +76,7 @@ VALID_GEMINI_ACTIONS = frozenset(
         "get_camera_snapshot",
         "save_memory",
         "send_user_file",
+        "delete_from_memory",
     }
 )
 
@@ -569,6 +575,10 @@ def build_ha_service_data(
         option = raw.get("option")
         if isinstance(option, str) and option.strip():
             data["option"] = option.strip()
+    if domain == "alarm_control_panel":
+        code = raw.get("code")
+        if isinstance(code, str) and code.strip():
+            data["code"] = code.strip()
     return data
 
 
@@ -736,12 +746,20 @@ def build_gemini_assistant_for_user(
 
 
 def _personal_label_from_inbound(content: InboundContent) -> str:
-    label = extract_personal_label(content.text)
-    if label:
-        return label
+    parts: list[str] = []
     if content.media and content.media.caption:
-        return extract_personal_label(content.media.caption)
-    return "pedido pelo usuario"
+        parts.append(content.media.caption)
+    if not is_placeholder_user_text(content.text):
+        parts.append(content.text)
+    combined = " ".join(parts).strip()
+    return extract_personal_description(combined, content.media.caption if content.media else "")
+
+
+def _personal_save_confirmation(entry_label: str) -> str:
+    return (
+        f"Guardei no seu registro pessoal: *{entry_label}*. "
+        "Quando quiser, peça para eu reenviar."
+    )
 
 
 async def _commit_bytes_to_personal_memory(
@@ -753,19 +771,41 @@ async def _commit_bytes_to_personal_memory(
     caption: str = "",
     label: str = "",
 ) -> str:
+    description = label.strip() or extract_personal_description("", caption)
+    if not description:
+        return build_personal_description_prompt()
+
     store = get_store(phone)
     entry = store.save_file(
         raw,
         filename=filename,
         mime_type=mime_type,
-        label=label,
+        label=description,
         caption=caption,
     )
     invalidate_user_memory_cache(store)
-    return (
-        f"Guardei na sua memoria pessoal: *{entry.filename}* "
-        f"(id `{entry.id}`). Quando quiser, peca para eu reenviar."
+    display = entry.label or description
+    return _personal_save_confirmation(display)
+
+
+def _save_pending_bytes_to_personal(
+    store: UserMemoryStore,
+    pending,
+    path,
+    description: str,
+) -> str:
+    raw = path.read_bytes()
+    entry = store.save_file(
+        raw,
+        filename=pending.filename,
+        mime_type=pending.mime_type,
+        label=description[:120],
+        caption=pending.caption,
     )
+    store.clear_pending_file()
+    invalidate_user_memory_cache(store)
+    display = entry.label or description
+    return _personal_save_confirmation(display)
 
 
 async def _upload_bytes_to_photoprism(
@@ -862,6 +902,21 @@ async def try_handle_pending_media_reply(
         return None
 
     pending, path = hit
+
+    if pending.stage == "description":
+        if any(w in user_text.casefold() for w in ("cancela", "cancelar", "esquece", "descarta", "deixa")):
+            store.clear_pending_file()
+            return "Ok, descartei o arquivo."
+        description = extract_personal_description(user_text, pending.caption)
+        if not description:
+            return build_personal_description_prompt()
+        try:
+            return _save_pending_bytes_to_personal(store, pending, path, description)
+        except ValueError as e:
+            return f"Nao foi possivel guardar: {e}"
+        except OSError:
+            return "Erro ao gravar o arquivo."
+
     choice = classify_pending_reply(user_text, is_image=pending.is_image)
 
     if choice == "cancel":
@@ -892,21 +947,12 @@ async def try_handle_pending_media_reply(
         store.clear_pending_file()
         return msg
 
-    label = extract_personal_label(user_text) or pending.caption or "arquivo guardado"
+    label = extract_personal_description(user_text, pending.caption)
+    if not label:
+        store.set_pending_stage("description")
+        return build_personal_description_prompt()
     try:
-        entry = store.save_file(
-            raw,
-            filename=pending.filename,
-            mime_type=pending.mime_type,
-            label=label[:120],
-            caption=pending.caption,
-        )
-        store.clear_pending_file()
-        invalidate_user_memory_cache(store)
-        return (
-            f"Guardei na sua memoria pessoal: *{entry.filename}* "
-            f"(id `{entry.id}`). Quando quiser, peca para eu reenviar."
-        )
+        return _save_pending_bytes_to_personal(store, pending, path, label)
     except ValueError as e:
         return f"Nao foi possivel guardar: {e}"
     except OSError:
@@ -996,13 +1042,37 @@ async def route_explicit_inbound_media(
         )
 
     store.clear_pending_file()
+    combined = " ".join(
+        filter(
+            None,
+            [
+                media.caption or "",
+                "" if is_placeholder_user_text(inbound.text) else inbound.text,
+            ],
+        )
+    ).strip()
+    description = extract_personal_description(combined, media.caption or "")
+    if not description:
+        try:
+            store.save_pending_file(
+                raw,
+                filename=fname or media.filename,
+                mime_type=mimetype or media.mimetype,
+                mediatype=media.mediatype,
+                caption=media.caption,
+            )
+            store.set_pending_stage("description")
+        except ValueError as e:
+            return f"Nao foi possivel receber o arquivo: {e}"
+        return build_personal_description_prompt()
+
     return await _commit_bytes_to_personal_memory(
         inbound.phone,
         raw,
         filename=fname or media.filename,
         mime_type=mimetype or media.mimetype,
         caption=media.caption or "",
-        label=_personal_label_from_inbound(inbound),
+        label=description,
     )
 
 
@@ -1173,6 +1243,7 @@ async def execute_decision(
             return await finalize("Informe entity_id no comando.")
 
         svc_data = build_ha_service_data(domain, service, target, raw_svc_data)
+        svc_data = catalog.apply_service_defaults(target, svc_data)
         if raw_svc_data != svc_data:
             log.info(
                 "service_data normalizado entity=%s raw=%s -> ha=%s",
@@ -1276,6 +1347,10 @@ async def execute_decision(
         return await finalize(
             "Arquivo solicitado. Se nada chegar, verifique se o id ou nome estao corretos."
         )
+
+    if action == "delete_from_memory":
+        result = handle_delete_from_memory(decision, phone)
+        return await finalize(result)
 
     fallback = reply or "Nao entendi o proximo passo."
     if messenger:
@@ -1891,6 +1966,13 @@ async def _process_inbound_message(
             )
             decision, _ = normalize_gemini_action(decision, catalog)
 
+        decision = try_memory_delete_override(
+            decision,
+            phone=phone_norm,
+            user_text=user_text or "",
+            history_text=history_text,
+        )
+
         reply_preview = str(decision.get("response") or "").strip()
         needs_fallback = (
             _is_placeholder_scenario_response(reply_preview)
@@ -1958,6 +2040,20 @@ async def _process_inbound_message(
                 user_text=user_text or "",
                 messenger=messenger,
                 reply_text=str(decision.get("response") or "").strip() or "Imagem da camera enviada.",
+                evo=evo,
+                evo_base=evo_base,
+                evo_key=evo_key,
+                instance=send_instance,
+            )
+            return
+
+        if action == "delete_from_memory":
+            del_reply = handle_delete_from_memory(decision, phone_norm)
+            await _finish_whatsapp_exchange(
+                phone=phone_norm,
+                user_text=user_text or "",
+                messenger=messenger,
+                reply_text=del_reply,
                 evo=evo,
                 evo_base=evo_base,
                 evo_key=evo_key,

@@ -44,6 +44,46 @@ _PHOTOPRISM_WORDS = (
 )
 _CANCEL_WORDS = ("cancela", "cancelar", "esquece", "descarta", "nao quero", "não quero", "deixa")
 
+_GENERIC_DESCRIPTIONS = frozenset(
+    {
+        "",
+        "pessoal",
+        "sim",
+        "s",
+        "yes",
+        "ok",
+        "pode",
+        "guardar",
+        "salvar",
+        "memoria",
+        "memória",
+        "registro",
+        "arquivo",
+        "arquivo guardado",
+        "pedido pelo usuario",
+        "1",
+        "um",
+        "2",
+        "dois",
+        "opcao 1",
+        "opção 1",
+        "opcao 2",
+        "opção 2",
+        "guardar aqui",
+        "guarda aqui",
+    }
+)
+
+_WHATSAPP_FILENAME_RE = re.compile(
+    r"^[A-F0-9]{8,}(?:\.[A-Za-z0-9]+)?$",
+    re.IGNORECASE,
+)
+
+_DESTINATION_PREFIX_RE = re.compile(
+    r"^(?:pessoal|guardar|salvar|mem[oó]ria|registro(?:\s+pessoal)?)\s*",
+    re.IGNORECASE,
+)
+
 
 def is_placeholder_user_text(text: str) -> bool:
     return text.strip().startswith(_PLACEHOLDER_PREFIX)
@@ -114,49 +154,99 @@ def classify_pending_reply(text: str, *, is_image: bool) -> str:
     return "unknown"
 
 
-def build_media_choice_prompt(*, is_image: bool, filename: str) -> str:
-    name = filename or "arquivo"
+def build_media_choice_prompt(*, is_image: bool, filename: str = "") -> str:
     if is_image:
         return (
-            f"Recebi a foto *{name}*. O que deseja fazer?\n\n"
-            "1) *Memória pessoal* — guardo para você recuperar depois "
-            "(ex.: convite de show, PDF importante). Responda: *pessoal* ou *guardar*.\n\n"
-            "2) *PhotoPrism* — envio para o acervo de fotos da casa. "
-            "Responda: *PhotoPrism* e, se quiser, o álbum "
-            '(ex.: *PhotoPrism álbum Viagens*).\n\n'
-            "Para cancelar: *cancelar*."
+            "Recebi uma foto. Quer guardar no seu *registro pessoal* "
+            "(ingressos, convites, documentos) ou na *galeria de fotos da casa*?\n\n"
+            "Responda *pessoal* ou *galeria*."
         )
     return (
-        f"Recebi o arquivo *{name}*. Deseja guardar na sua *memória pessoal* "
-        "para recuperar depois (ex.: convite de um show)?\n\n"
-        "Responda *sim* ou *guardar* — pode incluir um rótulo "
-        '(ex.: *guardar convite do show*).\n\n'
-        "Para cancelar: *cancelar*."
+        "Recebi um arquivo. Quer guardar no seu *registro pessoal* "
+        "para recuperar depois (ex.: ingresso ou convite)?\n\n"
+        "Responda *sim* ou *guardar*."
+    )
+
+
+def build_personal_description_prompt() -> str:
+    return (
+        "Antes de guardar no seu registro pessoal, preciso saber do que se trata.\n\n"
+        "Descreva em poucas palavras (ex.: *ingresso do show*, *convite de casamento*)."
     )
 
 
 def build_pending_clarification(*, is_image: bool) -> str:
     if is_image:
         return (
-            "Não entendi. Responda *pessoal* (memória para recuperar depois) "
-            "ou *PhotoPrism* (acervo de fotos, opcionalmente com álbum)."
+            "Não entendi. Responda *pessoal* (arquivo seu) "
+            "ou *galeria* (fotos da casa)."
         )
     return (
-        "Não entendi. Responda *sim* ou *guardar* para memória pessoal, "
-        "ou *cancelar* para descartar."
+        "Não entendi. Responda *sim* ou *guardar* para guardar no seu arquivo, "
+        "ou *cancelar*."
     )
 
 
 def extract_personal_label(text: str) -> str:
     """Rotulo opcional a partir da resposta do usuario."""
     m = re.search(
-        r"(?:guardar|salvar|mem[oó]ria|pessoal|convite|rotulo|rótulo)\s+(.+)",
+        r"(?:guardar|salvar|mem[oó]ria|pessoal|convite|rotulo|rótulo|registro)\s+(.+)",
         text,
         re.IGNORECASE,
     )
     if m:
         return m.group(1).strip()[:120]
     return ""
+
+
+def _normalize_description(value: str) -> str:
+    return " ".join(value.strip().casefold().split())
+
+
+def _looks_like_whatsapp_filename(text: str) -> bool:
+    base = text.strip().split("/")[-1]
+    return bool(_WHATSAPP_FILENAME_RE.match(base))
+
+
+def _is_meaningful_description(text: str) -> bool:
+    norm = _normalize_description(text)
+    if not norm or norm in _GENERIC_DESCRIPTIONS:
+        return False
+    if len(norm) < 3:
+        return False
+    if _looks_like_whatsapp_filename(text):
+        return False
+    return True
+
+
+def extract_personal_description(user_text: str, caption: str = "") -> str:
+    """
+    Descricao util para o registro pessoal (rotulo legivel).
+    Retorna vazio se nao houver certeza do conteudo.
+    """
+    text = user_text.strip()
+    labeled = extract_personal_label(text)
+    if _is_meaningful_description(labeled):
+        return labeled.strip()[:120]
+
+    remainder = _DESTINATION_PREFIX_RE.sub("", text).strip(" :,-")
+    if _is_meaningful_description(remainder):
+        return remainder[:120]
+
+    if text and not any(w in text.casefold() for w in _PERSONAL_WORDS + _SAVE_WORDS):
+        if _is_meaningful_description(text):
+            return text[:120]
+
+    cap = caption.strip()
+    if _is_meaningful_description(cap):
+        return cap[:120]
+
+    return ""
+
+
+def personal_description_required(user_text: str, caption: str = "") -> bool:
+    """True se falta descricao antes de guardar no registro pessoal."""
+    return not extract_personal_description(user_text, caption)
 
 
 async def download_inbound_media_bytes(

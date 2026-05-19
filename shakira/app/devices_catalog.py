@@ -85,6 +85,7 @@ class EntityConfig:
     description: str = ""
     allow_actions: bool = False
     security: SecurityConfig | None = None
+    service_defaults: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -196,12 +197,19 @@ class DevicesCatalog:
                         password_prompt=str(s.get("password_prompt") or "").strip()
                         or "Informe a senha para confirmar esta acao.",
                     )
+                defaults: dict[str, Any] = {}
+                raw_defaults = ent.get("service_defaults")
+                if isinstance(raw_defaults, dict):
+                    defaults = {
+                        str(k): v for k, v in raw_defaults.items() if str(k).strip()
+                    }
                 entities.append(
                     EntityConfig(
                         entity_id=eid,
                         description=str(ent.get("description") or "").strip(),
                         allow_actions=bool(ent.get("allow_actions", False)),
                         security=sec,
+                        service_defaults=defaults,
                     )
                 )
             devices.append(DeviceConfig(name=name, entities=entities))
@@ -290,6 +298,9 @@ class DevicesCatalog:
                                 errors.append(
                                     f"{ep}.security: 'require_password_for_services' deve ser lista."
                                 )
+                        sd = ent.get("service_defaults")
+                        if sd is not None and not isinstance(sd, dict):
+                            errors.append(f"{ep}: 'service_defaults' deve ser um mapa.")
 
         if "scenarios" in data:
             if not isinstance(data["scenarios"], list):
@@ -335,6 +346,14 @@ class DevicesCatalog:
 
     def get_entity(self, entity_id: str) -> EntityConfig | None:
         return self.entity_map().get(entity_id)
+
+    def apply_service_defaults(self, entity_id: str, service_data: dict[str, Any]) -> dict[str, Any]:
+        ent = self.get_entity(entity_id)
+        if not ent or not ent.service_defaults:
+            return service_data
+        merged = dict(service_data)
+        merged.update(ent.service_defaults)
+        return merged
 
     def build_catalog_context(self) -> str:
         lines: list[str] = [

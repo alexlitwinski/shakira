@@ -54,7 +54,7 @@ class StoredFile:
 
 @dataclass
 class PendingFile:
-    """Arquivo aguardando decisao do usuario (guardar pessoal vs PhotoPrism)."""
+    """Arquivo aguardando decisao do usuario (registro pessoal vs galeria)."""
 
     id: str
     filename: str
@@ -63,6 +63,7 @@ class PendingFile:
     size_bytes: int
     is_image: bool
     caption: str = ""
+    stage: str = "destination"  # destination | description
     created_at: str = field(default_factory=_now_iso)
 
 
@@ -164,6 +165,23 @@ class UserMemoryStore:
         if len(new_rows) == len(rows):
             return False
         self._save_memories_raw(new_rows)
+        return True
+
+    def delete_file(self, file_id: str) -> bool:
+        fid = file_id.strip()
+        rows = self._load_files_manifest()
+        target: dict[str, Any] | None = None
+        new_rows: list[dict[str, Any]] = []
+        for row in rows:
+            if str(row.get("id")) == fid:
+                target = row
+            else:
+                new_rows.append(row)
+        if not target:
+            return False
+        self._delete_file_disk(target)
+        self._save_files_manifest(new_rows)
+        log.info("Arquivo apagado phone=%s id=%s", self.phone, fid)
         return True
 
     def _load_files_manifest(self) -> list[dict[str, Any]]:
@@ -399,12 +417,29 @@ class UserMemoryStore:
             size_bytes=int(row.get("size_bytes") or 0),
             is_image=bool(row.get("is_image")),
             caption=str(row.get("caption") or ""),
+            stage=str(row.get("stage") or "destination"),
             created_at=str(row.get("created_at") or _now_iso()),
         )
         for path in self.pending_dir.glob(f"{pid}_*"):
             if path.is_file():
                 return pending, path
         return None
+
+    def set_pending_stage(self, stage: str) -> bool:
+        if not self.pending_meta_path.is_file():
+            return False
+        try:
+            row = json.loads(self.pending_meta_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            return False
+        if not isinstance(row, dict):
+            return False
+        row["stage"] = stage.strip() or "destination"
+        self.pending_meta_path.write_text(
+            json.dumps(row, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        return True
 
     def clear_pending_file(self) -> None:
         if self.pending_meta_path.is_file():
