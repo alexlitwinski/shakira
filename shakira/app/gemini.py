@@ -62,12 +62,24 @@ class GeminiAssistant:
         user_message: str,
         entities_context: str,
         conversation_history: str = "",
+        user_memory_context: str = "",
+        memory_in_cache: bool = False,
     ) -> dict[str, Any]:
         history_block = ""
         if conversation_history.strip():
             history_block = f"{conversation_history.strip()}\n\n"
 
-        prompt = f"""{history_block}Estados atuais (resumo dinamico - todas as entidades para consulta):
+        memory_block = ""
+        if user_memory_context.strip():
+            if memory_in_cache:
+                memory_block = (
+                    "[Memoria persistente do usuario carregada no cache Gemini — "
+                    "use o system instruction do cache.]\n\n"
+                )
+            else:
+                memory_block = f"{user_memory_context.strip()}\n\n"
+
+        prompt = f"""{history_block}{memory_block}Estados atuais (resumo dinamico - todas as entidades para consulta):
 {entities_context}
 
 Mensagem atual do usuario:

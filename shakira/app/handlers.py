@@ -29,9 +29,24 @@ from app.photoprism import (
     PhotoResult,
     build_search_attempts,
     expand_city_variants,
+    normalize_photo_filters,
     photo_matches_place,
 )
 from app.scenario_fallback import try_scenario_fallback_reply
+from app.user_memory import InboundMedia, UserMemoryStore, get_store
+from app.user_memory_cache import ensure_user_memory_cache, invalidate_user_memory_cache
+from app.user_memory_prompts import USER_MEMORY_ACTIONS_INSTRUCTION
+from app.pending_media import (
+    build_media_choice_prompt,
+    build_pending_clarification,
+    classify_explicit_media_intent,
+    classify_pending_reply,
+    download_inbound_media_bytes,
+    extract_album_name,
+    extract_personal_label,
+    is_placeholder_user_text,
+    media_has_explicit_intent,
+)
 from app.user_friendly import (
     format_action_in_progress,
     format_action_success,
@@ -54,8 +69,12 @@ VALID_GEMINI_ACTIONS = frozenset(
         "list_entities",
         "search_photos",
         "get_camera_snapshot",
+        "save_memory",
+        "send_user_file",
     }
 )
+
+_USER_MEMORY_CACHE_MIN_CHARS = int(os.environ.get("SHAKIRA_USER_MEMORY_CACHE_MIN_CHARS", "6000"))
 
 _PLACEHOLDER_RESPONSE_MARKERS = (
     "verificando",
@@ -80,6 +99,14 @@ _IGNORE_MESSAGE_TYPES = frozenset(
         "ephemeralMessage",
     }
 )
+
+
+@dataclass
+class InboundContent:
+    phone: str
+    text: str
+    media: InboundMedia | None = None
+    record: dict[str, Any] | None = None
 
 
 @dataclass
@@ -165,6 +192,112 @@ def _accept_inbound_once(phone: str, text: str) -> bool:
             if ts < cutoff:
                 del _inbound_dedup[k]
     return True
+
+
+def _extract_media_from_message(msg: dict[str, Any]) -> InboundMedia | None:
+    if isinstance(msg.get("imageMessage"), dict):
+        im = msg["imageMessage"]
+        return InboundMedia(
+            mediatype="image",
+            filename=str(im.get("fileName") or "imagem.jpg"),
+            mimetype=str(im.get("mimetype") or im.get("mimeType") or "image/jpeg"),
+            caption=str(im.get("caption") or "").strip(),
+            message_record={},
+        )
+    if isinstance(msg.get("documentMessage"), dict):
+        dm = msg["documentMessage"]
+        return InboundMedia(
+            mediatype="document",
+            filename=str(dm.get("fileName") or dm.get("title") or "documento"),
+            mimetype=str(dm.get("mimetype") or dm.get("mimeType") or "application/octet-stream"),
+            caption=str(dm.get("caption") or "").strip(),
+            message_record={},
+        )
+    if isinstance(msg.get("videoMessage"), dict):
+        vm = msg["videoMessage"]
+        return InboundMedia(
+            mediatype="video",
+            filename=str(vm.get("fileName") or "video.mp4"),
+            mimetype=str(vm.get("mimetype") or vm.get("mimeType") or "video/mp4"),
+            caption=str(vm.get("caption") or "").strip(),
+            message_record={},
+        )
+    if isinstance(msg.get("audioMessage"), dict):
+        am = msg["audioMessage"]
+        return InboundMedia(
+            mediatype="audio",
+            filename=str(am.get("fileName") or "audio.ogg"),
+            mimetype=str(am.get("mimetype") or am.get("mimeType") or "audio/ogg"),
+            caption="",
+            message_record={},
+        )
+    return None
+
+
+def extract_inbound_content(record: dict[str, Any]) -> InboundContent | None:
+    """Extrai telefone, texto e opcionalmente midia de um registro Evolution."""
+    key = record.get("key") or {}
+    if not isinstance(key, dict):
+        key = {}
+
+    msg_type = str(record.get("messageType") or "").strip()
+    if msg_type in _IGNORE_MESSAGE_TYPES:
+        log.debug("Ignorando messageType=%s", msg_type)
+        return None
+
+    remote = key.get("remoteJid") or record.get("remoteJid") or ""
+    if not remote:
+        return None
+    if remote.endswith("@g.us"):
+        log.debug("Ignorando grupo: %s", remote)
+        return None
+
+    if _is_outbound_evolution_message(record, key):
+        log.debug("Ignorando mensagem enviada pelo bot (fromMe/status)")
+        return None
+
+    digits = normalize_phone_digits(remote.split("@")[0])
+    if not digits:
+        return None
+
+    msg = record.get("message") or {}
+    if isinstance(msg.get("ephemeralMessage"), dict):
+        msg = msg["ephemeralMessage"].get("message") or msg
+
+    text = ""
+    if isinstance(msg.get("conversation"), str):
+        text = msg["conversation"]
+    elif isinstance(msg.get("extendedTextMessage"), dict):
+        text = msg["extendedTextMessage"].get("text") or ""
+    elif isinstance(msg.get("buttonsResponseMessage"), dict):
+        text = msg["buttonsResponseMessage"].get("selectedDisplayText") or ""
+    elif isinstance(msg.get("listResponseMessage"), dict):
+        t = msg["listResponseMessage"].get("title")
+        d = msg["listResponseMessage"].get("description")
+        text = f"{t or ''} {d or ''}".strip()
+
+    media = _extract_media_from_message(msg)
+    if media:
+        media.message_record = record
+        if not text.strip() and media.caption:
+            text = media.caption
+
+    text = text.strip()
+    if not text and not media:
+        return None
+
+    if text and _is_echo_of_last_assistant(digits, text):
+        log.info("Ignorando eco da ultima resposta do assistente phone=%s", digits)
+        return None
+
+    if not _accept_inbound_once(digits, text or "[media]"):
+        log.info("Ignorando mensagem duplicada phone=%s", digits)
+        return None
+
+    if not text and media:
+        text = "[usuario enviou um arquivo]"
+
+    return InboundContent(phone=digits, text=text, media=media, record=record)
 
 
 def extract_text_and_sender(record: dict[str, Any]) -> tuple[str | None, str | None]:
@@ -551,6 +684,422 @@ def build_gemini_assistant(
     )
 
 
+def build_gemini_assistant_for_user(
+    settings: AppSettings,
+    catalog: DevicesCatalog,
+    cameras: CamerasCatalog,
+    store: UserMemoryStore,
+    *,
+    catalog_cache_name: str | None = None,
+) -> tuple[GeminiAssistant, str, bool]:
+    """Retorna (assistant, memory_context, memory_in_cache)."""
+    model_name = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
+    memory_context = store.build_context_text()
+    memory_in_cache = False
+
+    catalog_fallback = catalog.build_catalog_context()
+    if cameras.cameras:
+        catalog_fallback = f"{catalog_fallback}\n\n{cameras.build_catalog_context()}"
+    catalog_fallback = f"{USER_MEMORY_ACTIONS_INSTRUCTION}\n\n{catalog_fallback}"
+
+    user_cache: str | None = None
+    if (
+        settings.gemini_api_key
+        and memory_context
+        and len(memory_context) >= _USER_MEMORY_CACHE_MIN_CHARS
+    ):
+        user_cache = ensure_user_memory_cache(
+            api_key=settings.gemini_api_key,
+            model=model_name,
+            store=store,
+            ttl_hours=settings.gemini_cache_ttl_hours,
+        )
+        if user_cache:
+            memory_in_cache = True
+            assistant = GeminiAssistant(
+                settings.gemini_api_key,
+                model=model_name,
+                cache_name=user_cache,
+                catalog_fallback=catalog_fallback,
+            )
+            return assistant, memory_context, memory_in_cache
+
+    cache_name = catalog_cache_name
+    if cache_name is None and settings.gemini_api_key and (catalog.devices or cameras.cameras):
+        cache_name = ensure_catalog_cache(
+            api_key=settings.gemini_api_key,
+            model=model_name,
+            catalog=catalog,
+            cameras=cameras,
+            ttl_hours=settings.gemini_cache_ttl_hours,
+        )
+
+    assistant = GeminiAssistant(
+        settings.gemini_api_key,
+        model=model_name,
+        cache_name=cache_name,
+        catalog_fallback=catalog_fallback,
+    )
+    return assistant, memory_context, memory_in_cache
+
+
+def _personal_label_from_inbound(content: InboundContent) -> str:
+    label = extract_personal_label(content.text)
+    if label:
+        return label
+    if content.media and content.media.caption:
+        return extract_personal_label(content.media.caption)
+    return "pedido pelo usuario"
+
+
+async def _commit_bytes_to_personal_memory(
+    phone: str,
+    raw: bytes,
+    *,
+    filename: str,
+    mime_type: str,
+    caption: str = "",
+    label: str = "",
+) -> str:
+    store = get_store(phone)
+    entry = store.save_file(
+        raw,
+        filename=filename,
+        mime_type=mime_type,
+        label=label,
+        caption=caption,
+    )
+    invalidate_user_memory_cache(store)
+    return (
+        f"Guardei na sua memoria pessoal: *{entry.filename}* "
+        f"(id `{entry.id}`). Quando quiser, peca para eu reenviar."
+    )
+
+
+async def _upload_bytes_to_photoprism(
+    raw: bytes,
+    *,
+    filename: str,
+    album: str,
+    settings: AppSettings,
+    http: httpx.AsyncClient,
+) -> str:
+    if not settings.photoprism_url or not settings.photoprism_token:
+        return (
+            "PhotoPrism nao esta configurado no add-on. "
+            "Defina photoprism_url e photoprism_token nas opcoes."
+        )
+    pp = PhotoprismClient(
+        http,
+        base_url=settings.photoprism_url,
+        token=settings.photoprism_token,
+        api_prefix=settings.photoprism_api_prefix,
+    )
+    try:
+        uid = await pp.upload_photo(
+            file_bytes=raw,
+            filename=filename,
+            album=album,
+            supervisor_token=settings.supervisor_token,
+        )
+    except PhotoprismAuthError:
+        return "Erro de autenticacao no PhotoPrism. Verifique o token nas opcoes."
+    except PhotoprismError as e:
+        log.warning("Upload PhotoPrism falhou: %s", e)
+        return f"Nao consegui enviar ao PhotoPrism: {e}"
+
+    album_bit = f" no album *{album}*" if album.strip() else ""
+    if uid:
+        return f"Foto enviada ao PhotoPrism{album_bit}."
+    return f"Foto enviada ao PhotoPrism{album_bit}."
+
+
+async def _save_inbound_media(
+    content: InboundContent,
+    *,
+    settings: AppSettings,
+    evo: EvolutionClient,
+    instance: str,
+) -> str | None:
+    """Baixa midia do Evolution e grava na pasta do usuario. Retorna nota para o prompt."""
+    if not content.media or not content.record:
+        return None
+
+    downloaded = await download_inbound_media_bytes(
+        content, settings=settings, evo=evo, instance=instance
+    )
+    if not downloaded:
+        return "O usuario enviou um arquivo, mas nao foi possivel baixa-lo para guardar."
+
+    raw, mimetype, fname = downloaded
+    media = content.media
+    caption = media.caption or content.text
+    label = _personal_label_from_inbound(content)
+    try:
+        store = get_store(content.phone)
+        entry = store.save_file(
+            raw,
+            filename=fname or media.filename,
+            mime_type=mimetype or media.mimetype,
+            label=label,
+            caption=caption,
+        )
+        invalidate_user_memory_cache(store)
+        return (
+            f"[Sistema] Arquivo guardado: id={entry.id}, nome={entry.filename}, "
+            f"tamanho={entry.size_bytes} bytes. Legenda/caption: {caption or '(sem legenda)'}."
+        )
+    except ValueError as e:
+        return f"[Sistema] Nao foi possivel guardar o arquivo: {e}"
+    except OSError as e:
+        log.warning("Falha ao gravar arquivo usuario %s: %s", content.phone, e)
+        return "[Sistema] Erro ao gravar o arquivo no disco."
+
+
+async def try_handle_pending_media_reply(
+    phone: str,
+    user_text: str,
+    *,
+    settings: AppSettings,
+    http: httpx.AsyncClient | None,
+) -> str | None:
+    """Processa resposta do usuario apos pergunta sobre arquivo pendente."""
+    store = get_store(phone)
+    hit = store.get_pending_file()
+    if not hit:
+        return None
+
+    pending, path = hit
+    choice = classify_pending_reply(user_text, is_image=pending.is_image)
+
+    if choice == "cancel":
+        store.clear_pending_file()
+        return "Ok, descartei o arquivo."
+
+    if choice == "unknown":
+        return build_pending_clarification(is_image=pending.is_image)
+
+    raw = path.read_bytes()
+
+    if choice == "photoprism":
+        if not pending.is_image:
+            return (
+                "So posso enviar *fotos* ao PhotoPrism. "
+                "Para este arquivo, responda *pessoal* para guardar na memoria."
+            )
+        if http is None:
+            return "Servico temporariamente indisponivel para PhotoPrism."
+        album = extract_album_name(user_text)
+        msg = await _upload_bytes_to_photoprism(
+            raw,
+            filename=pending.filename,
+            album=album,
+            settings=settings,
+            http=http,
+        )
+        store.clear_pending_file()
+        return msg
+
+    label = extract_personal_label(user_text) or pending.caption or "arquivo guardado"
+    try:
+        entry = store.save_file(
+            raw,
+            filename=pending.filename,
+            mime_type=pending.mime_type,
+            label=label[:120],
+            caption=pending.caption,
+        )
+        store.clear_pending_file()
+        invalidate_user_memory_cache(store)
+        return (
+            f"Guardei na sua memoria pessoal: *{entry.filename}* "
+            f"(id `{entry.id}`). Quando quiser, peca para eu reenviar."
+        )
+    except ValueError as e:
+        return f"Nao foi possivel guardar: {e}"
+    except OSError:
+        return "Erro ao gravar o arquivo."
+
+
+async def handle_ambiguous_inbound_media(
+    inbound: InboundContent,
+    *,
+    settings: AppSettings,
+    evo: EvolutionClient,
+    instance: str,
+) -> str | None:
+    """
+    Arquivo sem instrucao: baixa, guarda como pendente e retorna mensagem para o usuario.
+    None se nao aplicavel.
+    """
+    if not inbound.media:
+        return None
+    if media_has_explicit_intent(inbound):
+        return None
+
+    downloaded = await download_inbound_media_bytes(
+        inbound, settings=settings, evo=evo, instance=instance
+    )
+    if not downloaded:
+        return "Recebi seu arquivo, mas nao consegui baixa-lo. Tente enviar de novo."
+
+    raw, mimetype, fname = downloaded
+    media = inbound.media
+    store = get_store(inbound.phone)
+    try:
+        pending = store.save_pending_file(
+            raw,
+            filename=fname or media.filename,
+            mime_type=mimetype or media.mimetype,
+            mediatype=media.mediatype,
+            caption=media.caption,
+        )
+    except ValueError as e:
+        return f"Nao foi possivel receber o arquivo: {e}"
+
+    return build_media_choice_prompt(is_image=pending.is_image, filename=pending.filename)
+
+
+async def route_explicit_inbound_media(
+    inbound: InboundContent,
+    *,
+    settings: AppSettings,
+    evo: EvolutionClient,
+    http: httpx.AsyncClient | None,
+    instance: str,
+) -> str | None:
+    """Executa pedido explicito na legenda/texto (guardar ou PhotoPrism)."""
+    if not inbound.media or not media_has_explicit_intent(inbound):
+        return None
+
+    downloaded = await download_inbound_media_bytes(
+        inbound, settings=settings, evo=evo, instance=instance
+    )
+    if not downloaded:
+        return "Nao consegui baixar o arquivo para processar seu pedido."
+
+    raw, mimetype, fname = downloaded
+    media = inbound.media
+    intent = classify_explicit_media_intent(inbound)
+
+    store = get_store(inbound.phone)
+
+    if intent == "photoprism":
+        if media.mediatype != "image" and not (mimetype or "").startswith("image/"):
+            return (
+                "PhotoPrism aceita fotos. Para este arquivo use memoria pessoal "
+                '(responda "guardar" na legenda).'
+            )
+        if http is None:
+            return "Servico indisponivel para envio ao PhotoPrism."
+        combined = f"{inbound.media.caption} {inbound.text}".strip()
+        album = extract_album_name(combined)
+        store.clear_pending_file()
+        return await _upload_bytes_to_photoprism(
+            raw,
+            filename=fname or media.filename,
+            album=album,
+            settings=settings,
+            http=http,
+        )
+
+    store.clear_pending_file()
+    return await _commit_bytes_to_personal_memory(
+        inbound.phone,
+        raw,
+        filename=fname or media.filename,
+        mime_type=mimetype or media.mimetype,
+        caption=media.caption or "",
+        label=_personal_label_from_inbound(inbound),
+    )
+
+
+async def handle_send_user_file(
+    decision: dict[str, Any],
+    *,
+    settings: AppSettings,
+    evo: EvolutionClient,
+    phone: str,
+    instance: str,
+    messenger: StepMessenger | None = None,
+) -> str:
+    store = get_store(phone)
+    file_id = str(decision.get("file_id") or "").strip()
+    file_name = str(decision.get("file_name") or "").strip()
+    label = str(decision.get("memory_label") or "").strip()
+
+    hit = store.find_file(file_id=file_id, filename=file_name, label=label)
+    intro = str(decision.get("response") or "").strip()
+
+    async def say(text: str) -> None:
+        if messenger:
+            await messenger.step(text)
+        else:
+            evo_base = settings.evolution_base_url.strip()
+            evo_key = settings.evolution_api_key.strip()
+            if evo_base and evo_key and instance:
+                await evo.send_text(
+                    base_url=evo_base,
+                    api_key=evo_key,
+                    instance=instance,
+                    number=phone,
+                    text=_truncate_whatsapp(text),
+                )
+
+    if not hit:
+        msg = intro or "Nao encontrei esse arquivo na sua memoria."
+        if not hit and not intro:
+            files = store.list_files()
+            if files:
+                names = ", ".join(f"{f.filename} (id={f.id})" for f in files[-5:])
+                msg = f"Nao achei o arquivo. Os ultimos guardados: {names}."
+        await say(msg)
+        return msg
+
+    meta, path = hit
+    evo_base = settings.evolution_base_url.strip()
+    evo_key = settings.evolution_api_key.strip()
+    if not evo_base or not evo_key or not instance:
+        return "Evolution nao configurado para enviar o arquivo."
+
+    if intro:
+        await say(intro)
+
+    data = path.read_bytes()
+    caption = (meta.caption or meta.label or meta.filename)[:1024]
+    ok = await evo.send_document_bytes(
+        base_url=evo_base,
+        api_key=evo_key,
+        instance=instance,
+        number=phone,
+        file_bytes=data,
+        filename=meta.filename,
+        caption=caption,
+        mimetype=meta.mime_type,
+    )
+    if ok is None:
+        msg = "Encontrei o arquivo mas nao consegui enviar pelo WhatsApp."
+        await say(msg)
+        return msg
+    return intro or f"Enviei o arquivo {meta.filename}."
+
+
+def handle_save_memory(decision: dict[str, Any], phone: str) -> str:
+    text = str(decision.get("memory_text") or "").strip()
+    if not text:
+        reply = str(decision.get("response") or "").strip()
+        return reply or "Nao entendi o que devo guardar na memoria."
+    label = str(decision.get("memory_label") or "").strip()
+    store = get_store(phone)
+    store.add_memory(text, label=label)
+    invalidate_user_memory_cache(store)
+    confirm = str(decision.get("response") or "").strip()
+    if confirm:
+        return confirm
+    short = text if len(text) <= 80 else text[:77] + "..."
+    return f"Guardei na sua memoria: {short}"
+
+
 async def execute_decision(
     decision: dict[str, Any],
     *,
@@ -727,6 +1276,15 @@ async def execute_decision(
             "Pedido de camera recebido. Se nada chegar, verifique Frigate nas opcoes do add-on."
         )
 
+    if action == "save_memory":
+        result = handle_save_memory(decision, phone)
+        return await finalize(result)
+
+    if action == "send_user_file":
+        return await finalize(
+            "Arquivo solicitado. Se nada chegar, verifique se o id ou nome estao corretos."
+        )
+
     fallback = reply or "Nao entendi o proximo passo."
     if messenger:
         await deliver(fallback)
@@ -746,6 +1304,7 @@ def _parse_photo_filters(decision: dict[str, Any]) -> dict[str, Any]:
         "country",
         "state",
         "label",
+        "keywords",
         "album",
         "query",
         "after",
@@ -758,6 +1317,12 @@ def _parse_photo_filters(decision: dict[str, Any]) -> dict[str, Any]:
     variants = raw.get("city_variants")
     if isinstance(variants, list):
         out["city_variants"] = [str(v).strip() for v in variants if isinstance(v, str) and v.strip()]
+    people_list = raw.get("people_list")
+    if isinstance(people_list, list):
+        out["people_list"] = [str(v).strip() for v in people_list if isinstance(v, str) and v.strip()]
+    mode = raw.get("people_mode")
+    if isinstance(mode, str) and mode.strip().lower() in ("all", "any"):
+        out["people_mode"] = mode.strip().lower()
     for key in ("year", "month", "day"):
         val = raw.get(key)
         if isinstance(val, int):
@@ -926,7 +1491,7 @@ async def handle_search_photos(
     if intro:
         await say(intro)
 
-    filters = _parse_photo_filters(decision)
+    filters = normalize_photo_filters(_parse_photo_filters(decision))
     count = _parse_photo_count(
         decision,
         default=5,
@@ -947,6 +1512,21 @@ async def handle_search_photos(
     )
 
     await say("A procurar fotos no acervo PhotoPrism...")
+
+    people_names = filters.get("_people_names")
+    people_mode = filters.get("_people_mode")
+    if isinstance(people_names, list) and len(people_names) > 1:
+        joined = ", ".join(str(n) for n in people_names)
+        if people_mode == "any":
+            await say(f"Buscando fotos com qualquer uma destas pessoas: {joined}.")
+        else:
+            await say(f"Buscando fotos com todas estas pessoas juntas: {joined}.")
+
+    pp_label = filters.get("label") if isinstance(filters.get("label"), str) else ""
+    if pp_label.strip():
+        await say(
+            f"Filtrando pelas etiquetas PhotoPrism: {pp_label.replace('|', ', ')}."
+        )
 
     city = filters.get("city") if isinstance(filters.get("city"), str) else ""
     place_terms = expand_city_variants(city) if city else []
@@ -1086,23 +1666,94 @@ async def handle_evolution_payload(
     if not evo_base or not evo_key:
         log.warning("Evolution URL ou api key ausentes nas opcoes do add-on")
 
-    assistant = build_gemini_assistant(
-        settings, catalog, cameras, cache_name=gemini_cache_name
-    )
-
     normalized = normalize_evolution_payload(payload)
     webhook_instance = payload.get("instance") or payload.get("instanceName") or ""
 
     for _inst_hint, record in normalized:
-        pair = extract_text_and_sender(record)
-        phone, user_text = pair
-        if phone is None:
+        inbound = extract_inbound_content(record)
+        if inbound is None:
             continue
-        phone_norm = normalize_phone_digits(phone)
+        phone_norm = inbound.phone
+        user_text = inbound.text
 
         if not permitted or phone_norm not in permitted:
             log.info("Telefone nao autorizado: %s", phone_norm)
             continue
+
+        hint = _inst_hint if isinstance(_inst_hint, str) and _inst_hint.strip() else ""
+        send_instance = (
+            hint or str(webhook_instance) or default_inst or settings.evolution_instance
+        ).strip()
+
+        if not inbound.media and not is_placeholder_user_text(user_text or ""):
+            pending_media_reply = await try_handle_pending_media_reply(
+                phone_norm,
+                user_text or "",
+                settings=settings,
+                http=http,
+            )
+            if pending_media_reply is not None:
+                log.info(
+                    "Resposta arquivo pendente phone=%s: %s",
+                    phone_norm,
+                    pending_media_reply[:120],
+                )
+                reply_text = _truncate_whatsapp(polish_user_message(pending_media_reply))
+                if evo_base and evo_key and send_instance:
+                    await evo.send_text(
+                        base_url=evo_base,
+                        api_key=evo_key,
+                        instance=send_instance,
+                        number=phone_norm,
+                        text=reply_text,
+                    )
+                    record_exchange(phone_norm, user_text or "", reply_text)
+                continue
+
+        if inbound.media:
+            if media_has_explicit_intent(inbound):
+                routed = await route_explicit_inbound_media(
+                    inbound,
+                    settings=settings,
+                    evo=evo,
+                    http=http,
+                    instance=send_instance,
+                )
+                if routed:
+                    reply_text = _truncate_whatsapp(polish_user_message(routed))
+                    if evo_base and evo_key and send_instance:
+                        await evo.send_text(
+                            base_url=evo_base,
+                            api_key=evo_key,
+                            instance=send_instance,
+                            number=phone_norm,
+                            text=reply_text,
+                        )
+                        record_exchange(phone_norm, user_text or "", reply_text)
+                    continue
+            else:
+                ask_msg = await handle_ambiguous_inbound_media(
+                    inbound,
+                    settings=settings,
+                    evo=evo,
+                    instance=send_instance,
+                )
+                if ask_msg:
+                    reply_text = _truncate_whatsapp(polish_user_message(ask_msg))
+                    if evo_base and evo_key and send_instance:
+                        await evo.send_text(
+                            base_url=evo_base,
+                            api_key=evo_key,
+                            instance=send_instance,
+                            number=phone_norm,
+                            text=reply_text,
+                        )
+                        record_exchange(
+                            phone_norm,
+                            user_text or "[arquivo]",
+                            reply_text,
+                        )
+                    continue
 
         pending_reply = await try_handle_pending_password(
             phone_norm,
@@ -1113,8 +1764,6 @@ async def handle_evolution_payload(
         if pending_reply is not None:
             log.info("Resposta senha pendente phone=%s: %s", phone_norm, pending_reply[:120])
             reply_text = _truncate_whatsapp(pending_reply)
-            hint = _inst_hint if isinstance(_inst_hint, str) and _inst_hint.strip() else ""
-            send_instance = (hint or str(webhook_instance) or default_inst or settings.evolution_instance).strip()
             if evo_base and evo_key and send_instance:
                 await evo.send_text(
                     base_url=evo_base,
@@ -1139,8 +1788,7 @@ async def handle_evolution_payload(
 
         try:
             await _process_inbound_message(
-                phone_norm=phone_norm,
-                user_text=user_text,
+                inbound=inbound,
                 _inst_hint=_inst_hint,
                 webhook_instance=webhook_instance,
                 default_inst=default_inst,
@@ -1149,11 +1797,11 @@ async def handle_evolution_payload(
                 evo=evo,
                 evo_base=evo_base,
                 evo_key=evo_key,
-                assistant=assistant,
                 catalog=catalog,
                 cameras=cameras,
                 http=http,
                 send_instance_early=send_instance_early,
+                gemini_cache_name=gemini_cache_name,
             )
         finally:
             await _stop_typing(
@@ -1167,8 +1815,7 @@ async def handle_evolution_payload(
 
 async def _process_inbound_message(
     *,
-    phone_norm: str,
-    user_text: str | None,
+    inbound: InboundContent,
     _inst_hint: str | None,
     webhook_instance: Any,
     default_inst: str,
@@ -1177,12 +1824,31 @@ async def _process_inbound_message(
     evo: EvolutionClient,
     evo_base: str,
     evo_key: str,
-    assistant: GeminiAssistant,
     catalog: DevicesCatalog,
     cameras: CamerasCatalog,
     http: httpx.AsyncClient | None,
     send_instance_early: str,
+    gemini_cache_name: str | None = None,
 ) -> None:
+        phone_norm = inbound.phone
+        user_text = inbound.text
+
+        hint = _inst_hint if isinstance(_inst_hint, str) and _inst_hint.strip() else ""
+        send_instance = (
+            hint or str(webhook_instance) or default_inst or settings.evolution_instance
+        ).strip()
+
+        store = get_store(phone_norm)
+        assistant, memory_context, memory_in_cache = build_gemini_assistant_for_user(
+            settings,
+            catalog,
+            cameras,
+            store,
+            catalog_cache_name=gemini_cache_name,
+        )
+
+        effective_message = user_text or ""
+
         states = await ha.get_states()
         ctx, total = build_entities_context(states)
 
@@ -1203,10 +1869,6 @@ async def _process_inbound_message(
             len(history_text),
         )
 
-        hint = _inst_hint if isinstance(_inst_hint, str) and _inst_hint.strip() else ""
-        send_instance = (
-            hint or str(webhook_instance) or default_inst or settings.evolution_instance
-        ).strip()
         messenger: StepMessenger | None = None
         if evo_base and evo_key and send_instance:
             messenger = StepMessenger(
@@ -1219,17 +1881,21 @@ async def _process_inbound_message(
 
         decision = await asyncio.to_thread(
             assistant.decide,
-            user_message=user_text or "",
+            user_message=effective_message,
             entities_context=ctx,
             conversation_history=history_text,
+            user_memory_context=memory_context,
+            memory_in_cache=memory_in_cache,
         )
         decision, retry_scenario_id = normalize_gemini_action(decision, catalog)
         if retry_scenario_id:
             decision = await asyncio.to_thread(
                 assistant.decide,
-                user_message=(user_text or "") + _scenario_retry_suffix(retry_scenario_id),
+                user_message=effective_message + _scenario_retry_suffix(retry_scenario_id),
                 entities_context=ctx,
                 conversation_history=history_text,
+                user_memory_context=memory_context,
+                memory_in_cache=memory_in_cache,
             )
             decision, _ = normalize_gemini_action(decision, catalog)
 
@@ -1300,6 +1966,27 @@ async def _process_inbound_message(
                 user_text=user_text or "",
                 messenger=messenger,
                 reply_text=str(decision.get("response") or "").strip() or "Imagem da camera enviada.",
+                evo=evo,
+                evo_base=evo_base,
+                evo_key=evo_key,
+                instance=send_instance,
+            )
+            return
+
+        if action == "send_user_file" and send_instance:
+            file_reply = await handle_send_user_file(
+                decision,
+                settings=settings,
+                evo=evo,
+                phone=phone_norm,
+                instance=send_instance,
+                messenger=messenger,
+            )
+            await _finish_whatsapp_exchange(
+                phone=phone_norm,
+                user_text=user_text or "",
+                messenger=messenger,
+                reply_text=file_reply,
                 evo=evo,
                 evo_base=evo_base,
                 evo_key=evo_key,

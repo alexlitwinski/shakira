@@ -155,6 +155,84 @@ class EvolutionClient:
         except Exception:
             return {"raw": r.text}
 
+    async def get_media_base64(
+        self,
+        *,
+        base_url: str,
+        api_key: str,
+        instance: str,
+        message_payload: dict[str, Any],
+    ) -> tuple[bytes, str, str] | None:
+        """Baixa midia de uma mensagem Evolution (base64). Retorna bytes, mimetype, filename."""
+        base = base_url.rstrip("/")
+        url = f"{base}/chat/getBase64FromMediaMessage/{instance}"
+        body: dict[str, Any] = {"message": message_payload, "convertToMp4": False}
+        try:
+            r = await self._client.post(
+                url,
+                headers=self._auth_headers(api_key),
+                json=body,
+                timeout=120.0,
+            )
+        except httpx.RequestError as e:
+            log.warning("Evolution getBase64FromMediaMessage failed: %s", e)
+            return None
+        if r.status_code not in (200, 201):
+            log.warning(
+                "Evolution getBase64FromMediaMessage %s: %s",
+                r.status_code,
+                r.text[:400],
+            )
+            return None
+        try:
+            data = r.json()
+        except Exception:
+            return None
+
+        b64 = ""
+        mimetype = "application/octet-stream"
+        filename = "arquivo"
+        if isinstance(data, dict):
+            inner = data.get("base64") or data.get("data")
+            if isinstance(inner, str) and inner.strip():
+                b64 = inner.strip()
+            elif isinstance(inner, dict):
+                b64 = str(inner.get("base64") or inner.get("media") or "").strip()
+                mimetype = str(inner.get("mimetype") or inner.get("mimeType") or mimetype)
+                filename = str(inner.get("fileName") or inner.get("filename") or filename)
+            resp = data.get("response")
+            if not b64 and isinstance(resp, dict):
+                b64 = str(resp.get("base64") or "").strip()
+                mimetype = str(resp.get("mimetype") or resp.get("mimeType") or mimetype)
+                filename = str(resp.get("fileName") or resp.get("filename") or filename)
+            if not b64:
+                b64 = str(data.get("media") or "").strip()
+            mimetype = str(
+                data.get("mimetype") or data.get("mimeType") or mimetype
+            )
+            filename = str(
+                data.get("fileName") or data.get("filename") or filename
+            )
+
+        if not b64:
+            log.warning("Evolution getBase64 sem conteudo base64")
+            return None
+        if b64.startswith("data:"):
+            header, _, rest = b64.partition(",")
+            b64 = rest
+            if ";" in header:
+                mt = header.split(":", 1)[-1].split(";")[0].strip()
+                if mt:
+                    mimetype = mt
+        try:
+            raw = base64.b64decode(b64, validate=False)
+        except Exception as e:
+            log.warning("decode base64 Evolution falhou: %s", e)
+            return None
+        if not raw:
+            return None
+        return raw, mimetype, filename
+
     async def send_image_bytes(
         self,
         *,
@@ -174,6 +252,39 @@ class EvolutionClient:
             instance=instance,
             number=number,
             media=b64,
+            mediatype="image",
+            mimetype=mimetype,
+            filename=filename,
+            caption=caption,
+        )
+
+    async def send_document_bytes(
+        self,
+        *,
+        base_url: str,
+        api_key: str,
+        instance: str,
+        number: str,
+        file_bytes: bytes,
+        filename: str,
+        caption: str = "",
+        mimetype: str = "application/octet-stream",
+    ) -> dict[str, Any] | None:
+        b64 = base64.b64encode(file_bytes).decode("ascii")
+        mediatype = "document"
+        if mimetype.startswith("image/"):
+            mediatype = "image"
+        elif mimetype.startswith("video/"):
+            mediatype = "video"
+        elif mimetype.startswith("audio/"):
+            mediatype = "audio"
+        return await self.send_media(
+            base_url=base_url,
+            api_key=api_key,
+            instance=instance,
+            number=number,
+            media=b64,
+            mediatype=mediatype,
             mimetype=mimetype,
             filename=filename,
             caption=caption,

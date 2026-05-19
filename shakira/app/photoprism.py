@@ -45,6 +45,79 @@ _CITY_PT_TO_EN: dict[str, str] = {
     "sao paulo": "São Paulo",
 }
 
+# Cenas/objetos PT (e typos comuns) -> etiquetas PhotoPrism (ingles, geradas por IA).
+_SCENE_PT_TO_LABELS: dict[str, list[str]] = {
+    "praia": ["beach", "coast", "sea", "sand"],
+    "paria": ["beach", "coast", "sea", "sand"],
+    "beach": ["beach", "coast", "sea", "sand"],
+    "mar": ["sea", "beach", "coast", "ocean"],
+    "oceano": ["ocean", "sea"],
+    "montanha": ["mountain", "mountains", "peak"],
+    "montanhas": ["mountain", "mountains", "peak"],
+    "neve": ["snow"],
+    "floresta": ["forest", "woods", "tree"],
+    "cachoeira": ["waterfall"],
+    "por do sol": ["sunset"],
+    "pôr do sol": ["sunset"],
+    "sunset": ["sunset"],
+    "nascer do sol": ["sunrise"],
+    "sunrise": ["sunrise"],
+    "pool": ["pool", "swimming"],
+    "piscina": ["pool", "swimming"],
+    "restaurante": ["restaurant", "food"],
+    "comida": ["food", "meal"],
+    "animal": ["animal"],
+    "cachorro": ["dog"],
+    "gato": ["cat"],
+    "flor": ["flower", "flowers"],
+    "flores": ["flower", "flowers"],
+    "casamento": ["wedding"],
+    "festa": ["party", "celebration"],
+    "parque": ["park"],
+    "lago": ["lake"],
+    "rio": ["river"],
+    "deserto": ["desert"],
+    "cidade": ["city", "urban"],
+    "igreja": ["church"],
+    "museu": ["museum"],
+    "hotel": ["hotel"],
+    "barco": ["boat", "ship"],
+    "avião": ["airplane", "aircraft"],
+    "aviao": ["airplane", "aircraft"],
+}
+
+_QUERY_STOPWORDS = frozenset(
+    {
+        "a",
+        "o",
+        "as",
+        "os",
+        "da",
+        "de",
+        "do",
+        "das",
+        "dos",
+        "na",
+        "no",
+        "nas",
+        "nos",
+        "em",
+        "um",
+        "uma",
+        "e",
+        "foto",
+        "fotos",
+        "imagem",
+        "imagens",
+        "quero",
+        "mostra",
+        "mostrar",
+        "ver",
+        "buscar",
+        "busca",
+    }
+)
+
 
 @dataclass(frozen=True)
 class PhotoResult:
@@ -106,6 +179,140 @@ def _city_query_value(city: str, extra_variants: list[str] | None = None) -> str
     return "|".join(variants)
 
 
+def _norm_token(text: str) -> str:
+    return text.strip().casefold()
+
+
+def map_scene_labels(text: str) -> list[str]:
+    """Mapeia termo de cena PT/EN para etiquetas PhotoPrism."""
+    key = _norm_token(text)
+    if not key:
+        return []
+    if key in _SCENE_PT_TO_LABELS:
+        return list(_SCENE_PT_TO_LABELS[key])
+    return []
+
+
+def extract_scene_labels(text: str) -> list[str]:
+    """Extrai etiquetas de cena de frase curta (ex.: 'na praia' -> beach, ...)."""
+    labels: list[str] = []
+    whole = map_scene_labels(text)
+    if whole:
+        return whole
+    for word in re.findall(r"[\w\u00C0-\u024F'-]+", text, re.UNICODE):
+        w = _norm_token(word)
+        if not w or w in _QUERY_STOPWORDS:
+            continue
+        mapped = map_scene_labels(w)
+        if mapped:
+            labels.extend(mapped)
+    seen: set[str] = set()
+    out: list[str] = []
+    for lb in labels:
+        k = lb.casefold()
+        if k not in seen:
+            seen.add(k)
+            out.append(lb)
+    return out
+
+
+def _merge_label_values(*groups: str | list[str] | None) -> str:
+    seen: set[str] = set()
+    out: list[str] = []
+    for group in groups:
+        if group is None:
+            continue
+        items = [group] if isinstance(group, str) else group
+        for item in items:
+            if not isinstance(item, str):
+                continue
+            for part in re.split(r"[|,]", item):
+                p = part.strip()
+                if not p:
+                    continue
+                k = p.casefold()
+                if k not in seen:
+                    seen.add(k)
+                    out.append(p)
+    return "|".join(out)
+
+
+def _is_likely_city_name(text: str) -> bool:
+    """Evita tratar cidade conhecida como etiqueta de cena."""
+    key = _norm_token(text)
+    if key in _CITY_PT_TO_EN:
+        return True
+    if len(text.split()) >= 2 and not map_scene_labels(text):
+        return True
+    return False
+
+
+def _resolve_label_field(label: str) -> str:
+    """Converte label PT de cena para etiquetas EN; mantem labels EN desconhecidas."""
+    mapped = extract_scene_labels(label)
+    if mapped:
+        return _merge_label_values(mapped)
+    return _merge_label_values(label)
+
+
+def normalize_scene_filters(filters: dict[str, Any]) -> dict[str, Any]:
+    """
+    Converte termos de cena (praia, montanha) para label PhotoPrism.
+    Remove query livre que buscaria titulos/legendas em vez de etiquetas.
+    """
+    out = dict(filters)
+
+    label_val = out.get("label")
+    if isinstance(label_val, str) and label_val.strip():
+        out["label"] = _resolve_label_field(label_val.strip())
+
+    for field in ("query", "city"):
+        val = out.get(field)
+        if not isinstance(val, str) or not val.strip():
+            continue
+        raw = val.strip()
+
+        scene = extract_scene_labels(raw)
+        if scene:
+            out["label"] = _merge_label_values(out.get("label"), scene)
+            out.pop(field, None)
+            log.info(
+                "PhotoPrism: %s=%r convertido para label=%s",
+                field,
+                raw,
+                out.get("label"),
+            )
+            continue
+
+        if field == "city" and not _is_likely_city_name(raw):
+            maybe = map_scene_labels(raw)
+            if maybe:
+                out["label"] = _merge_label_values(out.get("label"), maybe)
+                out.pop(field, None)
+                log.info(
+                    "PhotoPrism: city=%r tratada como cena -> label=%s",
+                    raw,
+                    out.get("label"),
+                )
+
+    free = out.get("query")
+    if isinstance(free, str) and free.strip():
+        stripped = free.strip()
+        if re.search(r"\w\s*:", stripped):
+            pass
+        else:
+            scene = extract_scene_labels(stripped)
+            if scene:
+                out["label"] = _merge_label_values(out.get("label"), scene)
+            log.warning(
+                "PhotoPrism: query livre ignorada (use label/keywords, nao titulo): %r",
+                stripped,
+            )
+            out.pop("query", None)
+
+    return out
+
+
 def photo_matches_place(photo: PhotoResult, terms: list[str]) -> bool:
     """True se titulo ou PlaceLabel contem algum termo de local (case-insensitive)."""
     if not terms:
@@ -124,14 +331,93 @@ def photo_matches_place(photo: PhotoResult, terms: list[str]) -> bool:
     return False
 
 
-def normalize_photo_filters(filters: dict[str, Any]) -> dict[str, Any]:
-    """Prefer people (flexivel) sobre person (exato); preserva demais chaves."""
-    out = dict(filters)
-    person = out.get("person")
-    if isinstance(person, str) and person.strip() and not out.get("people"):
-        out["people"] = person.strip()
-        out.pop("person", None)
+def parse_people_names(raw: Any) -> list[str]:
+    """Extrai lista de nomes de people/person/people_list."""
+    if isinstance(raw, list):
+        names: list[str] = []
+        for item in raw:
+            if isinstance(item, str) and item.strip():
+                names.extend(parse_people_names(item))
+        return _dedupe_people(names)
+    if not isinstance(raw, str):
+        return []
+    s = raw.strip()
+    if not s:
+        return []
+    if "&" in s:
+        return _dedupe_people(p.strip() for p in s.split("&") if p.strip())
+    if "|" in s:
+        return _dedupe_people(p.strip() for p in s.split("|") if p.strip())
+    parts = re.split(r",|;|\be\b", s, flags=re.IGNORECASE)
+    return _dedupe_people(p.strip() for p in parts if p.strip())
+
+
+def _dedupe_people(names: Any) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for name in names:
+        if not isinstance(name, str):
+            continue
+        n = name.strip()
+        if not n:
+            continue
+        key = n.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(n)
     return out
+
+
+def format_people_filter(names: list[str], *, mode: str = "all") -> str:
+    """Formata filtro people do PhotoPrism (& = todas, | = qualquer)."""
+    if not names:
+        return ""
+    if len(names) == 1:
+        return names[0]
+    sep = " & " if mode == "all" else " | "
+    return sep.join(names)
+
+
+def normalize_people_filters(filters: dict[str, Any]) -> dict[str, Any]:
+    """Normaliza pessoa(s): multiplos nomes usam AND (&) por padrao no PhotoPrism."""
+    out = dict(filters)
+    mode_raw = out.pop("people_mode", None)
+    mode = str(mode_raw or "all").strip().lower()
+    if mode not in ("all", "any"):
+        mode = "all"
+
+    names: list[str] = []
+    people_list = out.pop("people_list", None)
+    if isinstance(people_list, list):
+        names = parse_people_names(people_list)
+
+    people_raw = out.get("people")
+    if people_raw is not None:
+        parsed = parse_people_names(people_raw)
+        if parsed:
+            names = parsed
+        if isinstance(people_raw, str) and "|" in people_raw and mode_raw is None:
+            mode = "any"
+
+    person_raw = out.pop("person", None)
+    if person_raw is not None and not names:
+        names = parse_people_names(person_raw)
+
+    if names:
+        out["people"] = format_people_filter(names, mode=mode)
+        if len(names) > 1:
+            out["_people_mode"] = mode
+            out["_people_names"] = names
+    else:
+        out.pop("people", None)
+
+    return out
+
+
+def normalize_photo_filters(filters: dict[str, Any]) -> dict[str, Any]:
+    """Prefer people (flexivel); multiplas pessoas com AND; cenas -> label PhotoPrism."""
+    return normalize_scene_filters(normalize_people_filters(filters))
 
 
 def build_search_attempts(filters: dict[str, Any]) -> list[tuple[str, dict[str, Any], bool]]:
@@ -160,17 +446,9 @@ def build_search_attempts(filters: dict[str, Any]) -> list[tuple[str, dict[str, 
         kw = dict(base)
         kw.pop("city", None)
         kw.pop("person", None)
-        orleans_bits = [t for t in place_terms if len(t) >= 4]
-        if orleans_bits:
-            kw["query"] = " ".join(
-                filter(
-                    None,
-                    [
-                        str(kw.get("query") or "").strip(),
-                        " ".join(f"keywords:{b.replace(' ', '-')}" for b in orleans_bits[:2]),
-                    ],
-                )
-            ).strip()
+        place_bits = [t.replace(" ", "-") for t in place_terms if len(t) >= 4]
+        if place_bits:
+            kw["keywords"] = "|".join(place_bits[:3])
             attempts.append(("busca por pessoa e palavras-chave do local", kw, True))
 
     return attempts
@@ -207,7 +485,15 @@ def build_search_query(filters: dict[str, Any]) -> str:
         if city_q:
             qval("city", city_q)
 
-    for key in ("country", "state", "label", "album"):
+    label = filters.get("label")
+    if isinstance(label, str) and label.strip():
+        qval("label", _merge_label_values(label))
+
+    keywords = filters.get("keywords")
+    if isinstance(keywords, str) and keywords.strip():
+        qval("keywords", _merge_label_values(keywords))
+
+    for key in ("country", "state", "album"):
         val = filters.get(key)
         if isinstance(val, str) and val.strip():
             qval(key, val)
@@ -238,7 +524,14 @@ def build_search_query(filters: dict[str, Any]) -> str:
 
     free = filters.get("query")
     if isinstance(free, str) and free.strip():
-        parts.append(free.strip())
+        stripped = free.strip()
+        if re.search(r"\w\s*:", stripped):
+            parts.append(stripped)
+        else:
+            log.warning(
+                "PhotoPrism: query livre omitida da busca (sem filtro estruturado): %r",
+                stripped,
+            )
 
     return " ".join(parts)
 
@@ -654,6 +947,125 @@ class PhotoprismClient:
                 break
 
         return results, preview_token
+
+    async def find_album_uid(self, name: str, *, supervisor_token: str = "") -> str | None:
+        """Busca album por titulo (match parcial) e retorna UID."""
+        query = name.strip()
+        if not query:
+            return None
+        if not await self.ensure_api_prefix(supervisor_token=supervisor_token):
+            return None
+
+        url = self._url("/api/v1/albums")
+        params: dict[str, str | int] = {"count": 50, "q": query}
+        self._log_request("GET", url, params)
+        try:
+            r = await self._client.get(
+                url,
+                headers=self._headers(),
+                params=params,
+                timeout=30.0,
+            )
+        except httpx.RequestError:
+            return None
+        if r.status_code >= 400:
+            return None
+        try:
+            rows = r.json()
+        except Exception:
+            return None
+        if not isinstance(rows, list):
+            return None
+
+        q_low = query.casefold()
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            title = str(row.get("Title") or row.get("title") or "").strip()
+            uid = str(row.get("UID") or row.get("uid") or "").strip()
+            if not uid:
+                continue
+            if title.casefold() == q_low or q_low in title.casefold():
+                return uid
+        if rows and isinstance(rows[0], dict):
+            uid = str(rows[0].get("UID") or rows[0].get("uid") or "").strip()
+            return uid or None
+        return None
+
+    async def upload_photo(
+        self,
+        *,
+        file_bytes: bytes,
+        filename: str,
+        album: str = "",
+        supervisor_token: str = "",
+    ) -> str:
+        """Envia foto ao PhotoPrism. Retorna UID da foto criada."""
+        if not await self.ensure_api_prefix(supervisor_token=supervisor_token):
+            diag = await self.probe(supervisor_token=supervisor_token)
+            raise PhotoprismError(
+                "API PhotoPrism indisponivel para envio.",
+                diagnostic=diag,
+            )
+
+        url = self._url("/api/v1/upload")
+        safe_name = filename.strip() or "foto.jpg"
+        if not safe_name.lower().endswith((".jpg", ".jpeg", ".png", ".gif", ".webp", ".heic")):
+            safe_name = f"{safe_name}.jpg"
+
+        album_uid = ""
+        album_name = album.strip()
+        if album_name:
+            album_uid = await self.find_album_uid(album_name, supervisor_token=supervisor_token) or ""
+
+        headers = self._headers(json_accept=False)
+        headers.pop("Accept", None)
+
+        data: dict[str, str] = {}
+        if album_uid:
+            data["album"] = album_uid
+
+        content_type = "image/jpeg"
+        low = safe_name.lower()
+        if low.endswith(".png"):
+            content_type = "image/png"
+        elif low.endswith(".webp"):
+            content_type = "image/webp"
+        elif low.endswith(".gif"):
+            content_type = "image/gif"
+        files = {"files": (safe_name, file_bytes, content_type)}
+
+        self._log_request("POST", url)
+        try:
+            r = await self._client.post(
+                url,
+                headers=headers,
+                data=data or None,
+                files=files,
+                timeout=120.0,
+            )
+        except httpx.RequestError as e:
+            raise PhotoprismError(f"Envio ao PhotoPrism falhou: {e}") from e
+
+        self._log_response(r, context="upload")
+
+        if r.status_code == 401:
+            raise PhotoprismAuthError("Token PhotoPrism invalido ou expirado")
+        if r.status_code >= 400:
+            raise PhotoprismError(f"Upload falhou: HTTP {r.status_code}")
+
+        try:
+            payload = r.json()
+        except Exception:
+            return ""
+
+        if isinstance(payload, list) and payload:
+            row = payload[0]
+            if isinstance(row, dict):
+                return str(row.get("UID") or row.get("uid") or "")
+        if isinstance(payload, dict):
+            return str(payload.get("UID") or payload.get("uid") or "")
+        return ""
 
     async def get_thumbnail_bytes(
         self,

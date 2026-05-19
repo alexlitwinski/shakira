@@ -19,6 +19,28 @@ O **catálogo de dispositivos** fica em **cache de contexto Gemini** (não é re
 
 ---
 
+## Memória por utilizador (WhatsApp)
+
+Cada número autorizado tem memória persistente em **`/data/shakira_users/<telefone>/`** (volume do add-on):
+
+| Ficheiro / pasta | Conteúdo |
+|------------------|----------|
+| `memories.json` | Notas e factos que o utilizador pediu para guardar |
+| `files/` | Imagens, PDFs e documentos enviados pelo WhatsApp |
+| `files_manifest.json` | Índice dos ficheiros (id, nome, tipo, legenda) |
+
+**Exemplos de pedidos**
+
+- *"Lembra que o código do portão é 4521"* — guarda texto na memória.
+- *"O que eu te pedi para lembrar?"* — resposta com base na memória persistente.
+- Enviar um PDF com *"guarda isto"* — ficheiro gravado em disco.
+- *"Manda o PDF que guardei"* — reenvio do ficheiro pelo WhatsApp.
+- Enviar ficheiro **sem mensagem** — o assistente pergunta: memória pessoal (ex.: convite de show) ou **PhotoPrism** (só fotos; pode indicar álbum, ex.: *PhotoPrism álbum Viagens*).
+
+Quando a memória de um utilizador é grande (vários KB de texto), o add-on pode criar um **cache Gemini dedicado** por número para acelerar a recuperação. Limites configuráveis: `SHAKIRA_MAX_MEMORIES_PER_USER`, `SHAKIRA_MAX_FILES_PER_USER`, `SHAKIRA_MAX_FILE_BYTES`.
+
+---
+
 ## Arquivo de dispositivos (`/config/shakira_devices.yaml`)
 
 Copie o exemplo [`shakira/shakira_devices.example.yaml`](shakira/shakira_devices.example.yaml) para **`/config/shakira_devices.yaml`** no Home Assistant.
