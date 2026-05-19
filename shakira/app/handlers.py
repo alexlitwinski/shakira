@@ -33,7 +33,7 @@ from app.photoprism import (
     photo_matches_place,
 )
 from app.scenario_fallback import try_scenario_fallback_reply
-from app.user_memory import InboundMedia, UserMemoryStore, get_store
+from app.user_memory import InboundContent, InboundMedia, UserMemoryStore, get_store
 from app.user_memory_cache import ensure_user_memory_cache, invalidate_user_memory_cache
 from app.user_memory_prompts import USER_MEMORY_ACTIONS_INSTRUCTION
 from app.pending_media import (
@@ -99,14 +99,6 @@ _IGNORE_MESSAGE_TYPES = frozenset(
         "ephemeralMessage",
     }
 )
-
-
-@dataclass
-class InboundContent:
-    phone: str
-    text: str
-    media: InboundMedia | None = None
-    record: dict[str, Any] | None = None
 
 
 @dataclass

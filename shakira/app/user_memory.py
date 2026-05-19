@@ -77,6 +77,16 @@ class InboundMedia:
     message_record: dict[str, Any]
 
 
+@dataclass
+class InboundContent:
+    """Mensagem recebida no webhook Evolution (texto e/ou midia)."""
+
+    phone: str
+    text: str
+    media: InboundMedia | None = None
+    record: dict[str, Any] | None = None
+
+
 class UserMemoryStore:
     """Armazena memorias de texto e arquivos em /data/shakira_users/{phone}/."""
 
