@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
 import re
 import secrets
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -15,6 +17,26 @@ from urllib.parse import urlencode, urljoin, urlparse
 import httpx
 
 log = logging.getLogger(__name__)
+
+_UPLOAD_COUNT_RE = re.compile(r"(\d+)\s+files?\s+uploaded", re.IGNORECASE)
+_MIME_TO_EXT: dict[str, str] = {
+    "image/jpeg": ".jpg",
+    "image/jpg": ".jpg",
+    "image/png": ".png",
+    "image/gif": ".gif",
+    "image/webp": ".webp",
+    "image/heic": ".heic",
+    "image/heif": ".heif",
+}
+_EXT_TO_MIME: dict[str, str] = {
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".png": "image/png",
+    ".gif": "image/gif",
+    ".webp": "image/webp",
+    ".heic": "image/heic",
+    ".heif": "image/heif",
+}
 
 DEFAULT_THUMB_SIZE = "fit_720"
 UPLOAD_TOKEN_ALPHABET = "abcdefghijklmnopqrstuvwxyz0123456789"
@@ -130,6 +152,26 @@ class PhotoResult:
     taken_at: str
     place_label: str
     preview_token: str
+
+
+@dataclass(frozen=True)
+class UploadResult:
+    photo_uid: str
+    files_uploaded: int
+    confirmed_in_library: bool
+
+
+def format_upload_user_message(result: UploadResult, *, album: str = "") -> str:
+    album_bit = f" no album *{album.strip()}*" if album.strip() else ""
+    if result.confirmed_in_library:
+        return f"Foto enviada ao PhotoPrism{album_bit}."
+    if result.files_uploaded > 0:
+        return (
+            "O PhotoPrism recebeu o arquivo, mas ainda nao confirmei na galeria. "
+            "Veja em *Biblioteca > Adicionadas recentemente*; se nao aparecer, "
+            "a foto pode ja existir no acervo ou estar na fila de revisao."
+        )
+    return "Nao foi possivel confirmar o envio ao PhotoPrism."
 
 
 def expand_city_variants(city: str, extra: list[str] | None = None) -> list[str]:
@@ -544,6 +586,72 @@ def _body_preview(text: str, limit: int = 280) -> str:
     if len(t) <= limit:
         return t
     return t[: limit - 3] + "..."
+
+
+def _parse_pp_json_response(response: httpx.Response) -> dict[str, Any]:
+    try:
+        data = response.json()
+    except Exception:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _pp_response_message(data: dict[str, Any]) -> str:
+    for key in ("message", "error", "details", "Msg"):
+        value = data.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
+
+
+def _extract_upload_count(message: str) -> int | None:
+    if not message:
+        return None
+    match = _UPLOAD_COUNT_RE.search(message)
+    if match:
+        return int(match.group(1))
+    low = message.casefold()
+    if "file uploaded" in low and "files uploaded" not in low:
+        return 1
+    return None
+
+
+def _normalize_upload_filename(filename: str, mime_type: str = "") -> tuple[str, str]:
+    name = (filename.strip() or "foto").replace("\\", "/").split("/")[-1]
+    mime = (mime_type or "").split(";", 1)[0].strip().lower()
+    known_exts = tuple(_EXT_TO_MIME)
+
+    lower = name.casefold()
+    has_ext = any(lower.endswith(ext) for ext in known_exts)
+    if not has_ext:
+        ext = _MIME_TO_EXT.get(mime, ".jpg")
+        name = f"{name}{ext}"
+        if not mime:
+            mime = _EXT_TO_MIME.get(ext, "image/jpeg")
+
+    if not mime:
+        for ext, content_type in _EXT_TO_MIME.items():
+            if lower.endswith(ext):
+                mime = content_type
+                break
+    if not mime:
+        mime = "image/jpeg"
+
+    return name, mime
+
+
+def _parse_iso_timestamp(value: str) -> float | None:
+    raw = value.strip()
+    if not raw or raw.startswith("0001-"):
+        return None
+    try:
+        if raw.endswith("Z"):
+            raw = raw[:-1] + "+00:00"
+        from datetime import datetime
+
+        return datetime.fromisoformat(raw).timestamp()
+    except ValueError:
+        return None
 
 
 def _analyze_response(status: int | None, headers: httpx.Headers, body: str) -> tuple[bool, bool]:
@@ -1035,15 +1143,108 @@ class PhotoprismClient:
 
         raise PhotoprismError("Nao foi possivel obter o usuario do PhotoPrism.")
 
+    async def _find_recent_upload(
+        self,
+        *,
+        file_size: int,
+        max_age_sec: int = 300,
+        supervisor_token: str = "",
+    ) -> str:
+        """Busca foto adicionada recentemente com tamanho compativel."""
+        if not await self.ensure_api_prefix(supervisor_token=supervisor_token):
+            return ""
+
+        url = self._url("/api/v1/photos")
+        params: dict[str, str | int | bool] = {
+            "count": 10,
+            "offset": 0,
+            "merged": True,
+            "primary": True,
+            "order": "added",
+        }
+        deadline = time.time() + 45.0
+        min_ts = time.time() - max_age_sec
+
+        while time.time() < deadline:
+            try:
+                r = await self._client.get(
+                    url,
+                    headers=self._headers(),
+                    params=params,
+                    timeout=30.0,
+                )
+            except httpx.RequestError:
+                await asyncio.sleep(2.0)
+                continue
+
+            if r.status_code >= 400:
+                await asyncio.sleep(2.0)
+                continue
+
+            try:
+                rows = r.json()
+            except Exception:
+                await asyncio.sleep(2.0)
+                continue
+
+            if not isinstance(rows, list):
+                return ""
+
+            recent_uids: list[str] = []
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                uid = str(row.get("UID") or row.get("uid") or "").strip()
+                if not uid:
+                    continue
+                created_ts = _parse_iso_timestamp(str(row.get("CreatedAt") or ""))
+                if created_ts is None or created_ts < min_ts:
+                    continue
+                recent_uids.append(uid)
+                if file_size <= 0:
+                    log.info("PhotoPrism upload confirmado na galeria uid=%s", uid)
+                    return uid
+                size_match = False
+                files = row.get("Files") or row.get("files")
+                if isinstance(files, list):
+                    for item in files:
+                        if not isinstance(item, dict):
+                            continue
+                        size = item.get("Size") or item.get("size")
+                        try:
+                            if abs(int(size) - file_size) <= max(4096, file_size // 10):
+                                size_match = True
+                                break
+                        except (TypeError, ValueError):
+                            continue
+                if size_match:
+                    log.info("PhotoPrism upload confirmado na galeria uid=%s", uid)
+                    return uid
+
+            if len(recent_uids) == 1:
+                log.info(
+                    "PhotoPrism upload confirmado por horario recente uid=%s",
+                    recent_uids[0],
+                )
+                return recent_uids[0]
+
+            await asyncio.sleep(2.0)
+
+        return ""
+
     async def upload_photo(
         self,
         *,
         file_bytes: bytes,
         filename: str,
         album: str = "",
+        mime_type: str = "",
         supervisor_token: str = "",
-    ) -> str:
-        """Envia foto ao PhotoPrism. Retorna UID da foto criada (vazio se desconhecido)."""
+    ) -> UploadResult:
+        """Envia foto ao PhotoPrism e confirma se entrou na galeria."""
+        if not file_bytes:
+            raise PhotoprismError("Arquivo vazio; nada para enviar ao PhotoPrism.")
+
         if not await self.ensure_api_prefix(supervisor_token=supervisor_token):
             diag = await self.probe(supervisor_token=supervisor_token)
             raise PhotoprismError(
@@ -1055,9 +1256,7 @@ class PhotoprismClient:
         upload_token = _generate_upload_token()
         upload_url = self._url(f"/api/v1/users/{user_uid}/upload/{upload_token}")
 
-        safe_name = filename.strip() or "foto.jpg"
-        if not safe_name.lower().endswith((".jpg", ".jpeg", ".png", ".gif", ".webp", ".heic")):
-            safe_name = f"{safe_name}.jpg"
+        safe_name, content_type = _normalize_upload_filename(filename, mime_type)
 
         album_uid = ""
         album_name = album.strip()
@@ -1066,15 +1265,6 @@ class PhotoprismClient:
 
         headers = self._headers(json_accept=False)
         headers.pop("Accept", None)
-
-        content_type = "image/jpeg"
-        low = safe_name.lower()
-        if low.endswith(".png"):
-            content_type = "image/png"
-        elif low.endswith(".webp"):
-            content_type = "image/webp"
-        elif low.endswith(".gif"):
-            content_type = "image/gif"
         files = {"files": (safe_name, file_bytes, content_type)}
 
         self._log_request("POST", upload_url)
@@ -1096,6 +1286,20 @@ class PhotoprismClient:
             body = _body_preview(r.text or "")
             detail = f": {body}" if body else ""
             raise PhotoprismError(f"Upload falhou: HTTP {r.status_code}{detail}")
+
+        post_payload = _parse_pp_json_response(r)
+        post_message = _pp_response_message(post_payload)
+        if post_message:
+            log.info("PhotoPrism upload POST resposta: %s", post_message)
+        files_uploaded = _extract_upload_count(post_message)
+        if files_uploaded == 0:
+            detail = post_message or "nenhum arquivo aceito"
+            raise PhotoprismError(
+                f"PhotoPrism rejeitou o arquivo ({detail}). "
+                "Verifique formato, tamanho e permissoes de upload."
+            )
+        if files_uploaded is None:
+            files_uploaded = 1
 
         process_url = self._url(f"/api/v1/users/{user_uid}/upload/{upload_token}")
         process_body: dict[str, list[str]] = {}
@@ -1122,14 +1326,20 @@ class PhotoprismClient:
             detail = f": {body}" if body else ""
             raise PhotoprismError(f"Importacao falhou: HTTP {r2.status_code}{detail}")
 
-        try:
-            payload = r2.json()
-        except Exception:
-            return ""
+        process_payload = _parse_pp_json_response(r2)
+        process_message = _pp_response_message(process_payload)
+        if process_message:
+            log.info("PhotoPrism upload PUT resposta: %s", process_message)
 
-        if isinstance(payload, dict):
-            return str(payload.get("UID") or payload.get("uid") or "")
-        return ""
+        photo_uid = await self._find_recent_upload(
+            file_size=len(file_bytes),
+            supervisor_token=supervisor_token,
+        )
+        return UploadResult(
+            photo_uid=photo_uid,
+            files_uploaded=files_uploaded,
+            confirmed_in_library=bool(photo_uid),
+        )
 
     async def get_thumbnail_bytes(
         self,

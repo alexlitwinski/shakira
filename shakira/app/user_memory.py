@@ -63,7 +63,7 @@ class PendingFile:
     size_bytes: int
     is_image: bool
     caption: str = ""
-    stage: str = "destination"  # destination | description
+    stage: str = "destination"  # destination | description | processing
     created_at: str = field(default_factory=_now_iso)
 
 

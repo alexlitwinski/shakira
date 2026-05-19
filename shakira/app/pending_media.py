@@ -175,6 +175,21 @@ def build_personal_description_prompt() -> str:
     )
 
 
+def build_pending_progress_message(choice: str, *, album: str = "") -> str:
+    if choice == "photoprism":
+        album_name = album.strip()
+        if album_name:
+            return f"Enviando a foto ao PhotoPrism (album *{album_name}*)..."
+        return "Enviando a foto ao PhotoPrism..."
+    if choice == "personal":
+        return "Guardando no seu registro pessoal..."
+    return ""
+
+
+def build_pending_processing_wait() -> str:
+    return "Ainda estou processando seu arquivo. Aguarde um instante."
+
+
 def build_pending_clarification(*, is_image: bool) -> str:
     if is_image:
         return (

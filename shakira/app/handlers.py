@@ -8,6 +8,7 @@ import logging
 import os
 import re
 import time
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -29,6 +30,7 @@ from app.photoprism import (
     PhotoResult,
     build_search_attempts,
     expand_city_variants,
+    format_upload_user_message,
     normalize_photo_filters,
     photo_matches_place,
 )
@@ -43,6 +45,8 @@ from app.user_memory_actions import (
 from app.pending_media import (
     build_media_choice_prompt,
     build_pending_clarification,
+    build_pending_processing_wait,
+    build_pending_progress_message,
     build_personal_description_prompt,
     classify_explicit_media_intent,
     classify_pending_reply,
@@ -813,6 +817,7 @@ async def _upload_bytes_to_photoprism(
     *,
     filename: str,
     album: str,
+    mime_type: str = "",
     settings: AppSettings,
     http: httpx.AsyncClient,
 ) -> str:
@@ -828,10 +833,11 @@ async def _upload_bytes_to_photoprism(
         api_prefix=settings.photoprism_api_prefix,
     )
     try:
-        uid = await pp.upload_photo(
+        result = await pp.upload_photo(
             file_bytes=raw,
             filename=filename,
             album=album,
+            mime_type=mime_type,
             supervisor_token=settings.supervisor_token,
         )
     except PhotoprismAuthError:
@@ -840,10 +846,7 @@ async def _upload_bytes_to_photoprism(
         log.warning("Upload PhotoPrism falhou: %s", e)
         return f"Nao consegui enviar ao PhotoPrism: {e}"
 
-    album_bit = f" no album *{album}*" if album.strip() else ""
-    if uid:
-        return f"Foto enviada ao PhotoPrism{album_bit}."
-    return f"Foto enviada ao PhotoPrism{album_bit}."
+    return format_upload_user_message(result, album=album)
 
 
 async def _save_inbound_media(
@@ -894,6 +897,7 @@ async def try_handle_pending_media_reply(
     *,
     settings: AppSettings,
     http: httpx.AsyncClient | None,
+    on_step: Callable[[str], Awaitable[None]] | None = None,
 ) -> str | None:
     """Processa resposta do usuario apos pergunta sobre arquivo pendente."""
     store = get_store(phone)
@@ -903,6 +907,9 @@ async def try_handle_pending_media_reply(
 
     pending, path = hit
 
+    if pending.stage == "processing":
+        return build_pending_processing_wait()
+
     if pending.stage == "description":
         if any(w in user_text.casefold() for w in ("cancela", "cancelar", "esquece", "descarta", "deixa")):
             store.clear_pending_file()
@@ -910,11 +917,16 @@ async def try_handle_pending_media_reply(
         description = extract_personal_description(user_text, pending.caption)
         if not description:
             return build_personal_description_prompt()
+        store.set_pending_stage("processing")
+        if on_step:
+            await on_step(build_pending_progress_message("personal"))
         try:
             return _save_pending_bytes_to_personal(store, pending, path, description)
         except ValueError as e:
+            store.clear_pending_file()
             return f"Nao foi possivel guardar: {e}"
         except OSError:
+            store.clear_pending_file()
             return "Erro ao gravar o arquivo."
 
     choice = classify_pending_reply(user_text, is_image=pending.is_image)
@@ -926,8 +938,6 @@ async def try_handle_pending_media_reply(
     if choice == "unknown":
         return build_pending_clarification(is_image=pending.is_image)
 
-    raw = path.read_bytes()
-
     if choice == "photoprism":
         if not pending.is_image:
             return (
@@ -937,10 +947,15 @@ async def try_handle_pending_media_reply(
         if http is None:
             return "Servico temporariamente indisponivel para PhotoPrism."
         album = extract_album_name(user_text)
+        store.set_pending_stage("processing")
+        if on_step:
+            await on_step(build_pending_progress_message("photoprism", album=album))
+        raw = path.read_bytes()
         msg = await _upload_bytes_to_photoprism(
             raw,
             filename=pending.filename,
             album=album,
+            mime_type=pending.mime_type,
             settings=settings,
             http=http,
         )
@@ -951,11 +966,18 @@ async def try_handle_pending_media_reply(
     if not label:
         store.set_pending_stage("description")
         return build_personal_description_prompt()
+
+    store.set_pending_stage("processing")
+    if on_step:
+        await on_step(build_pending_progress_message("personal"))
+    raw = path.read_bytes()
     try:
         return _save_pending_bytes_to_personal(store, pending, path, label)
     except ValueError as e:
+        store.clear_pending_file()
         return f"Nao foi possivel guardar: {e}"
     except OSError:
+        store.clear_pending_file()
         return "Erro ao gravar o arquivo."
 
 
@@ -1037,6 +1059,7 @@ async def route_explicit_inbound_media(
             raw,
             filename=fname or media.filename,
             album=album,
+            mime_type=mimetype or media.mimetype,
             settings=settings,
             http=http,
         )
@@ -1753,11 +1776,21 @@ async def handle_evolution_payload(
         ).strip()
 
         if not inbound.media and not is_placeholder_user_text(user_text or ""):
+            messenger: StepMessenger | None = None
+            if evo_base and evo_key and send_instance:
+                messenger = StepMessenger(
+                    evo=evo,
+                    evo_base=evo_base,
+                    evo_key=evo_key,
+                    instance=send_instance,
+                    phone=phone_norm,
+                )
             pending_media_reply = await try_handle_pending_media_reply(
                 phone_norm,
                 user_text or "",
                 settings=settings,
                 http=http,
+                on_step=messenger.step if messenger else None,
             )
             if pending_media_reply is not None:
                 log.info(
@@ -1765,16 +1798,20 @@ async def handle_evolution_payload(
                     phone_norm,
                     pending_media_reply[:120],
                 )
-                reply_text = _truncate_whatsapp(polish_user_message(pending_media_reply))
-                if evo_base and evo_key and send_instance:
-                    await evo.send_text(
-                        base_url=evo_base,
-                        api_key=evo_key,
-                        instance=send_instance,
-                        number=phone_norm,
-                        text=reply_text,
-                    )
-                    record_exchange(phone_norm, user_text or "", reply_text)
+                if messenger and messenger.sent_any:
+                    await messenger.step(pending_media_reply)
+                    record_exchange(phone_norm, user_text or "", messenger.combined())
+                else:
+                    reply_text = _truncate_whatsapp(polish_user_message(pending_media_reply))
+                    if evo_base and evo_key and send_instance:
+                        await evo.send_text(
+                            base_url=evo_base,
+                            api_key=evo_key,
+                            instance=send_instance,
+                            number=phone_norm,
+                            text=reply_text,
+                        )
+                        record_exchange(phone_norm, user_text or "", reply_text)
                 continue
 
         if inbound.media:
