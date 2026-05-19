@@ -357,7 +357,9 @@ class DevicesCatalog:
 
     def build_catalog_context(self) -> str:
         lines: list[str] = [
-            "CATALOGO DE DISPOSITIVOS (unicas entidades que podem ser ALTERADAS via call_service):",
+            "CATALOGO DE DISPOSITIVOS (consulta e acoes permitidas):",
+            "- [somente contexto] = pode ler estado e explicar ao usuario",
+            "- [ACIONAVEL] = pode usar call_service para alterar",
             "",
         ]
         for dev in self.devices:

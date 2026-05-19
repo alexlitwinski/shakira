@@ -196,6 +196,22 @@ def format_ha_error_user() -> str:
     return "Nao consegui completar essa acao agora. Tente de novo em instantes."
 
 
+def format_whatsapp_layout(text: str) -> str:
+    """Garante quebras de linha em listas numeradas ou com marcadores no WhatsApp."""
+    if not text:
+        return text
+    t = text.replace("\r\n", "\n").replace("\r", "\n")
+    # Introducao antes de lista numerada: "...guardado: 1. Item"
+    t = re.sub(r"([.:!?])\s+(\d+\.\s)", r"\1\n\n\2", t)
+    # Entre itens: "...fotos) 2. Outro"
+    t = re.sub(r"(\S)\s+(\d+\.\s)", r"\1\n\2", t)
+    # Listas com marcador apos pontuacao
+    t = re.sub(r"([.:!?])\s+([•\-–]\s+)", r"\1\n\n\2", t)
+    t = re.sub(r"(\S)\s+([•\-–]\s+)", r"\1\n\2", t)
+    t = re.sub(r"\n{3,}", "\n\n", t)
+    return t.strip()
+
+
 def polish_user_message(text: str) -> str:
     """Remove termos tecnicos e dumps JSON antes de enviar ao WhatsApp."""
     t = (text or "").strip()
@@ -214,6 +230,14 @@ def polish_user_message(text: str) -> str:
     t = re.sub(r"\bHome Assistant\b", "casa", t, flags=re.IGNORECASE)
     t = re.sub(r"\bentity_id\b", "", t, flags=re.IGNORECASE)
     t = re.sub(r"\binput_select\.select_option\b", "", t, flags=re.IGNORECASE)
-    t = re.sub(r"\s{2,}", " ", t)
+    # Preserva quebras de linha; so normaliza espacos dentro de cada linha.
+    lines_out: list[str] = []
+    for ln in t.split("\n"):
+        if not ln.strip():
+            lines_out.append("")
+        else:
+            lines_out.append(re.sub(r"[ \t]{2,}", " ", ln.strip()))
+    t = "\n".join(lines_out)
+    t = format_whatsapp_layout(t)
     t = re.sub(r"\n{3,}", "\n\n", t).strip()
     return t

@@ -18,7 +18,10 @@ import httpx
 
 log = logging.getLogger(__name__)
 
-_UPLOAD_COUNT_RE = re.compile(r"(\d+)\s+files?\s+uploaded", re.IGNORECASE)
+_UPLOAD_COUNT_RE = re.compile(
+    r"(\d+)\s+(?:files?|arquivos?)\s+(?:uploaded|enviados?)",
+    re.IGNORECASE,
+)
 _MIME_TO_EXT: dict[str, str] = {
     "image/jpeg": ".jpg",
     "image/jpg": ".jpg",
@@ -39,6 +42,8 @@ _EXT_TO_MIME: dict[str, str] = {
 }
 
 DEFAULT_THUMB_SIZE = "fit_720"
+UPLOAD_APPROVE_POLL_ATTEMPTS = 3
+UPLOAD_APPROVE_POLL_DELAY_SEC = 2.0
 UPLOAD_TOKEN_ALPHABET = "abcdefghijklmnopqrstuvwxyz0123456789"
 UPLOAD_TOKEN_LENGTH = 7
 INGRESS_PREFIX_RE = re.compile(r"(/api/hassio_ingress/[^/]+)")
@@ -158,18 +163,18 @@ class PhotoResult:
 class UploadResult:
     photo_uid: str
     files_uploaded: int
-    confirmed_in_library: bool
+    import_processed: bool
+    photos_approved: int
 
 
 def format_upload_user_message(result: UploadResult, *, album: str = "") -> str:
     album_bit = f" no album *{album.strip()}*" if album.strip() else ""
-    if result.confirmed_in_library:
+    if result.files_uploaded > 0 and result.import_processed:
         return f"Foto enviada ao PhotoPrism{album_bit}."
     if result.files_uploaded > 0:
         return (
-            "O PhotoPrism recebeu o arquivo, mas ainda nao confirmei na galeria. "
-            "Veja em *Biblioteca > Adicionadas recentemente*; se nao aparecer, "
-            "a foto pode ja existir no acervo ou estar na fila de revisao."
+            "O PhotoPrism recebeu o arquivo, mas a importacao nao foi concluida. "
+            "Tente novamente em instantes."
         )
     return "Nao foi possivel confirmar o envio ao PhotoPrism."
 
@@ -613,7 +618,27 @@ def _extract_upload_count(message: str) -> int | None:
     low = message.casefold()
     if "file uploaded" in low and "files uploaded" not in low:
         return 1
+    if "arquivo enviado" in low and "arquivos enviados" not in low:
+        return 1
     return None
+
+
+def _is_import_processed_message(message: str) -> bool:
+    low = message.casefold()
+    return (
+        "upload has been processed" in low
+        or "upload foi processado" in low
+        or "upload was processed" in low
+        or "o upload foi processado" in low
+    )
+
+
+def _photo_recently_touched(row: dict[str, Any], since_ts: float) -> bool:
+    for field in ("UpdatedAt", "CreatedAt", "EditedAt"):
+        ts = _parse_iso_timestamp(str(row.get(field) or ""))
+        if ts is not None and ts >= since_ts - 30:
+            return True
+    return False
 
 
 def _normalize_upload_filename(filename: str, mime_type: str = "") -> tuple[str, str]:
@@ -1143,94 +1168,91 @@ class PhotoprismClient:
 
         raise PhotoprismError("Nao foi possivel obter o usuario do PhotoPrism.")
 
-    async def _find_recent_upload(
-        self,
-        *,
-        file_size: int,
-        max_age_sec: int = 300,
-        supervisor_token: str = "",
-    ) -> str:
-        """Busca foto adicionada recentemente com tamanho compativel."""
-        if not await self.ensure_api_prefix(supervisor_token=supervisor_token):
-            return ""
-
+    async def _collect_recent_photo_uids(self, since_ts: float, *, limit: int = 5) -> list[str]:
         url = self._url("/api/v1/photos")
         params: dict[str, str | int | bool] = {
-            "count": 10,
+            "count": limit,
             "offset": 0,
             "merged": True,
             "primary": True,
             "order": "added",
         }
-        deadline = time.time() + 45.0
-        min_ts = time.time() - max_age_sec
+        try:
+            r = await self._client.get(
+                url,
+                headers=self._headers(),
+                params=params,
+                timeout=20.0,
+            )
+        except httpx.RequestError:
+            return []
+        if r.status_code >= 400:
+            return []
+        try:
+            rows = r.json()
+        except Exception:
+            return []
+        if not isinstance(rows, list):
+            return []
 
-        while time.time() < deadline:
-            try:
-                r = await self._client.get(
-                    url,
-                    headers=self._headers(),
-                    params=params,
-                    timeout=30.0,
-                )
-            except httpx.RequestError:
-                await asyncio.sleep(2.0)
+        uids: list[str] = []
+        for row in rows:
+            if not isinstance(row, dict):
                 continue
+            uid = str(row.get("UID") or row.get("uid") or "").strip()
+            if uid and _photo_recently_touched(row, since_ts):
+                uids.append(uid)
+        return uids
 
-            if r.status_code >= 400:
-                await asyncio.sleep(2.0)
-                continue
+    async def _approve_photo_uids(self, uids: list[str]) -> int:
+        clean = [uid for uid in uids if uid]
+        if not clean:
+            return 0
 
-            try:
-                rows = r.json()
-            except Exception:
-                await asyncio.sleep(2.0)
-                continue
+        url = self._url("/api/v1/batch/photos/approve")
+        self._log_request("POST", url)
+        try:
+            r = await self._client.post(
+                url,
+                headers=self._headers(),
+                json={"photos": clean},
+                timeout=30.0,
+            )
+        except httpx.RequestError as e:
+            log.warning("PhotoPrism aprovar fotos falhou: %s", e)
+            return 0
 
-            if not isinstance(rows, list):
-                return ""
+        self._log_response(r, context="approve")
+        if r.status_code == 401:
+            raise PhotoprismAuthError("Token PhotoPrism invalido ou expirado")
+        if r.status_code >= 400:
+            log.warning(
+                "PhotoPrism aprovar fotos HTTP %s: %s",
+                r.status_code,
+                _body_preview(r.text or ""),
+            )
+            return 0
 
-            recent_uids: list[str] = []
-            for row in rows:
-                if not isinstance(row, dict):
-                    continue
-                uid = str(row.get("UID") or row.get("uid") or "").strip()
-                if not uid:
-                    continue
-                created_ts = _parse_iso_timestamp(str(row.get("CreatedAt") or ""))
-                if created_ts is None or created_ts < min_ts:
-                    continue
-                recent_uids.append(uid)
-                if file_size <= 0:
-                    log.info("PhotoPrism upload confirmado na galeria uid=%s", uid)
-                    return uid
-                size_match = False
-                files = row.get("Files") or row.get("files")
-                if isinstance(files, list):
-                    for item in files:
-                        if not isinstance(item, dict):
-                            continue
-                        size = item.get("Size") or item.get("size")
-                        try:
-                            if abs(int(size) - file_size) <= max(4096, file_size // 10):
-                                size_match = True
-                                break
-                        except (TypeError, ValueError):
-                            continue
-                if size_match:
-                    log.info("PhotoPrism upload confirmado na galeria uid=%s", uid)
-                    return uid
+        log.info("PhotoPrism aprovou %s foto(s) apos upload", len(clean))
+        return len(clean)
 
-            if len(recent_uids) == 1:
-                log.info(
-                    "PhotoPrism upload confirmado por horario recente uid=%s",
-                    recent_uids[0],
-                )
-                return recent_uids[0]
+    async def _approve_recent_uploads(self, since_ts: float, *, expected: int = 1) -> tuple[str, int]:
+        """Aguarda indexacao breve e tira fotos do estado A revisar."""
+        limit = max(1, min(expected, 5))
+        uids: list[str] = []
+        for attempt in range(UPLOAD_APPROVE_POLL_ATTEMPTS):
+            uids = await self._collect_recent_photo_uids(since_ts, limit=limit)
+            if uids:
+                break
+            if attempt + 1 < UPLOAD_APPROVE_POLL_ATTEMPTS:
+                await asyncio.sleep(UPLOAD_APPROVE_POLL_DELAY_SEC)
 
-            await asyncio.sleep(2.0)
+        if not uids:
+            log.warning("PhotoPrism: foto importada nao encontrada para aprovar")
+            return "", 0
 
-        return ""
+        approved = await self._approve_photo_uids(uids[:expected])
+        return uids[0], approved
 
     async def upload_photo(
         self,
@@ -1255,6 +1277,7 @@ class PhotoprismClient:
         user_uid = await self._get_user_uid(supervisor_token=supervisor_token)
         upload_token = _generate_upload_token()
         upload_url = self._url(f"/api/v1/users/{user_uid}/upload/{upload_token}")
+        upload_started_at = time.time()
 
         safe_name, content_type = _normalize_upload_filename(filename, mime_type)
 
@@ -1331,14 +1354,19 @@ class PhotoprismClient:
         if process_message:
             log.info("PhotoPrism upload PUT resposta: %s", process_message)
 
-        photo_uid = await self._find_recent_upload(
-            file_size=len(file_bytes),
-            supervisor_token=supervisor_token,
-        )
+        import_processed = _is_import_processed_message(process_message) or r2.status_code == 200
+        photo_uid = ""
+        photos_approved = 0
+        if import_processed and files_uploaded > 0:
+            photo_uid, photos_approved = await self._approve_recent_uploads(
+                upload_started_at,
+                expected=files_uploaded,
+            )
         return UploadResult(
             photo_uid=photo_uid,
             files_uploaded=files_uploaded,
-            confirmed_in_library=bool(photo_uid),
+            import_processed=import_processed,
+            photos_approved=photos_approved,
         )
 
     async def get_thumbnail_bytes(

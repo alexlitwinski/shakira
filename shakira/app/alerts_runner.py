@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
 from dataclasses import dataclass, field
 from typing import Any
+
+_NUMERIC_WHEN_RE = re.compile(r"^(>=|<=|>|<|==?)\s*([\d.]+)$", re.IGNORECASE)
 
 from app.alerts_catalog import AlertConfig, AlertsCatalog
 from app.config import AppSettings
@@ -106,7 +109,32 @@ class AlertsRunner:
     def _state_matches(self, state: str | None, when_state: str) -> bool:
         if state is None:
             return False
-        return state.strip().lower() == when_state.strip().lower()
+        st = state.strip()
+        cond = when_state.strip()
+        if not cond:
+            return False
+
+        m = _NUMERIC_WHEN_RE.match(cond)
+        if m:
+            try:
+                val = float(st.replace(",", "."))
+                threshold = float(m.group(2))
+            except ValueError:
+                return False
+            op = m.group(1)
+            if op == ">":
+                return val > threshold
+            if op == ">=":
+                return val >= threshold
+            if op == "<":
+                return val < threshold
+            if op == "<=":
+                return val <= threshold
+            if op in ("==", "="):
+                return val == threshold
+            return False
+
+        return st.lower() == cond.lower()
 
     async def _run_due_checks(self) -> None:
         now = time.monotonic()

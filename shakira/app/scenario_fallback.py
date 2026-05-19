@@ -19,9 +19,9 @@ ENTITY_ID_RE = re.compile(
     re.IGNORECASE,
 )
 
-BATH_USER_RE = re.compile(
-    r"\b(banho|banhar|água|agua|boiler|quente|temperatura)\b",
-    re.IGNORECASE,
+from app.scenario_context import (
+    message_suggests_bath_scenario,
+    message_suggests_server_health,
 )
 
 YES_RE = re.compile(
@@ -31,16 +31,19 @@ YES_RE = re.compile(
 
 HEAT_ASKED_RE = re.compile(r"\b(aquec|ligar o boiler|ligue o boiler)\b", re.IGNORECASE)
 
-
-def message_suggests_bath_scenario(user_text: str) -> bool:
-    return bool(BATH_USER_RE.search(user_text or ""))
+OnStep = Callable[[str], Awaitable[None]]
 
 
-def _match_scenario(user_text: str, catalog: DevicesCatalog, scenario_id: str | None) -> ScenarioConfig | None:
+def _match_scenario(
+    user_text: str, catalog: DevicesCatalog, scenario_id: str | None
+) -> ScenarioConfig | None:
     if scenario_id:
         for sc in catalog.scenarios:
             if sc.id == scenario_id:
                 return sc
+    for sc in catalog.scenarios:
+        if sc.id == "saude_servidor" and message_suggests_server_health(user_text):
+            return sc
     for sc in catalog.scenarios:
         if sc.id == "banho_boiler" and message_suggests_bath_scenario(user_text):
             return sc
@@ -59,6 +62,15 @@ def _entities_from_prompt(prompt: str) -> list[str]:
             seen.add(eid)
             out.append(eid)
     return out
+
+
+def _server_entity_ids(catalog: DevicesCatalog, scenario: ScenarioConfig | None) -> list[str]:
+    for dev in catalog.devices:
+        if "servidor" in dev.name.lower():
+            return [e.entity_id for e in dev.entities]
+    if scenario:
+        return _entities_from_prompt(scenario.prompt)
+    return []
 
 
 def _temp_threshold_c(prompt: str) -> float:
@@ -86,9 +98,6 @@ def _user_confirmed_heat(user_text: str, history_text: str) -> bool:
     return bool(HEAT_ASKED_RE.search(history_text or ""))
 
 
-OnStep = Callable[[str], Awaitable[None]]
-
-
 async def _emit(text: str, on_step: OnStep | None) -> bool:
     if on_step:
         await on_step(text)
@@ -96,20 +105,131 @@ async def _emit(text: str, on_step: OnStep | None) -> bool:
     return False
 
 
-async def try_scenario_fallback_reply(
+def _ping_label(entity_id: str, catalog: DevicesCatalog) -> str:
+    if "roteador" in entity_id:
+        return "Roteador principal"
+    if "otavio" in entity_id:
+        return "DVR (Otavio)"
+    if "3dmaker" in entity_id:
+        return "Servidor 3D Maker (Omada)"
+    return entity_display_name(entity_id, catalog)
+
+
+def _format_server_line(
+    entity_id: str, state: dict[str, Any] | None, catalog: DevicesCatalog
+) -> tuple[str, str | None]:
+    """Retorna (linha amigavel, aviso opcional)."""
+    label = entity_display_name(entity_id, catalog, state)
+    raw = str(state.get("state", "")) if state else ""
+    domain = entity_id.split(".", 1)[0] if "." in entity_id else ""
+
+    if raw in ("", "unknown", "unavailable") or state is None:
+        return f"• {label}: indisponivel", f"{label} indisponivel"
+
+    if domain == "binary_sensor" and "ping" in entity_id:
+        ping_label = _ping_label(entity_id, catalog)
+        if raw.lower() == "on":
+            return f"• {ping_label}: online", None
+        return f"• {ping_label}: offline", f"{ping_label} offline"
+
+    if entity_id == "sensor.memory_use_percent":
+        val = _state_float(state)
+        if val is None:
+            return f"• Memoria: {raw}", None
+        issue = f"Memoria alta ({val:g}%)" if val >= 85 else None
+        return f"• Memoria: {val:g}%", issue
+
+    if entity_id == "sensor.processor_use":
+        val = _state_float(state)
+        if val is None:
+            return f"• CPU: {raw}", None
+        issue = f"CPU alta ({val:g}%)" if val >= 90 else None
+        return f"• CPU: {val:g}%", issue
+
+    if entity_id == "sensor.disk_use_percent_config":
+        val = _state_float(state)
+        if val is None:
+            return f"• Disco (config): {raw}", None
+        issue = f"Disco quase cheio ({val:g}%)" if val >= 90 else None
+        return f"• Disco (config): {val:g}%", issue
+
+    if entity_id == "sensor.armario_servidores_temperature":
+        val = _state_float(state)
+        if val is None:
+            return f"• Temperatura do armario: {raw}", None
+        issue = f"Armario quente ({val:g}°C)" if val > 35 else None
+        return f"• Temperatura do armario: {val:g}°C", issue
+
+    if entity_id == "sensor.processor_temperature":
+        val = _state_float(state)
+        if val is None:
+            return f"• Temperatura do processador: {raw}", None
+        issue = f"Processador quente ({val:g}°C)" if val > 80 else None
+        return f"• Temperatura do processador: {val:g}°C", issue
+
+    if domain == "climate":
+        attrs = state.get("attributes") or {}
+        current = attrs.get("current_temperature") if isinstance(attrs, dict) else None
+        target = attrs.get("temperature") if isinstance(attrs, dict) else None
+        extra = ""
+        if current is not None:
+            extra = f", agora {current}°C"
+        if target is not None:
+            extra += f", alvo {target}°C"
+        return f"• {label}: {raw}{extra}", None
+
+    if domain == "switch":
+        on = raw.lower() in ("on", "true")
+        return (
+            (f"• {label}: ligada", None) if on else (f"• {label}: desligada", None)
+        )
+
+    return f"• {label}: {raw}", None
+
+
+async def _run_server_health_fallback(
     *,
     ha: HomeAssistantClient,
     catalog: DevicesCatalog,
-    user_text: str,
-    history_text: str = "",
-    scenario_id: str | None = None,
-    on_step: OnStep | None = None,
+    on_step: OnStep | None,
 ) -> str | None:
-    """Completa cenarios de banho/boiler consultando o HA diretamente."""
-    scenario = _match_scenario(user_text, catalog, scenario_id)
-    if not scenario:
+    scenario = next((s for s in catalog.scenarios if s.id == "saude_servidor"), None)
+    entity_ids = _server_entity_ids(catalog, scenario)
+    if not entity_ids:
+        log.warning("Fallback servidor: nenhuma entidade no catalogo")
         return None
 
+    await _emit("Vou verificar o servidor e a rede...", on_step)
+
+    lines: list[str] = []
+    issues: list[str] = []
+    for eid in entity_ids:
+        st = await ha.get_state(eid)
+        line, issue = _format_server_line(eid, st, catalog)
+        lines.append(line)
+        if issue:
+            issues.append(issue)
+
+    parts = ["Resumo do servidor:", ""] + lines
+    if issues:
+        parts.extend(["", "Atencao:"] + [f"• {i}" for i in issues])
+    else:
+        parts.extend(["", "Tudo parece normal por aqui."])
+
+    msg = "\n".join(parts)
+    await _emit(msg, on_step)
+    return None if on_step else msg
+
+
+async def _run_banho_boiler_fallback(
+    *,
+    ha: HomeAssistantClient,
+    catalog: DevicesCatalog,
+    scenario: ScenarioConfig,
+    user_text: str,
+    history_text: str,
+    on_step: OnStep | None,
+) -> str | None:
     entities = _entities_from_prompt(scenario.prompt)
     sensors = [e for e in entities if e.startswith("sensor.")]
     selects = [e for e in entities if e.startswith("input_select.")]
@@ -175,3 +295,38 @@ async def try_scenario_fallback_reply(
         )
     await _emit(msg, on_step)
     return None if on_step else msg
+
+
+async def try_scenario_fallback_reply(
+    *,
+    ha: HomeAssistantClient,
+    catalog: DevicesCatalog,
+    user_text: str,
+    history_text: str = "",
+    scenario_id: str | None = None,
+    on_step: OnStep | None = None,
+) -> str | None:
+    """Completa cenarios quando o Gemini nao conclui (banho, saude do servidor, etc.)."""
+    scenario = _match_scenario(user_text, catalog, scenario_id)
+
+    if scenario and scenario.id == "saude_servidor":
+        return await _run_server_health_fallback(ha=ha, catalog=catalog, on_step=on_step)
+
+    if (
+        not scenario
+        and message_suggests_server_health(user_text)
+        and _server_entity_ids(catalog, None)
+    ):
+        return await _run_server_health_fallback(ha=ha, catalog=catalog, on_step=on_step)
+
+    if scenario and (scenario.id == "banho_boiler" or "boiler" in scenario.prompt.lower()):
+        return await _run_banho_boiler_fallback(
+            ha=ha,
+            catalog=catalog,
+            scenario=scenario,
+            user_text=user_text,
+            history_text=history_text,
+            on_step=on_step,
+        )
+
+    return None

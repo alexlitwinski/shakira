@@ -292,7 +292,9 @@ class AlertsCatalog:
 
             when_state = row.get("when_state")
             if not isinstance(when_state, str) or not when_state.strip():
-                errors.append(f"{path}: 'when_state' obrigatorio (ex.: on, off, unavailable).")
+                errors.append(
+                    f"{path}: 'when_state' obrigatorio (ex.: on, off, unavailable, >=85, >35)."
+                )
 
             message = row.get("message")
             if not isinstance(message, str) or not message.strip():

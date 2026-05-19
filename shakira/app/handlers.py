@@ -34,6 +34,7 @@ from app.photoprism import (
     normalize_photo_filters,
     photo_matches_place,
 )
+from app.scenario_context import augment_message_for_scenarios, match_scenarios_for_message
 from app.scenario_fallback import try_scenario_fallback_reply
 from app.user_memory import InboundContent, InboundMedia, UserMemoryStore, get_store
 from app.user_memory_cache import ensure_user_memory_cache, invalidate_user_memory_cache
@@ -1951,7 +1952,14 @@ async def _process_inbound_message(
             catalog_cache_name=gemini_cache_name,
         )
 
-        effective_message = user_text or ""
+        effective_message = augment_message_for_scenarios(user_text or "", catalog)
+        active = match_scenarios_for_message(user_text or "", catalog)
+        if active:
+            log.info(
+                "Cenarios ativos phone=%s: %s",
+                phone_norm,
+                ", ".join(sc.id for sc in active),
+            )
 
         states = await ha.get_states()
         ctx, total = build_entities_context(states)
