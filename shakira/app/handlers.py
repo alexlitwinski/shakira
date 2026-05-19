@@ -34,7 +34,6 @@ from app.photoprism import (
     normalize_photo_filters,
     photo_matches_place,
 )
-from app.scenario_context import augment_message_for_scenarios, match_scenarios_for_message
 from app.scenario_fallback import try_scenario_fallback_reply
 from app.user_memory import InboundContent, InboundMedia, UserMemoryStore, get_store
 from app.user_memory_cache import ensure_user_memory_cache, invalidate_user_memory_cache
@@ -364,10 +363,24 @@ def build_entities_context(states: list[dict[str, Any]]) -> tuple[str, int]:
         eid = s.get("entity_id", "")
         st = str(s.get("state", ""))
         name = ""
+        extra = ""
         attrs = s.get("attributes") or {}
         if isinstance(attrs, dict):
             name = str(attrs.get("friendly_name") or "")
-        lines.append(f"{eid}\t{st}\t{name}")
+            domain = eid.split(".", 1)[0] if "." in eid else ""
+            if domain == "climate":
+                bits: list[str] = []
+                if attrs.get("current_temperature") is not None:
+                    bits.append(f"atual={attrs['current_temperature']}")
+                if attrs.get("temperature") is not None:
+                    bits.append(f"alvo={attrs['temperature']}")
+                if bits:
+                    extra = "\t" + " ".join(bits)
+            elif domain == "sensor":
+                unit = attrs.get("unit_of_measurement")
+                if unit:
+                    extra = f"\t{unit}"
+        lines.append(f"{eid}\t{st}\t{name}{extra}")
     body = "\n".join(lines)
     total = len(states)
     if len(body) <= max_chars:
@@ -1952,15 +1965,6 @@ async def _process_inbound_message(
             catalog_cache_name=gemini_cache_name,
         )
 
-        effective_message = augment_message_for_scenarios(user_text or "", catalog)
-        active = match_scenarios_for_message(user_text or "", catalog)
-        if active:
-            log.info(
-                "Cenarios ativos phone=%s: %s",
-                phone_norm,
-                ", ".join(sc.id for sc in active),
-            )
-
         states = await ha.get_states()
         ctx, total = build_entities_context(states)
 
@@ -1993,7 +1997,7 @@ async def _process_inbound_message(
 
         decision = await asyncio.to_thread(
             assistant.decide,
-            user_message=effective_message,
+            user_message=user_text or "",
             entities_context=ctx,
             conversation_history=history_text,
             user_memory_context=memory_context,
@@ -2003,7 +2007,7 @@ async def _process_inbound_message(
         if retry_scenario_id:
             decision = await asyncio.to_thread(
                 assistant.decide,
-                user_message=effective_message + _scenario_retry_suffix(retry_scenario_id),
+                user_message=(user_text or "") + _scenario_retry_suffix(retry_scenario_id),
                 entities_context=ctx,
                 conversation_history=history_text,
                 user_memory_context=memory_context,
@@ -2025,12 +2029,10 @@ async def _process_inbound_message(
             or (str(decision.get("action") or "reply").lower() == "reply" and not reply_preview)
         )
         skip_execute = False
-        if needs_fallback:
+        if needs_fallback and retry_scenario_id:
             fb = await try_scenario_fallback_reply(
                 ha=ha,
                 catalog=catalog,
-                user_text=user_text or "",
-                history_text=history_text,
                 scenario_id=retry_scenario_id,
                 on_step=messenger.step if messenger else None,
             )
@@ -2038,7 +2040,7 @@ async def _process_inbound_message(
                 log.info(
                     "Fallback de cenario phone=%s scenario=%s",
                     phone_norm,
-                    retry_scenario_id or "auto",
+                    retry_scenario_id,
                 )
                 decision = {"action": "reply", "response": fb}
             elif messenger and messenger.sent_any:
