@@ -27,7 +27,14 @@ from app.frigate import FrigateClient, FrigateError
 from app.evolution import EvolutionClient
 from app.gemini import GeminiAssistant
 from app.gemini_cache import ensure_catalog_cache
+from app.ha_states_cache import (
+    filter_states_for_ids,
+    get_all_states_cached,
+    get_states_map_cached,
+    store_all_states,
+)
 from app.homeassistant import HomeAssistantClient
+from app.message_timing import MessageTimings
 from app.photoprism import (
     PhotoprismAuthError,
     PhotoprismClient,
@@ -132,6 +139,7 @@ _SINGLE_USER_MESSAGE_ACTIONS = frozenset(
 )
 
 _USER_MEMORY_CACHE_MIN_CHARS = int(os.environ.get("SHAKIRA_USER_MEMORY_CACHE_MIN_CHARS", "6000"))
+_GEMINI_MAX_RETRIES = int(os.environ.get("GEMINI_MAX_RETRIES", "1"))
 
 _PLACEHOLDER_RESPONSE_MARKERS = (
     "verificando",
@@ -421,20 +429,50 @@ def extract_text_and_sender(record: dict[str, Any]) -> tuple[str | None, str | N
     return digits, text
 
 
+def _log_message_timings(timings: MessageTimings, messenger: StepMessenger | None) -> None:
+    wa_steps = len(messenger._parts) if messenger else 0
+    timings.finish(wa_steps=wa_steps)
+    log.info(
+        "timing phone=%s ha_states_ms=%.0f gemini_ms=%.0f gemini_calls=%s wa_steps=%s total_ms=%.0f",
+        timings.phone,
+        timings.ha_states_ms,
+        timings.gemini_ms,
+        timings.gemini_calls,
+        timings.wa_steps,
+        timings.total_ms,
+    )
+
+
 async def fetch_catalog_entity_states(
     ha: HomeAssistantClient,
     catalog: DevicesCatalog,
-) -> list[dict[str, Any]]:
-    """Estados HA apenas das entidades definidas em shakira_devices.yaml."""
+) -> tuple[list[dict[str, Any]], dict[str, dict[str, Any]]]:
+    """Estados HA das entidades do catalogo (1x get_states + filtro, com cache TTL)."""
     entity_ids = catalog.context_entity_ids()
     if not entity_ids:
-        return []
-    verified = await fetch_verified_entity_states(ha, entity_ids)
-    return [st for eid in entity_ids if (st := verified.get(eid)) is not None]
+        return [], {}
+
+    cached_map = get_states_map_cached()
+    if cached_map is not None:
+        states = [cached_map[eid] for eid in entity_ids if eid in cached_map]
+        by_id = {eid: cached_map[eid] for eid in entity_ids if eid in cached_map}
+        return states, by_id
+
+    cached_all = get_all_states_cached()
+    if cached_all is not None:
+        states = filter_states_for_ids(cached_all, entity_ids)
+        by_id = {str(s.get("entity_id")): s for s in states if s.get("entity_id")}
+        return states, by_id
+
+    all_states = await ha.get_states()
+    store_all_states(all_states)
+    states = filter_states_for_ids(all_states, entity_ids)
+    by_id = {str(s.get("entity_id")): s for s in states if s.get("entity_id")}
+    return states, by_id
 
 
 def build_entities_context(states: list[dict[str, Any]]) -> tuple[str, int]:
-    max_chars = int(os.environ.get("ENTITY_CONTEXT_MAX_CHARS", "120000"))
+    max_chars = int(os.environ.get("ENTITY_CONTEXT_MAX_CHARS", "40000"))
     total = len(states)
     if total == 0:
         return (
@@ -601,8 +639,12 @@ async def _apply_scenario_context_for_retry(
     catalog: DevicesCatalog,
     ctx: str,
     scenario_id: str,
+    *,
+    states_map: dict[str, dict[str, Any]] | None = None,
 ) -> str:
-    ctx = await prepend_scenario_states_to_context(ha, catalog, ctx, scenario_id)
+    ctx = await prepend_scenario_states_to_context(
+        ha, catalog, ctx, scenario_id, states_map=states_map
+    )
     correction = build_gemini_scenario_correction_block(scenario_id)
     return f"{correction}\n\n{ctx}"
 
@@ -613,6 +655,7 @@ async def _ensure_user_friendly_decision(
     ha: HomeAssistantClient,
     catalog: DevicesCatalog,
     scenario_id: str | None,
+    states_map: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Garante resposta amigavel; nunca envia instrucao interna ou dump tecnico."""
     raw = str(decision.get("response") or "").strip()
@@ -628,7 +671,9 @@ async def _ensure_user_friendly_decision(
     )
 
     if needs_friendly and scenario_id:
-        friendly = await build_friendly_reply_from_scenario(ha, catalog, scenario_id)
+        friendly = await build_friendly_reply_from_scenario(
+            ha, catalog, scenario_id, states_map=states_map
+        )
         if friendly:
             log.info("Resposta amigavel HA cenario=%s (Gemini nao concluiu)", scenario_id)
             out = dict(decision)
@@ -781,15 +826,52 @@ def build_gemini_assistant(
             cameras=cameras,
             ttl_hours=settings.gemini_cache_ttl_hours,
         )
-    fallback = catalog.build_catalog_context()
-    if cameras.cameras:
-        fallback = f"{fallback}\n\n{cameras.build_catalog_context()}"
+    fallback = ""
+    if not cache_name:
+        fallback = catalog.build_catalog_context()
+        if cameras.cameras:
+            fallback = f"{fallback}\n\n{cameras.build_catalog_context()}"
     return GeminiAssistant(
         settings.gemini_api_key,
         model=model_name,
         cache_name=cache_name,
         catalog_fallback=fallback,
     )
+
+
+def _build_catalog_system_text(
+    catalog: DevicesCatalog, cameras: CamerasCatalog
+) -> str:
+    from app.prompts import SYSTEM_INSTRUCTION
+
+    catalog_text = catalog.build_catalog_context()
+    if cameras.cameras:
+        catalog_text = f"{catalog_text}\n\n{cameras.build_catalog_context()}"
+    return f"{SYSTEM_INSTRUCTION}\n\n{catalog_text}"
+
+
+def _build_catalog_fallback_text(
+    catalog: DevicesCatalog, cameras: CamerasCatalog
+) -> str:
+    catalog_fallback = catalog.build_catalog_context()
+    if cameras.cameras:
+        catalog_fallback = f"{catalog_fallback}\n\n{cameras.build_catalog_context()}"
+    return f"{USER_MEMORY_ACTIONS_INSTRUCTION}\n\n{catalog_fallback}"
+
+
+def _decision_is_complete(decision: dict[str, Any]) -> bool:
+    action = _normalize_action_name(decision.get("action"))
+    reply = str(decision.get("response") or "").strip()
+    if action in _SINGLE_USER_MESSAGE_ACTIONS and reply:
+        return True
+    if action in VALID_GEMINI_ACTIONS and action not in ("reply", "list_entities") and reply:
+        return True
+    if action == "reply" and reply:
+        return (
+            not _is_placeholder_scenario_response(reply)
+            and not is_internal_instruction_leak(reply)
+        )
+    return False
 
 
 def build_gemini_assistant_for_user(
@@ -804,11 +886,7 @@ def build_gemini_assistant_for_user(
     model_name = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
     memory_context = store.build_context_text()
     memory_in_cache = False
-
-    catalog_fallback = catalog.build_catalog_context()
-    if cameras.cameras:
-        catalog_fallback = f"{catalog_fallback}\n\n{cameras.build_catalog_context()}"
-    catalog_fallback = f"{USER_MEMORY_ACTIONS_INSTRUCTION}\n\n{catalog_fallback}"
+    catalog_system = _build_catalog_system_text(catalog, cameras)
 
     user_cache: str | None = None
     if (
@@ -821,6 +899,7 @@ def build_gemini_assistant_for_user(
             model=model_name,
             store=store,
             ttl_hours=settings.gemini_cache_ttl_hours,
+            catalog_system_text=catalog_system,
         )
         if user_cache:
             memory_in_cache = True
@@ -828,7 +907,7 @@ def build_gemini_assistant_for_user(
                 settings.gemini_api_key,
                 model=model_name,
                 cache_name=user_cache,
-                catalog_fallback=catalog_fallback,
+                catalog_fallback="",
             )
             return assistant, memory_context, memory_in_cache
 
@@ -841,6 +920,10 @@ def build_gemini_assistant_for_user(
             cameras=cameras,
             ttl_hours=settings.gemini_cache_ttl_hours,
         )
+
+    catalog_fallback = ""
+    if not cache_name:
+        catalog_fallback = _build_catalog_fallback_text(catalog, cameras)
 
     assistant = GeminiAssistant(
         settings.gemini_api_key,
@@ -1575,17 +1658,17 @@ async def execute_decision(
     reply = str(decision.get("response") or "").strip()
     log.info("execute_decision phone=%s action=%s steps=%s", phone, action, bool(messenger))
 
-    async def deliver(text: str) -> None:
+    async def deliver(text: str, *, final: bool = False) -> None:
         t = polish_user_message(text)
         if t and messenger:
-            await messenger.step(t)
+            await messenger.step(t, final=final)
 
     async def send_user_message(message: str) -> str:
         """Envia uma unica mensagem (sem concatenar reply + result)."""
         out = polish_user_message(message) or polish_user_message(reply) or "Feito."
         if messenger:
             if out:
-                await messenger.step(out)
+                await messenger.step(out, final=True)
             return ""
         return out
 
@@ -1600,7 +1683,7 @@ async def execute_decision(
         out = msg or extra_clean or "Feito."
         if messenger:
             if out:
-                await messenger.step(out)
+                await messenger.step(out, final=True)
             return ""
         return out
 
@@ -1636,7 +1719,7 @@ async def execute_decision(
             return await finalize("Nao encontrei esse aparelho na casa.")
         result = format_state_value(eid, st, catalog)
         if messenger:
-            await deliver(result)
+            await deliver(result, final=True)
             return ""
         return await finalize(result)
 
@@ -1738,7 +1821,7 @@ async def execute_decision(
             if notify_extra:
                 done = f"{done}\n\n{notify_extra}"
             if messenger:
-                await deliver(done)
+                await deliver(done, final=True)
                 return ""
             return await finalize(done)
         except httpx.HTTPStatusError as e:
@@ -2153,14 +2236,18 @@ async def handle_evolution_payload(
     settings: AppSettings,
     gemini_cache_name: str | None = None,
     http: httpx.AsyncClient | None = None,
+    catalog: DevicesCatalog | None = None,
+    cameras: CamerasCatalog | None = None,
 ) -> None:
     gemini_key = settings.gemini_api_key.strip()
     if not gemini_key:
         log.warning("Chave Gemini ausente nas opcoes do add-on")
         return
 
-    catalog = DevicesCatalog.load(settings.devices_config_path)
-    cameras = CamerasCatalog.load(settings.frigate_cameras_config_path)
+    if catalog is None:
+        catalog = DevicesCatalog.load(settings.devices_config_path)
+    if cameras is None:
+        cameras = CamerasCatalog.load(settings.frigate_cameras_config_path)
     permitted_raw = await fetch_permitted_phones_raw(ha)
     permitted = parse_allowed_numbers(permitted_raw)
     evo_base = settings.evolution_base_url.strip()
@@ -2367,6 +2454,8 @@ async def _process_inbound_message(
         ).strip()
 
         store = get_store(phone_norm)
+        timings = MessageTimings(phone=phone_norm)
+
         assistant, memory_context, memory_in_cache = build_gemini_assistant_for_user(
             settings,
             catalog,
@@ -2375,7 +2464,9 @@ async def _process_inbound_message(
             catalog_cache_name=gemini_cache_name,
         )
 
-        states = await fetch_catalog_entity_states(ha, catalog)
+        ha_t0 = time.monotonic()
+        states, states_map = await fetch_catalog_entity_states(ha, catalog)
+        timings.mark_ha_done((time.monotonic() - ha_t0) * 1000.0)
         ctx, total = build_entities_context(states)
 
         log.info(
@@ -2411,8 +2502,13 @@ async def _process_inbound_message(
                 phone=phone_norm,
             )
 
-        decision = await asyncio.to_thread(
-            assistant.decide,
+        async def _gemini_decide(**kwargs: Any) -> dict[str, Any]:
+            t0 = time.monotonic()
+            result = await asyncio.to_thread(assistant.decide, **kwargs)
+            timings.add_gemini((time.monotonic() - t0) * 1000.0)
+            return result
+
+        decision = await _gemini_decide(
             user_message=gemini_user_message,
             entities_context=ctx,
             conversation_history=history_text,
@@ -2427,18 +2523,19 @@ async def _process_inbound_message(
         )
         decision, retry_scenario_id = normalize_gemini_action(decision, catalog)
         active_scenario_id = retry_scenario_id
+        retries_used = 0
 
-        if retry_scenario_id:
+        if retry_scenario_id and retries_used < _GEMINI_MAX_RETRIES:
             ctx_retry = await _apply_scenario_context_for_retry(
-                ha, catalog, ctx, retry_scenario_id
+                ha, catalog, ctx, retry_scenario_id, states_map=states_map
             )
             log.info(
                 "Retry Gemini com estados HA phone=%s cenario=%s",
                 phone_norm,
                 retry_scenario_id,
             )
-            decision = await asyncio.to_thread(
-                assistant.decide,
+            retries_used += 1
+            decision = await _gemini_decide(
                 user_message=gemini_user_message,
                 entities_context=ctx_retry,
                 conversation_history=history_text,
@@ -2463,43 +2560,48 @@ async def _process_inbound_message(
             history_entries=history_entries,
         )
 
-        reply_preview = str(decision.get("response") or "").strip()
-        needs_retry = (
-            _is_placeholder_scenario_response(reply_preview)
-            or is_internal_instruction_leak(reply_preview)
-            or (str(decision.get("action") or "reply").lower() not in VALID_GEMINI_ACTIONS)
-            or (str(decision.get("action") or "reply").lower() == "reply" and not reply_preview)
-        )
-        if needs_retry and active_scenario_id:
-            ctx_retry = await _apply_scenario_context_for_retry(
-                ha, catalog, ctx, active_scenario_id
+        if not _decision_is_complete(decision):
+            reply_preview = str(decision.get("response") or "").strip()
+            needs_retry = (
+                _is_placeholder_scenario_response(reply_preview)
+                or is_internal_instruction_leak(reply_preview)
+                or (_normalize_action_name(decision.get("action")) not in VALID_GEMINI_ACTIONS)
+                or (
+                    _normalize_action_name(decision.get("action")) == "reply"
+                    and not reply_preview
+                )
             )
-            log.info(
-                "Segundo retry Gemini phone=%s cenario=%s",
-                phone_norm,
-                active_scenario_id,
-            )
-            decision = await asyncio.to_thread(
-                assistant.decide,
-                user_message=gemini_user_message,
-                entities_context=ctx_retry,
-                conversation_history=history_text,
-                user_memory_context=memory_context,
-                memory_in_cache=memory_in_cache,
-            )
-            decision = correct_affirmative_misroute(
-                decision,
-                user_text=user_text or "",
-                history_entries=history_entries,
-                catalog=catalog,
-            )
-            decision, _ = normalize_gemini_action(decision, catalog)
+            if needs_retry and active_scenario_id and retries_used < _GEMINI_MAX_RETRIES:
+                ctx_retry = await _apply_scenario_context_for_retry(
+                    ha, catalog, ctx, active_scenario_id, states_map=states_map
+                )
+                log.info(
+                    "Segundo retry Gemini phone=%s cenario=%s",
+                    phone_norm,
+                    active_scenario_id,
+                )
+                retries_used += 1
+                decision = await _gemini_decide(
+                    user_message=gemini_user_message,
+                    entities_context=ctx_retry,
+                    conversation_history=history_text,
+                    user_memory_context=memory_context,
+                    memory_in_cache=memory_in_cache,
+                )
+                decision = correct_affirmative_misroute(
+                    decision,
+                    user_text=user_text or "",
+                    history_entries=history_entries,
+                    catalog=catalog,
+                )
+                decision, _ = normalize_gemini_action(decision, catalog)
 
         decision = await _ensure_user_friendly_decision(
             decision,
             ha=ha,
             catalog=catalog,
             scenario_id=active_scenario_id,
+            states_map=states_map,
         )
 
         _log_gemini_decision(phone_norm, decision)
@@ -2525,6 +2627,7 @@ async def _process_inbound_message(
                 evo_key=evo_key,
                 instance=send_instance,
             )
+            _log_message_timings(timings, messenger)
             return
 
         if action == "get_camera_snapshot" and http is not None and send_instance:
@@ -2548,6 +2651,7 @@ async def _process_inbound_message(
                 evo_key=evo_key,
                 instance=send_instance,
             )
+            _log_message_timings(timings, messenger)
             return
 
         if action == "delete_from_memory":
@@ -2562,6 +2666,7 @@ async def _process_inbound_message(
                 evo_key=evo_key,
                 instance=send_instance,
             )
+            _log_message_timings(timings, messenger)
             return
 
         if action == "send_user_file" and send_instance:
@@ -2583,6 +2688,7 @@ async def _process_inbound_message(
                 evo_key=evo_key,
                 instance=send_instance,
             )
+            _log_message_timings(timings, messenger)
             return
 
         reply_text = await execute_decision(
@@ -2596,11 +2702,13 @@ async def _process_inbound_message(
         )
 
         if not phone_norm:
+            _log_message_timings(timings, messenger)
             return
         if (
             not reply_text.strip()
             and not (messenger and messenger.sent_any)
         ):
+            _log_message_timings(timings, messenger)
             return
         if not evo_base or not evo_key or not send_instance:
             log.error(
@@ -2609,6 +2717,7 @@ async def _process_inbound_message(
                 bool(evo_key),
                 repr(send_instance),
             )
+            _log_message_timings(timings, messenger)
             return
 
         await _finish_whatsapp_exchange(
@@ -2621,3 +2730,4 @@ async def _process_inbound_message(
             evo_key=evo_key,
             instance=send_instance,
         )
+        _log_message_timings(timings, messenger)

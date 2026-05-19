@@ -60,8 +60,9 @@ def ensure_user_memory_cache(
     model: str,
     store: UserMemoryStore,
     ttl_hours: int = 24,
+    catalog_system_text: str = "",
 ) -> str | None:
-    """Cria ou reutiliza cache Gemini com memorias do usuario. None se vazio ou pequeno."""
+    """Cria ou reutiliza cache Gemini (catalogo + memorias). None se vazio ou pequeno."""
     context = store.build_context_text()
     if not context.strip():
         return None
@@ -73,6 +74,12 @@ def ensure_user_memory_cache(
 
     genai.configure(api_key=api_key)
     content_hash = store.content_hash()
+    if catalog_system_text:
+        import hashlib
+
+        content_hash = hashlib.sha256(
+            f"{catalog_system_text}:{content_hash}".encode("utf-8")
+        ).hexdigest()
     meta = _load_meta(store)
     existing = meta.get("cache_name")
     if (
@@ -88,6 +95,8 @@ def ensure_user_memory_cache(
         _delete_cache(existing)
 
     full_system = f"{USER_MEMORY_CACHE_INSTRUCTION}\n\n{context}"
+    if catalog_system_text.strip():
+        full_system = f"{catalog_system_text.strip()}\n\n{full_system}"
     contents_text = "Memorias e arquivos do usuario carregados."
 
     try:

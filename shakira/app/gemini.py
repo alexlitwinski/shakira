@@ -14,6 +14,8 @@ from app.scheduled_response_prompts import SCHEDULED_REPLY_SYSTEM, build_schedul
 
 log = logging.getLogger(__name__)
 
+_model_instance_cache: dict[tuple[str, str], genai.GenerativeModel] = {}
+
 
 def _strip_code_fence(text: str) -> str:
     t = text.strip()
@@ -40,22 +42,35 @@ class GeminiAssistant:
 
     def _build_model(self) -> genai.GenerativeModel:
         if self._cache_name:
+            cache_key = (self._cache_name, self._model_name)
+            cached = _model_instance_cache.get(cache_key)
+            if cached is not None:
+                return cached
             try:
                 from google.generativeai import caching
 
                 cache = caching.CachedContent.get(self._cache_name)
                 log.debug("Modelo com cache Gemini: %s", self._cache_name)
-                return genai.GenerativeModel.from_cached_content(cached_content=cache)
+                model = genai.GenerativeModel.from_cached_content(cached_content=cache)
+                _model_instance_cache[cache_key] = model
+                return model
             except Exception:
                 log.warning("Cache Gemini indisponivel; fallback inline")
+
+        fallback_key = (f"inline:{hash(self._catalog_fallback)}", self._model_name)
+        cached_fb = _model_instance_cache.get(fallback_key)
+        if cached_fb is not None:
+            return cached_fb
 
         system = SYSTEM_INSTRUCTION
         if self._catalog_fallback:
             system = f"{system}\n\n{self._catalog_fallback}"
-        return genai.GenerativeModel(
+        model = genai.GenerativeModel(
             model_name=self._model_name,
             system_instruction=system,
         )
+        _model_instance_cache[fallback_key] = model
+        return model
 
     def decide(
         self,

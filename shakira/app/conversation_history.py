@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import os
 from collections import deque
 from dataclasses import dataclass
 
 MAX_MESSAGES = 20
+MAX_HISTORY_CHARS = int(os.environ.get("CONVERSATION_HISTORY_MAX_CHARS", "4000"))
 
 
 @dataclass(frozen=True)
@@ -45,7 +47,22 @@ def format_for_prompt(entries: list[HistoryEntry]) -> str:
     for entry in entries:
         label = "Usuario" if entry.role == "user" else "Assistente"
         lines.append(f"{label}: {entry.text}")
+    body = "\n".join(lines)
+    if len(body) <= MAX_HISTORY_CHARS:
+        return (
+            "Historico recente da conversa (ultimas mensagens, do mais antigo ao mais recente):\n"
+            + body
+        )
+    trimmed: list[str] = []
+    total = 0
+    for line in reversed(lines):
+        extra = len(line) + (1 if trimmed else 0)
+        if total + extra > MAX_HISTORY_CHARS:
+            break
+        trimmed.append(line)
+        total += extra
+    trimmed.reverse()
     return (
         "Historico recente da conversa (ultimas mensagens, do mais antigo ao mais recente):\n"
-        + "\n".join(lines)
+        + "\n".join(trimmed)
     )

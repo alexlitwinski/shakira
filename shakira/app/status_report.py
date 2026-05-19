@@ -18,10 +18,11 @@ from app.frigate import FrigateClient
 from app.whatsapp_phones import ENTITY_PERMITTED, fetch_permitted_phones_raw, parse_allowed_numbers
 from app.homeassistant import HomeAssistantClient
 from app.photoprism import PhotoprismClient
+from app.message_timing import recent_averages
 
 log = logging.getLogger(__name__)
 
-VERSION = "1.7.3"
+VERSION = "1.7.4"
 
 
 def _mask_secret(value: str, visible: int = 4) -> str:
@@ -403,4 +404,5 @@ async def build_status_report(
             if scheduled_responses_status
             else []
         ),
+        "performance": recent_averages(),
     }

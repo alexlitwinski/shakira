@@ -356,6 +356,8 @@ async def _run_webhook(
     evo: EvolutionClient,
     gemini_cache_name: str | None,
     http: httpx.AsyncClient,
+    catalog: DevicesCatalog,
+    cameras: CamerasCatalog,
 ) -> None:
     try:
         if isinstance(body, list):
@@ -368,6 +370,8 @@ async def _run_webhook(
                         settings=settings,
                         gemini_cache_name=gemini_cache_name,
                         http=http,
+                        catalog=catalog,
+                        cameras=cameras,
                     )
         elif isinstance(body, dict):
             ev = str(body.get("event") or "").upper()
@@ -381,6 +385,8 @@ async def _run_webhook(
                 settings=settings,
                 gemini_cache_name=gemini_cache_name,
                 http=http,
+                catalog=catalog,
+                cameras=cameras,
             )
         else:
             log.warning("Payload webhook inesperado: %s", type(body))
@@ -429,7 +435,11 @@ async def evolution_webhook(
     ha: HomeAssistantClient = request.app.state.ha
     evo: EvolutionClient = request.app.state.evo
     cache_name: str | None = getattr(request.app.state, "gemini_cache_name", None)
+    catalog: DevicesCatalog = request.app.state.catalog
+    cameras: CamerasCatalog = request.app.state.cameras
 
     http: httpx.AsyncClient = request.app.state.http
-    background_tasks.add_task(_run_webhook, body, settings, ha, evo, cache_name, http)
+    background_tasks.add_task(
+        _run_webhook, body, settings, ha, evo, cache_name, http, catalog, cameras
+    )
     return {"ok": "true"}

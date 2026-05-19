@@ -40,8 +40,10 @@ class StepMessenger:
     def combined(self) -> str:
         return "\n\n".join(self._parts)
 
-    async def step(self, text: str) -> None:
-        await pulse_whatsapp_typing()
+    async def step(self, text: str, *, final: bool = False) -> None:
+        session = _typing_session.get()
+        if session is None:
+            await pulse_whatsapp_typing()
         msg = truncate_whatsapp(polish_user_message(text))
         if not msg:
             return
@@ -63,7 +65,9 @@ class StepMessenger:
         else:
             self._parts.append(msg)
             log.info("WhatsApp passo enviado phone=%s (%s chars)", self.phone, len(msg))
-        delay = float(os.environ.get("WHATSAPP_STEP_DELAY_SEC", "0.55"))
+        if final:
+            return
+        delay = float(os.environ.get("WHATSAPP_STEP_DELAY_SEC", "0.2"))
         if delay > 0:
             await asyncio.sleep(delay)
 

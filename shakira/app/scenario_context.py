@@ -57,13 +57,19 @@ def entity_ids_for_scenarios(scenarios: list[ScenarioConfig]) -> list[str]:
 
 
 async def fetch_verified_entity_states(
-    ha: HomeAssistantClient, entity_ids: list[str]
+    ha: HomeAssistantClient,
+    entity_ids: list[str],
+    *,
+    states_map: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, dict[str, Any] | None]:
-    async def _one(eid: str) -> tuple[str, dict[str, Any] | None]:
-        return eid, await ha.get_state(eid)
-
     if not entity_ids:
         return {}
+
+    if states_map is not None:
+        return {eid: states_map.get(eid) for eid in entity_ids}
+
+    async def _one(eid: str) -> tuple[str, dict[str, Any] | None]:
+        return eid, await ha.get_state(eid)
 
     pairs = await asyncio.gather(*(_one(eid) for eid in entity_ids))
     out = dict(pairs)
@@ -150,6 +156,8 @@ async def build_verified_states_context_block(
     ha: HomeAssistantClient,
     catalog: DevicesCatalog,
     scenario_id: str,
+    *,
+    states_map: dict[str, dict[str, Any]] | None = None,
 ) -> str:
     """Bloco de estados HA para o Gemini (texto amigavel)."""
     from app.user_friendly import format_state_value
@@ -162,7 +170,9 @@ async def build_verified_states_context_block(
     if not entity_ids:
         return ""
 
-    verified = await fetch_verified_entity_states(ha, entity_ids)
+    verified = await fetch_verified_entity_states(
+        ha, entity_ids, states_map=states_map
+    )
     lines = [
         "[Estados verificados agora no Home Assistant — use estes valores na resposta]",
         f"[Cenario aplicavel: {scenario.id}]",
@@ -182,8 +192,12 @@ async def prepend_scenario_states_to_context(
     catalog: DevicesCatalog,
     ctx: str,
     scenario_id: str,
+    *,
+    states_map: dict[str, dict[str, Any]] | None = None,
 ) -> str:
-    block = await build_verified_states_context_block(ha, catalog, scenario_id)
+    block = await build_verified_states_context_block(
+        ha, catalog, scenario_id, states_map=states_map
+    )
     if not block:
         return ctx
     return f"{block}\n\n{ctx}"
@@ -203,6 +217,8 @@ async def build_friendly_reply_from_scenario(
     ha: HomeAssistantClient,
     catalog: DevicesCatalog,
     scenario_id: str,
+    *,
+    states_map: dict[str, dict[str, Any]] | None = None,
 ) -> str:
     """Resumo legivel para WhatsApp quando o Gemini nao conclui (fallback final)."""
     from app.user_friendly import format_state_value
@@ -215,7 +231,9 @@ async def build_friendly_reply_from_scenario(
     if not entity_ids:
         return ""
 
-    verified = await fetch_verified_entity_states(ha, entity_ids)
+    verified = await fetch_verified_entity_states(
+        ha, entity_ids, states_map=states_map
+    )
     lines: list[str] = []
     for eid in entity_ids:
         st = verified.get(eid)

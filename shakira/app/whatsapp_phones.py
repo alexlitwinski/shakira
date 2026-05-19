@@ -2,9 +2,17 @@
 
 from __future__ import annotations
 
+import os
+import threading
+import time
+
 from app.homeassistant import HomeAssistantClient
 
 ENTITY_PERMITTED = "input_text.whatsapp_bot_permitidos"
+
+_permitted_cache_lock = threading.Lock()
+_permitted_cache_raw: str | None = None
+_permitted_cache_at: float = 0.0
 
 
 def normalize_phone_digits(value: str) -> str:
@@ -25,8 +33,26 @@ def parse_allowed_numbers(raw: str) -> set[str]:
     return out
 
 
+def _permitted_ttl_sec() -> float:
+    return max(0.0, float(os.environ.get("SHAKIRA_PERMITTED_PHONES_CACHE_SEC", "60")))
+
+
 async def fetch_permitted_phones_raw(ha: HomeAssistantClient) -> str:
+    global _permitted_cache_raw, _permitted_cache_at
+    ttl = _permitted_ttl_sec()
+    if ttl > 0:
+        with _permitted_cache_lock:
+            if (
+                _permitted_cache_raw is not None
+                and time.monotonic() - _permitted_cache_at < ttl
+            ):
+                return _permitted_cache_raw
+
     s = await ha.get_state(ENTITY_PERMITTED)
-    if s and isinstance(s.get("state"), str):
-        return s["state"]
-    return ""
+    raw = s["state"] if s and isinstance(s.get("state"), str) else ""
+
+    if ttl > 0:
+        with _permitted_cache_lock:
+            _permitted_cache_raw = raw
+            _permitted_cache_at = time.monotonic()
+    return raw
