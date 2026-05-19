@@ -1,0 +1,28 @@
+---
+description: Não versionar o add-on Shakira nem fazer commit sem pedido explícito
+alwaysApply: true
+---
+
+# Versionamento do add-on Shakira
+
+**Não altere a versão do add-on** a menos que o utilizador peça explicitamente (ex.: "sobe a versão", "versiona o add-on", "faz release 1.4.9").
+
+## O que não fazer por iniciativa própria
+
+- Não alterar `version` em `shakira/config.yaml`
+- Não alterar `VERSION` em `shakira/app/status_report.py`
+- Não sugerir nem aplicar bump de versão ao concluir tarefas de código
+- Não criar commits, tags ou push no Git — só quando o utilizador pedir explicitamente
+
+## Quando o utilizador pedir para versionar
+
+1. Perguntar ou confirmar o número da nova versão se não tiver sido indicado
+2. Atualizar **os dois** locais em conjunto:
+   - `shakira/config.yaml` → campo `version`
+   - `shakira/app/status_report.py` → constante `VERSION`
+3. Manter o mesmo valor em ambos (ex.: `"1.4.9"`)
+
+## Exemplos
+
+- Pedido: *"corrige o bug do webhook"* → implementar a correção **sem** mudar versão nem commit
+- Pedido: *"sobe para 1.4.9 e faz commit"* → bump nos dois ficheiros + commit com a mensagem pedida
