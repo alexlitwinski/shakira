@@ -55,6 +55,9 @@ class AppSettings:
     photoprism_token: str
     photoprism_max_photos: int
     photoprism_api_prefix: str
+    frigate_url: str
+    frigate_cameras_config_path: str
+    alerts_config_path: str
     shakira_api_token: str
 
     @classmethod
@@ -81,6 +84,12 @@ class AppSettings:
         devices_path = _opts_str(opts, "devices_config_path", "SHAKIRA_DEVICES_PATH")
         if not devices_path:
             devices_path = "/homeassistant/shakira_devices.yaml"
+        cameras_path = _opts_str(opts, "frigate_cameras_config_path", "SHAKIRA_CAMERAS_PATH")
+        if not cameras_path:
+            cameras_path = "/homeassistant/shakira_cameras.yaml"
+        alerts_path = _opts_str(opts, "alerts_config_path", "SHAKIRA_ALERTS_PATH")
+        if not alerts_path:
+            alerts_path = "/homeassistant/shakira_alerts.yaml"
 
         return cls(
             supervisor_token=token.strip(),
@@ -95,6 +104,9 @@ class AppSettings:
             photoprism_token=_opts_str(opts, "photoprism_token", "PHOTOPRISM_TOKEN"),
             photoprism_max_photos=min(10, max(1, _opts_int(opts, "photoprism_max_photos", 10))),
             photoprism_api_prefix=_opts_str(opts, "photoprism_api_prefix", "PHOTOPRISM_API_PREFIX"),
+            frigate_url=_opts_str(opts, "frigate_url", "FRIGATE_URL").rstrip("/"),
+            frigate_cameras_config_path=cameras_path,
+            alerts_config_path=alerts_path,
             shakira_api_token=_opts_str(opts, "shakira_api_token", "SHAKIRA_API_TOKEN"),
         )
 

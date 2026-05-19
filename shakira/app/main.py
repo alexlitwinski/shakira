@@ -16,8 +16,20 @@ from pydantic import BaseModel, Field
 
 from app.config import AppSettings
 from app.dashboard import get_dashboard_html
-from app.devices_catalog import DevicesCatalog
-from app.devices_catalog import CatalogValidationError
+from app.cameras_catalog import CamerasCatalog, CamerasCatalogValidationError
+from app.devices_catalog import CatalogValidationError, DevicesCatalog
+from app.alerts_catalog import AlertsCatalog, AlertsCatalogValidationError
+from app.alerts_runner import AlertsRunner
+from app.alerts_yaml_io import (
+    read_yaml_file as read_alerts_yaml_file,
+    validate_yaml_content as validate_alerts_yaml_content,
+    write_yaml_file as write_alerts_yaml_file,
+)
+from app.cameras_yaml_io import (
+    read_yaml_file as read_cameras_yaml_file,
+    validate_yaml_content as validate_cameras_yaml_content,
+    write_yaml_file as write_cameras_yaml_file,
+)
 from app.devices_yaml_io import read_yaml_file, validate_yaml_content, write_yaml_file
 from app.evolution import EvolutionClient
 from app.gemini_cache import ensure_catalog_cache
@@ -58,14 +70,17 @@ async def lifespan(app: FastAPI):
     app.state.evo = EvolutionClient(client)
 
     catalog = DevicesCatalog.load(settings.devices_config_path)
+    cameras = CamerasCatalog.load(settings.frigate_cameras_config_path)
     app.state.catalog = catalog
+    app.state.cameras = cameras
     cache_name = None
-    if settings.gemini_api_key and catalog.devices:
+    if settings.gemini_api_key and (catalog.devices or cameras.cameras):
         model = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
         cache_name = ensure_catalog_cache(
             api_key=settings.gemini_api_key,
             model=model,
             catalog=catalog,
+            cameras=cameras,
             ttl_hours=settings.gemini_cache_ttl_hours,
         )
     elif settings.gemini_api_key and not catalog.devices:
@@ -75,8 +90,21 @@ async def lifespan(app: FastAPI):
         )
     app.state.gemini_cache_name = cache_name
 
+    alerts = AlertsCatalog.load(settings.alerts_config_path)
+    app.state.alerts = alerts
+    alerts_runner = AlertsRunner(settings=settings, ha=app.state.ha, evo=app.state.evo, catalog=alerts)
+    if alerts.enabled_alerts():
+        alerts_runner.start()
+    else:
+        log.info(
+            "Nenhum alerta ativo em %s — executor de alertas em espera",
+            settings.alerts_config_path,
+        )
+    app.state.alerts_runner = alerts_runner
+
     yield
 
+    await alerts_runner.stop()
     await client.aclose()
 
 
@@ -90,6 +118,11 @@ async def _status_payload(request: Request) -> dict[str, Any]:
         "catalog",
         DevicesCatalog.load(settings.devices_config_path),
     )
+    cameras: CamerasCatalog = getattr(
+        request.app.state,
+        "cameras",
+        CamerasCatalog.load(settings.frigate_cameras_config_path),
+    )
     http: httpx.AsyncClient = request.app.state.http
     ha: HomeAssistantClient = request.app.state.ha
     started = getattr(request.app.state, "started_at", None)
@@ -98,6 +131,7 @@ async def _status_payload(request: Request) -> dict[str, Any]:
         http=http,
         ha=ha,
         catalog=catalog,
+        cameras=cameras,
         gemini_cache_name=getattr(request.app.state, "gemini_cache_name", None),
         started_at=started,
     )
@@ -121,8 +155,30 @@ async def status_legacy(request: Request) -> dict[str, Any]:
     return await _status_payload(request)
 
 
-class DevicesYamlBody(BaseModel):
+class YamlEditorBody(BaseModel):
     content: str = Field(..., min_length=1)
+
+
+DevicesYamlBody = YamlEditorBody
+CamerasYamlBody = YamlEditorBody
+AlertsYamlBody = YamlEditorBody
+
+
+def _refresh_gemini_cache(request: Request) -> None:
+    settings: AppSettings = request.app.state.settings
+    if not settings.gemini_api_key.strip():
+        return
+    catalog: DevicesCatalog = request.app.state.catalog
+    cameras = CamerasCatalog.load(settings.frigate_cameras_config_path)
+    request.app.state.cameras = cameras
+    model = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
+    request.app.state.gemini_cache_name = ensure_catalog_cache(
+        api_key=settings.gemini_api_key,
+        model=model,
+        catalog=catalog,
+        cameras=cameras,
+        ttl_hours=settings.gemini_cache_ttl_hours,
+    )
 
 
 class WhatsAppSendBody(BaseModel):
@@ -180,6 +236,87 @@ async def put_devices_yaml(request: Request, body: DevicesYamlBody) -> dict[str,
         "e o assistente nao refletir na hora."
     )
     return result
+
+
+@app.get("/api/cameras-yaml")
+async def get_cameras_yaml(request: Request) -> dict[str, Any]:
+    """Conteudo do shakira_cameras.yaml para o editor do painel."""
+    settings: AppSettings = request.app.state.settings
+    return read_cameras_yaml_file(settings.frigate_cameras_config_path)
+
+
+@app.post("/api/cameras-yaml/validate")
+async def post_cameras_yaml_validate(body: CamerasYamlBody) -> dict[str, Any]:
+    """Valida estrutura sem gravar."""
+    try:
+        errors = validate_cameras_yaml_content(body.content)
+    except ValueError as e:
+        errors = [str(e)]
+    return {"valid": not errors, "errors": errors}
+
+
+@app.put("/api/cameras-yaml")
+async def put_cameras_yaml(request: Request, body: CamerasYamlBody) -> dict[str, Any]:
+    """Grava shakira_cameras.yaml e recarrega catalogo de cameras."""
+    settings: AppSettings = request.app.state.settings
+    try:
+        result = write_cameras_yaml_file(settings.frigate_cameras_config_path, body.content)
+    except CamerasCatalogValidationError as e:
+        raise HTTPException(status_code=400, detail={"errors": e.errors}) from e
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail={"errors": [str(e)]}) from e
+
+    _refresh_gemini_cache(request)
+    result["message"] = (
+        "Arquivo salvo. Catalogo de cameras recarregado; cache Gemini atualizado."
+    )
+    return result
+
+
+@app.get("/api/alerts-yaml")
+async def get_alerts_yaml(request: Request) -> dict[str, Any]:
+    """Conteudo do shakira_alerts.yaml para o editor do painel."""
+    settings: AppSettings = request.app.state.settings
+    return read_alerts_yaml_file(settings.alerts_config_path)
+
+
+@app.post("/api/alerts-yaml/validate")
+async def post_alerts_yaml_validate(body: AlertsYamlBody) -> dict[str, Any]:
+    """Valida estrutura sem gravar."""
+    try:
+        errors = validate_alerts_yaml_content(body.content)
+    except ValueError as e:
+        errors = [str(e)]
+    return {"valid": not errors, "errors": errors}
+
+
+@app.put("/api/alerts-yaml")
+async def put_alerts_yaml(request: Request, body: AlertsYamlBody) -> dict[str, Any]:
+    """Grava shakira_alerts.yaml e recarrega o executor de alertas."""
+    settings: AppSettings = request.app.state.settings
+    try:
+        result = write_alerts_yaml_file(settings.alerts_config_path, body.content)
+    except AlertsCatalogValidationError as e:
+        raise HTTPException(status_code=400, detail={"errors": e.errors}) from e
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail={"errors": [str(e)]}) from e
+
+    catalog = AlertsCatalog.load(settings.alerts_config_path)
+    request.app.state.alerts = catalog
+    runner: AlertsRunner = request.app.state.alerts_runner
+    runner.reload(catalog)
+    runner.ensure_running()
+    result["message"] = (
+        "Arquivo salvo. Regras de alerta recarregadas; verificacoes periodicas atualizadas."
+    )
+    return result
+
+
+@app.get("/api/alerts/status")
+async def get_alerts_status(request: Request) -> dict[str, Any]:
+    """Estado do executor de alertas (painel / diagnostico)."""
+    runner: AlertsRunner = request.app.state.alerts_runner
+    return runner.status_snapshot()
 
 
 async def _run_webhook(

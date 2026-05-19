@@ -126,7 +126,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       white-space: pre-wrap;
       word-break: break-word;
     }
-    #yaml-editor {
+    .yaml-editor {
       width: 100%;
       min-height: 420px;
       font-family: "Cascadia Code", "Consolas", monospace;
@@ -170,7 +170,9 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 
     <nav class="tabs">
       <button type="button" class="tab active" data-tab="status">Status</button>
-      <button type="button" class="tab" data-tab="yaml">shakira_devices.yaml</button>
+      <button type="button" class="tab" data-tab="yaml-devices">shakira_devices.yaml</button>
+      <button type="button" class="tab" data-tab="yaml-cameras">shakira_cameras.yaml</button>
+      <button type="button" class="tab" data-tab="yaml-alerts">shakira_alerts.yaml</button>
     </nav>
 
     <div id="msg-box" class="msg"></div>
@@ -183,17 +185,45 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <div class="grid" id="grid"></div>
     </section>
 
-    <section id="panel-yaml" class="panel">
-      <div class="editor-card">
-        <p class="meta" id="yaml-path">Carregando arquivo…</p>
-        <p class="meta" id="yaml-stats"></p>
-        <textarea id="yaml-editor" spellcheck="false" autocomplete="off"></textarea>
+    <section id="panel-yaml-devices" class="panel">
+      <div class="editor-card" data-editor="devices">
+        <p class="meta editor-path">Carregando arquivo…</p>
+        <p class="meta editor-stats"></p>
+        <textarea class="yaml-editor" spellcheck="false" autocomplete="off"></textarea>
         <div class="toolbar" style="margin-top: 0.75rem;">
-          <button type="button" id="btn-validate-yaml">Validar</button>
-          <button type="button" class="primary" id="btn-save-yaml">Salvar</button>
-          <button type="button" id="btn-reload-yaml">Recarregar do disco</button>
+          <button type="button" class="btn-validate-yaml">Validar</button>
+          <button type="button" class="primary btn-save-yaml">Salvar</button>
+          <button type="button" class="btn-reload-yaml">Recarregar do disco</button>
         </div>
         <p class="meta">devices: entidades acionaveis · scenarios: instrucoes em prompt para o Gemini</p>
+      </div>
+    </section>
+
+    <section id="panel-yaml-cameras" class="panel">
+      <div class="editor-card" data-editor="cameras">
+        <p class="meta editor-path">Carregando arquivo…</p>
+        <p class="meta editor-stats"></p>
+        <textarea class="yaml-editor" spellcheck="false" autocomplete="off"></textarea>
+        <div class="toolbar" style="margin-top: 0.75rem;">
+          <button type="button" class="btn-validate-yaml">Validar</button>
+          <button type="button" class="primary btn-save-yaml">Salvar</button>
+          <button type="button" class="btn-reload-yaml">Recarregar do disco</button>
+        </div>
+        <p class="meta">cameras: id igual ao Frigate · name e description para o assistente</p>
+      </div>
+    </section>
+
+    <section id="panel-yaml-alerts" class="panel">
+      <div class="editor-card" data-editor="alerts">
+        <p class="meta editor-path">Carregando arquivo…</p>
+        <p class="meta editor-stats"></p>
+        <textarea class="yaml-editor" spellcheck="false" autocomplete="off"></textarea>
+        <div class="toolbar" style="margin-top: 0.75rem;">
+          <button type="button" class="btn-validate-yaml">Validar</button>
+          <button type="button" class="primary btn-save-yaml">Salvar</button>
+          <button type="button" class="btn-reload-yaml">Recarregar do disco</button>
+        </div>
+        <p class="meta">Verificacao periodica de entidades HA · aviso via WhatsApp · intervalo em 5m ou check_interval_seconds</p>
       </div>
     </section>
 
@@ -201,7 +231,33 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   </div>
   <script>
     const STATUS_LABELS = { ok: "OK", warning: "Atencao", error: "Erro", disabled: "Desativado" };
-    let yamlDirty = false;
+    const YAML_EDITORS = {
+      devices: {
+        getUrl: "api/devices-yaml",
+        validateUrl: "api/devices-yaml/validate",
+        saveUrl: "api/devices-yaml",
+        stats: function(d) {
+          return d.devices_count + " dispositivo(s) · " + d.scenarios_count + " cenario(s) · " +
+            d.actionable_count + " entidade(s) acionavel(is)";
+        }
+      },
+      cameras: {
+        getUrl: "api/cameras-yaml",
+        validateUrl: "api/cameras-yaml/validate",
+        saveUrl: "api/cameras-yaml",
+        stats: function(d) { return d.cameras_count + " camera(s) configurada(s)"; }
+      },
+      alerts: {
+        getUrl: "api/alerts-yaml",
+        validateUrl: "api/alerts-yaml/validate",
+        saveUrl: "api/alerts-yaml",
+        stats: function(d) {
+          return d.alerts_count + " alerta(s) · " + d.enabled_count + " ativo(s)";
+        }
+      }
+    };
+    const yamlDirty = { devices: false, cameras: false, alerts: false };
+    const yamlLoaded = { devices: false, cameras: false, alerts: false };
 
     function esc(s) {
       const d = document.createElement("div");
@@ -223,7 +279,9 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         document.querySelectorAll(".panel").forEach(function(p) { p.classList.remove("active"); });
         btn.classList.add("active");
         document.getElementById("panel-" + tab).classList.add("active");
-        if (tab === "yaml" && !document.getElementById("yaml-editor").value) loadYaml();
+        if (tab === "yaml-devices" && !yamlLoaded.devices) loadYamlEditor("devices");
+        if (tab === "yaml-cameras" && !yamlLoaded.cameras) loadYamlEditor("cameras");
+        if (tab === "yaml-alerts" && !yamlLoaded.alerts) loadYamlEditor("alerts");
       });
     });
 
@@ -261,18 +319,24 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       }
     }
 
-    async function loadYaml() {
+    function editorCard(kind) {
+      return document.querySelector('.editor-card[data-editor="' + kind + '"]');
+    }
+
+    async function loadYamlEditor(kind) {
+      const cfg = YAML_EDITORS[kind];
+      const card = editorCard(kind);
+      if (!cfg || !card) return;
       try {
-        const r = await fetch("api/devices-yaml");
+        const r = await fetch(cfg.getUrl);
         if (!r.ok) throw new Error("HTTP " + r.status);
         const data = await r.json();
-        document.getElementById("yaml-editor").value = data.content || "";
-        yamlDirty = false;
+        card.querySelector(".yaml-editor").value = data.content || "";
+        yamlDirty[kind] = false;
+        yamlLoaded[kind] = true;
         const exists = data.exists ? "existente" : "novo (ainda nao gravado no disco)";
-        document.getElementById("yaml-path").textContent = data.path + " · " + exists;
-        document.getElementById("yaml-stats").textContent =
-          data.devices_count + " dispositivo(s) · " + data.scenarios_count + " cenario(s) · " +
-          data.actionable_count + " entidade(s) acionavel(is)";
+        card.querySelector(".editor-path").textContent = data.path + " · " + exists;
+        card.querySelector(".editor-stats").textContent = cfg.stats(data);
       } catch (e) {
         showMsg("Erro ao carregar YAML: " + e.message, "error");
       }
@@ -287,10 +351,12 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       return JSON.stringify(d);
     }
 
-    async function validateYaml() {
-      const content = document.getElementById("yaml-editor").value;
+    async function validateYamlEditor(kind) {
+      const cfg = YAML_EDITORS[kind];
+      const card = editorCard(kind);
+      const content = card.querySelector(".yaml-editor").value;
       try {
-        const r = await fetch("api/devices-yaml/validate", {
+        const r = await fetch(cfg.validateUrl, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ content: content })
@@ -307,20 +373,20 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       }
     }
 
-    async function saveYaml() {
-      const content = document.getElementById("yaml-editor").value;
+    async function saveYamlEditor(kind) {
+      const cfg = YAML_EDITORS[kind];
+      const card = editorCard(kind);
+      const content = card.querySelector(".yaml-editor").value;
       try {
-        const r = await fetch("api/devices-yaml", {
+        const r = await fetch(cfg.saveUrl, {
           method: "PUT",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ content: content })
         });
         const data = await r.json();
         if (!r.ok) throw new Error(formatApiErrors(data));
-        yamlDirty = false;
-        document.getElementById("yaml-stats").textContent =
-          data.devices_count + " dispositivo(s) · " + data.scenarios_count + " cenario(s) · " +
-          data.actionable_count + " acionavel(is)";
+        yamlDirty[kind] = false;
+        card.querySelector(".editor-stats").textContent = cfg.stats(data);
         showMsg(data.message || "Salvo com sucesso.", "ok");
         loadStatus();
       } catch (e) {
@@ -328,15 +394,22 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       }
     }
 
-    document.getElementById("yaml-editor").addEventListener("input", function() {
-      yamlDirty = true;
-    });
-
-    document.getElementById("btn-validate-yaml").addEventListener("click", validateYaml);
-    document.getElementById("btn-save-yaml").addEventListener("click", saveYaml);
-    document.getElementById("btn-reload-yaml").addEventListener("click", function() {
-      if (yamlDirty && !confirm("Descartar alteracoes nao salvas?")) return;
-      loadYaml();
+    document.querySelectorAll(".editor-card").forEach(function(card) {
+      const kind = card.getAttribute("data-editor");
+      card.querySelector(".yaml-editor").addEventListener("input", function() {
+        yamlDirty[kind] = true;
+      });
+      card.querySelector(".btn-validate-yaml").addEventListener("click", function() {
+        validateYamlEditor(kind);
+      });
+      card.querySelector(".btn-save-yaml").addEventListener("click", function() {
+        saveYamlEditor(kind);
+      });
+      card.querySelector(".btn-reload-yaml").addEventListener("click", function() {
+        if (yamlDirty[kind] && !confirm("Descartar alteracoes nao salvas?")) return;
+        yamlLoaded[kind] = false;
+        loadYamlEditor(kind);
+      });
     });
     document.getElementById("btn-refresh").addEventListener("click", loadStatus);
 

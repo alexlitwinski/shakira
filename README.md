@@ -55,6 +55,33 @@ Ao editar o YAML, o cache Gemini é recriado na próxima mensagem.
 
 ---
 
+## Alertas periódicos (`/config/shakira_alerts.yaml`)
+
+Copie o exemplo [`shakira/shakira_alerts.example.yaml`](shakira/shakira_alerts.example.yaml) para **`/config/shakira_alerts.yaml`**.
+
+O add-on verifica cada regra no intervalo configurado. Se o estado da entidade coincidir com `when_state`, envia a mensagem via WhatsApp (Evolution API).
+
+```yaml
+alerts:
+  - id: cameras_paradas
+    enabled: true
+    check_interval: 5m          # ou check_interval_seconds: 300
+    entity_id: binary_sensor.status_cameras_paradas
+    when_state: "on"
+    message: "Atenção: existem câmeras do sistema com problema."
+    cooldown: 1h                # evita repetir o aviso enquanto continuar "on"
+    notify:
+      phones: []                # vazio = números em input_text.whatsapp_bot_permitidos
+```
+
+- **check_interval** — periodicidade da verificação (`30s`, `5m`, `1h`; mínimo 60s).
+- **cooldown** — tempo mínimo entre avisos da mesma regra enquanto a condição permanece ativa.
+- **notify.phones** — lista opcional de destinos (DDI+DDD+número, só dígitos).
+
+Também é possível editar o arquivo na aba **shakira_alerts.yaml** do painel Ingress do add-on.
+
+---
+
 ## Opções do add-on
 
 | Opção | Descrição |
@@ -64,6 +91,7 @@ Ao editar o YAML, o cache Gemini é recriado na próxima mensagem.
 | **evolution_base_url** / **evolution_api_key** / **evolution_instance** | Evolution API |
 | **gemini_api_key** | Google AI Studio |
 | **devices_config_path** | Caminho do YAML (padrão `/config/shakira_devices.yaml`) |
+| **alerts_config_path** | Caminho do YAML de alertas (padrão `/config/shakira_alerts.yaml`) |
 | **gemini_cache_ttl_hours** | TTL do cache Gemini em horas (padrão 24) |
 
 ---

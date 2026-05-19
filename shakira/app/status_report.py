@@ -12,7 +12,9 @@ from typing import Any
 import httpx
 
 from app.config import AppSettings
+from app.cameras_catalog import CamerasCatalog
 from app.devices_catalog import DevicesCatalog
+from app.frigate import FrigateClient
 from app.handlers import ENTITY_PERMITTED, fetch_permitted_phones_raw, parse_allowed_numbers
 from app.homeassistant import HomeAssistantClient
 from app.photoprism import PhotoprismClient
@@ -268,20 +270,64 @@ def _check_webhook() -> dict[str, Any]:
     }
 
 
+async def _check_frigate(
+    http: httpx.AsyncClient, settings: AppSettings, cameras: CamerasCatalog
+) -> dict[str, Any]:
+    url = settings.frigate_url.strip()
+    if not url:
+        return {
+            "id": "frigate",
+            "name": "Frigate (cameras)",
+            "status": "disabled",
+            "summary": "Nao configurado",
+            "details": {"cameras_config_path": settings.frigate_cameras_config_path},
+        }
+
+    frigate = FrigateClient(http, base_url=url)
+    probe = await frigate.probe()
+    reachable = bool(probe.get("reachable"))
+    cam_count = len(cameras.cameras)
+    if not reachable:
+        status, summary = "error", "Frigate inacessivel"
+    elif not cameras.cameras:
+        status, summary = "warning", "Conectado mas catalogo de cameras vazio"
+    else:
+        status, summary = "ok", f"Conectado, {cam_count} camera(s) no catalogo"
+
+    return {
+        "id": "frigate",
+        "name": "Frigate (cameras)",
+        "status": status if url else "disabled",
+        "summary": summary,
+        "details": {
+            "url": url,
+            "cameras_count": cam_count,
+            "cameras_config_path": settings.frigate_cameras_config_path,
+            "camera_ids": [c.id for c in cameras.cameras],
+            "probe": probe,
+        },
+    }
+
+
 async def build_status_report(
     *,
     settings: AppSettings,
     http: httpx.AsyncClient,
     ha: HomeAssistantClient,
     catalog: DevicesCatalog,
+    cameras: CamerasCatalog | None = None,
     gemini_cache_name: str | None,
     started_at: float | None = None,
 ) -> dict[str, Any]:
+    if cameras is None:
+        cameras = CamerasCatalog.load(settings.frigate_cameras_config_path)
+
     checks = await asyncio.gather(
         _check_home_assistant(ha, settings),
         _check_gemini(settings, gemini_cache_name),
         _check_evolution(http, settings),
         _check_photoprism(http, settings),
+        _check_frigate(http, settings, cameras),
         return_exceptions=True,
     )
 

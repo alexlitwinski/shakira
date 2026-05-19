@@ -12,9 +12,11 @@ from typing import Any
 
 import httpx
 
+from app.cameras_catalog import CamerasCatalog
 from app.config import AppSettings
 from app.conversation_history import format_for_prompt, get_recent, record_exchange
 from app.devices_catalog import DevicesCatalog
+from app.frigate import FrigateClient, FrigateError
 from app.evolution import EvolutionClient
 from app.gemini import GeminiAssistant
 from app.gemini_cache import ensure_catalog_cache
@@ -25,13 +27,22 @@ from app.photoprism import (
     PhotoprismError,
     PhotoResult,
 )
+from app.scenario_fallback import try_scenario_fallback_reply
+from app.whatsapp_steps import StepMessenger, truncate_whatsapp
 
 log = logging.getLogger(__name__)
 
 ENTITY_PERMITTED = "input_text.whatsapp_bot_permitidos"
 
 VALID_GEMINI_ACTIONS = frozenset(
-    {"reply", "call_service", "get_state", "list_entities", "search_photos"}
+    {
+        "reply",
+        "call_service",
+        "get_state",
+        "list_entities",
+        "search_photos",
+        "get_camera_snapshot",
+    }
 )
 
 _PLACEHOLDER_RESPONSE_MARKERS = (
@@ -161,9 +172,38 @@ async def fetch_permitted_phones_raw(ha: HomeAssistantClient) -> str:
 
 
 def _truncate_whatsapp(text: str, limit: int = 3800) -> str:
-    if len(text) <= limit:
-        return text
-    return text[: limit - 3] + "..."
+    return truncate_whatsapp(text, limit)
+
+
+async def _finish_whatsapp_exchange(
+    *,
+    phone: str,
+    user_text: str,
+    messenger: StepMessenger | None,
+    reply_text: str,
+    evo: EvolutionClient,
+    evo_base: str,
+    evo_key: str,
+    instance: str,
+) -> None:
+    """Grava historico e envia resposta final se os passos ainda nao foram enviados."""
+    if messenger and messenger.sent_any:
+        record_exchange(phone, user_text, messenger.combined())
+        return
+    text = _truncate_whatsapp(reply_text.strip())
+    if not text:
+        return
+    if not evo_base or not evo_key or not instance:
+        log.error("Envio Evolution bloqueado no fechamento da conversa")
+        return
+    await evo.send_text(
+        base_url=evo_base,
+        api_key=evo_key,
+        instance=instance,
+        number=phone,
+        text=text,
+    )
+    record_exchange(phone, user_text, text)
 
 
 def _resolve_evolution_instance(
@@ -393,21 +433,26 @@ async def try_handle_pending_password(
 def build_gemini_assistant(
     settings: AppSettings,
     catalog: DevicesCatalog,
+    cameras: CamerasCatalog,
     cache_name: str | None = None,
 ) -> GeminiAssistant:
     model_name = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
-    if cache_name is None and settings.gemini_api_key and catalog.devices:
+    if cache_name is None and settings.gemini_api_key and (catalog.devices or cameras.cameras):
         cache_name = ensure_catalog_cache(
             api_key=settings.gemini_api_key,
             model=model_name,
             catalog=catalog,
+            cameras=cameras,
             ttl_hours=settings.gemini_cache_ttl_hours,
         )
+    fallback = catalog.build_catalog_context()
+    if cameras.cameras:
+        fallback = f"{fallback}\n\n{cameras.build_catalog_context()}"
     return GeminiAssistant(
         settings.gemini_api_key,
         model=model_name,
         cache_name=cache_name,
-        catalog_fallback=catalog.build_catalog_context(),
+        catalog_fallback=fallback,
     )
 
 
@@ -419,37 +464,59 @@ async def execute_decision(
     phone: str,
     user_text: str,
     entities_context_used: bool,
+    messenger: StepMessenger | None = None,
 ) -> str:
     action = str(decision.get("action") or "reply").lower()
     if action not in VALID_GEMINI_ACTIONS:
         log.warning("execute_decision: acao '%s' invalida; tratando como reply", action)
         action = "reply"
     reply = str(decision.get("response") or "").strip()
-    log.info("execute_decision phone=%s action=%s", phone, action)
+    log.info("execute_decision phone=%s action=%s steps=%s", phone, action, bool(messenger))
+
+    async def deliver(text: str) -> None:
+        t = (text or "").strip()
+        if t and messenger:
+            await messenger.step(t)
 
     async def finalize(extra: str) -> str:
         base = reply or ""
         msg = (base + ("\n\n" + extra if extra else "")).strip()
-        return msg or extra or "Feito."
+        out = msg or extra or "Feito."
+        if messenger:
+            if out:
+                await messenger.step(out)
+            return ""
+        return out
+
+    if messenger and reply and not _is_placeholder_scenario_response(reply):
+        await deliver(reply)
 
     if action in ("reply", "list_entities"):
         if not reply and entities_context_used:
-            return "Ok."
+            return await finalize("Ok.")
+        if not reply and messenger:
+            return ""
         return await finalize("")
 
     if action == "get_state":
         eid = decision.get("entity_id")
         if not isinstance(eid, str) or not eid.strip():
             return await finalize("Informe uma entidade valida.")
-        st = await ha.get_state(eid.strip())
+        eid = eid.strip()
+        await deliver(f"Consultando `{eid}` no Home Assistant...")
+        st = await ha.get_state(eid)
         if not st:
             return await finalize(f"Entidade nao encontrada: {eid}")
         fname = ""
         attrs = st.get("attributes") or {}
         if isinstance(attrs, dict):
             fname = str(attrs.get("friendly_name") or "")
-        extra = f"{eid} -> {st.get('state')} ({fname})".strip()
-        return await finalize(extra)
+        label = f" ({fname})" if fname else ""
+        result = f"Estado de `{eid}`: {st.get('state')}{label}."
+        if messenger:
+            await deliver(result)
+            return ""
+        return await finalize(result)
 
     if action == "call_service":
         domain = decision.get("domain")
@@ -479,9 +546,11 @@ async def execute_decision(
 
         allowed = catalog.actionable_entity_ids()
         if not allowed:
-            return "Nenhum dispositivo configurado para acoes. Edite /config/shakira_devices.yaml."
+            return await finalize(
+                "Nenhum dispositivo configurado para acoes. Edite /config/shakira_devices.yaml."
+            )
         if target not in allowed:
-            return (
+            return await finalize(
                 f"Nao posso alterar `{target}`. "
                 "So posso agir nas entidades marcadas como acionaveis no catalogo."
             )
@@ -507,8 +576,13 @@ async def execute_decision(
                 )
                 log.info("Unlock pendente registrado phone=%s entity=%s", phone, target)
                 prompt = catalog.password_prompt_for(target)
-                return _password_prompt_message(reply, prompt)
+                msg = _password_prompt_message(reply, prompt)
+                if messenger:
+                    await messenger.step(msg)
+                    return ""
+                return msg
 
+        await deliver(f"Executando `{domain}.{service}` em `{target}`...")
         log.info("Chamando HA phone=%s %s/%s entity=%s", phone, domain, service, target)
         _log_service_payload("call_service", svc_data)
         try:
@@ -520,7 +594,13 @@ async def execute_decision(
                 extra = str(result["service_response"])[:1500]
             elif result not in (None, "", []):
                 extra = str(result)[:1500]
-            return await finalize(extra if extra else "")
+            done = f"Pronto: `{domain}.{service}` executado em `{target}`."
+            if extra:
+                done = f"{done}\n{extra}"
+            if messenger:
+                await deliver(done)
+                return ""
+            return await finalize(done)
         except httpx.HTTPStatusError as e:
             log.warning(
                 "HA call_service falhou phone=%s %s/%s entity=%s status=%s body=%s payload=%s",
@@ -539,7 +619,16 @@ async def execute_decision(
             "Pedido de fotos recebido. Se nada chegar, verifique PhotoPrism nas opcoes do add-on."
         )
 
-    return reply or "Nao entendi o proximo passo."
+    if action == "get_camera_snapshot":
+        return await finalize(
+            "Pedido de camera recebido. Se nada chegar, verifique Frigate nas opcoes do add-on."
+        )
+
+    fallback = reply or "Nao entendi o proximo passo."
+    if messenger:
+        await deliver(fallback)
+        return ""
+    return fallback
 
 
 def _parse_photo_filters(decision: dict[str, Any]) -> dict[str, Any]:
@@ -595,6 +684,100 @@ def _photo_caption(photo: PhotoResult, index: int, total: int) -> str:
     return f"{index}/{total}: {base}"[:1024]
 
 
+async def handle_get_camera_snapshot(
+    decision: dict[str, Any],
+    *,
+    settings: AppSettings,
+    cameras: CamerasCatalog,
+    evo: EvolutionClient,
+    http: httpx.AsyncClient,
+    phone: str,
+    instance: str,
+    messenger: StepMessenger | None = None,
+) -> None:
+    """Obtem snapshot do Frigate e envia pelo WhatsApp."""
+    evo_base = settings.evolution_base_url.strip()
+    evo_key = settings.evolution_api_key.strip()
+    if not evo_base or not evo_key or not instance:
+        log.error("Envio de camera bloqueado: Evolution nao configurado")
+        return
+
+    intro = str(decision.get("response") or "").strip()
+    raw_id = decision.get("camera_id")
+    camera_id = cameras.resolve_camera_id(str(raw_id) if raw_id is not None else None)
+
+    async def say(text: str) -> None:
+        if messenger:
+            await messenger.step(text)
+        else:
+            await evo.send_text(
+                base_url=evo_base,
+                api_key=evo_key,
+                instance=instance,
+                number=phone,
+                text=_truncate_whatsapp(text),
+            )
+
+    if not settings.frigate_url:
+        msg = (
+            intro + "\n\nFrigate nao configurado. Defina frigate_url nas opcoes do add-on."
+        ).strip()
+        await say(msg)
+        return
+
+    if not cameras.cameras:
+        msg = (
+            intro
+            + "\n\nNenhuma camera configurada. Crie /config/shakira_cameras.yaml."
+        ).strip()
+        await say(msg)
+        return
+
+    if not camera_id:
+        known = ", ".join(f"{c.id} ({c.name})" for c in cameras.cameras[:8])
+        msg = (
+            intro + f"\n\nNao identifiquei a camera. Cameras disponiveis: {known}."
+        ).strip()
+        await say(msg)
+        return
+
+    cam = cameras.camera_map().get(camera_id)
+    frigate = FrigateClient(http, base_url=settings.frigate_url)
+    log.info("Frigate snapshot camera=%s url=%s", camera_id, settings.frigate_url)
+
+    label = cam.name if cam else camera_id
+    if intro:
+        await say(intro)
+    await say(f"A obter imagem da camera `{label}`...")
+
+    try:
+        image_bytes = await frigate.get_latest_snapshot(camera_id)
+    except FrigateError as e:
+        log.error("Frigate falhou: %s", e, exc_info=True)
+        await say(f"Nao consegui obter a imagem: {e}")
+        return
+
+    caption = f"Camera: {label}"[:1024]
+    fname = f"shakira_{camera_id}.jpg"
+    ok = await evo.send_image_bytes(
+        base_url=evo_base,
+        api_key=evo_key,
+        instance=instance,
+        number=phone,
+        image_bytes=image_bytes,
+        filename=fname,
+        caption=caption,
+    )
+    if ok is None:
+        await evo.send_text(
+            base_url=evo_base,
+            api_key=evo_key,
+            instance=instance,
+            number=phone,
+            text="Capturei a imagem mas nao consegui enviar pelo WhatsApp.",
+        )
+
+
 async def handle_search_photos(
     decision: dict[str, Any],
     *,
@@ -603,6 +786,7 @@ async def handle_search_photos(
     http: httpx.AsyncClient,
     phone: str,
     instance: str,
+    messenger: StepMessenger | None = None,
 ) -> None:
     """Busca fotos no PhotoPrism e envia pelo WhatsApp."""
     evo_base = settings.evolution_base_url.strip()
@@ -612,19 +796,29 @@ async def handle_search_photos(
         return
 
     intro = str(decision.get("response") or "").strip()
+
+    async def say(text: str) -> None:
+        if messenger:
+            await messenger.step(text)
+        else:
+            await evo.send_text(
+                base_url=evo_base,
+                api_key=evo_key,
+                instance=instance,
+                number=phone,
+                text=_truncate_whatsapp(text),
+            )
+
     if not settings.photoprism_url or not settings.photoprism_token:
         msg = (
             intro + "\n\nPhotoPrism nao configurado. "
             "Defina photoprism_url e photoprism_token nas opcoes do add-on."
         ).strip()
-        await evo.send_text(
-            base_url=evo_base,
-            api_key=evo_key,
-            instance=instance,
-            number=phone,
-            text=_truncate_whatsapp(msg),
-        )
+        await say(msg)
         return
+
+    if intro:
+        await say(intro)
 
     filters = _parse_photo_filters(decision)
     count = _parse_photo_count(
@@ -646,6 +840,8 @@ async def handle_search_photos(
         filters,
     )
 
+    await say("A procurar fotos no acervo PhotoPrism...")
+
     try:
         photos, preview_token = await pp.search_photos(
             filters=filters,
@@ -653,40 +849,22 @@ async def handle_search_photos(
             supervisor_token=settings.supervisor_token,
         )
     except PhotoprismAuthError:
-        msg = (intro + "\n\nErro de autenticacao no PhotoPrism. Verifique o token.").strip()
-        await evo.send_text(
-            base_url=evo_base, api_key=evo_key, instance=instance, number=phone, text=msg
-        )
+        await say("Erro de autenticacao no PhotoPrism. Verifique o token.")
         return
     except PhotoprismError as e:
         log.error("PhotoPrism falhou: %s", e, exc_info=True)
         extra = ""
         diag = getattr(e, "diagnostic", None) or {}
         if isinstance(diag, dict) and diag.get("hints"):
-            extra = f"\n\n{diag['hints'][0]}"
-        msg = (intro + f"\n\nNao consegui buscar fotos: {e}{extra}").strip()
-        await evo.send_text(
-            base_url=evo_base, api_key=evo_key, instance=instance, number=phone, text=_truncate_whatsapp(msg)
-        )
+            extra = f" {diag['hints'][0]}"
+        await say(f"Nao consegui buscar fotos: {e}{extra}")
         return
 
     if not photos:
-        msg = (intro + "\n\nNao encontrei fotos com esses criterios.").strip() or (
-            "Nao encontrei fotos com esses criterios."
-        )
-        await evo.send_text(
-            base_url=evo_base, api_key=evo_key, instance=instance, number=phone, text=msg
-        )
+        await say("Nao encontrei fotos com esses criterios.")
         return
 
-    if intro:
-        await evo.send_text(
-            base_url=evo_base,
-            api_key=evo_key,
-            instance=instance,
-            number=phone,
-            text=_truncate_whatsapp(intro),
-        )
+    await say(f"Encontrei {len(photos)} foto(s). A enviar...")
 
     token = preview_token or "public"
     sent = 0
@@ -750,6 +928,7 @@ async def handle_evolution_payload(
         return
 
     catalog = DevicesCatalog.load(settings.devices_config_path)
+    cameras = CamerasCatalog.load(settings.frigate_cameras_config_path)
     permitted_raw = await fetch_permitted_phones_raw(ha)
     permitted = parse_allowed_numbers(permitted_raw)
     evo_base = settings.evolution_base_url.strip()
@@ -761,7 +940,9 @@ async def handle_evolution_payload(
     if not evo_base or not evo_key:
         log.warning("Evolution URL ou api key ausentes nas opcoes do add-on")
 
-    assistant = build_gemini_assistant(settings, catalog, cache_name=gemini_cache_name)
+    assistant = build_gemini_assistant(
+        settings, catalog, cameras, cache_name=gemini_cache_name
+    )
 
     normalized = normalize_evolution_payload(payload)
     webhook_instance = payload.get("instance") or payload.get("instanceName") or ""
@@ -830,6 +1011,20 @@ async def handle_evolution_payload(
             len(history_text),
         )
 
+        hint = _inst_hint if isinstance(_inst_hint, str) and _inst_hint.strip() else ""
+        send_instance = (
+            hint or str(webhook_instance) or default_inst or settings.evolution_instance
+        ).strip()
+        messenger: StepMessenger | None = None
+        if evo_base and evo_key and send_instance:
+            messenger = StepMessenger(
+                evo=evo,
+                evo_base=evo_base,
+                evo_key=evo_key,
+                instance=send_instance,
+                phone=phone_norm,
+            )
+
         decision = await asyncio.to_thread(
             assistant.decide,
             user_message=user_text or "",
@@ -845,41 +1040,100 @@ async def handle_evolution_payload(
                 conversation_history=history_text,
             )
             decision, _ = normalize_gemini_action(decision, catalog)
+
+        reply_preview = str(decision.get("response") or "").strip()
+        needs_fallback = (
+            _is_placeholder_scenario_response(reply_preview)
+            or (str(decision.get("action") or "reply").lower() not in VALID_GEMINI_ACTIONS)
+            or (str(decision.get("action") or "reply").lower() == "reply" and not reply_preview)
+        )
+        skip_execute = False
+        if needs_fallback:
+            fb = await try_scenario_fallback_reply(
+                ha=ha,
+                catalog=catalog,
+                user_text=user_text or "",
+                history_text=history_text,
+                scenario_id=retry_scenario_id,
+                on_step=messenger.step if messenger else None,
+            )
+            if fb is not None:
+                log.info(
+                    "Fallback de cenario phone=%s scenario=%s",
+                    phone_norm,
+                    retry_scenario_id or "auto",
+                )
+                decision = {"action": "reply", "response": fb}
+            elif messenger and messenger.sent_any:
+                skip_execute = True
+
         _log_gemini_decision(phone_norm, decision)
 
-        hint = _inst_hint if isinstance(_inst_hint, str) and _inst_hint.strip() else ""
         action = str(decision.get("action") or "reply").lower()
-        if action == "search_photos" and http is not None:
-            send_instance = (
-                hint or str(webhook_instance) or default_inst or settings.evolution_instance
-            ).strip()
-            if send_instance:
-                await handle_search_photos(
-                    decision,
-                    settings=settings,
-                    evo=evo,
-                    http=http,
-                    phone=phone_norm,
-                    instance=send_instance,
-                )
-                photo_reply = str(decision.get("response") or "").strip() or "Fotos enviadas."
-                record_exchange(phone_norm, user_text or "", photo_reply)
+        if action == "search_photos" and http is not None and send_instance:
+            await handle_search_photos(
+                decision,
+                settings=settings,
+                evo=evo,
+                http=http,
+                phone=phone_norm,
+                instance=send_instance,
+                messenger=messenger,
+            )
+            await _finish_whatsapp_exchange(
+                phone=phone_norm,
+                user_text=user_text or "",
+                messenger=messenger,
+                reply_text=str(decision.get("response") or "").strip() or "Fotos enviadas.",
+                evo=evo,
+                evo_base=evo_base,
+                evo_key=evo_key,
+                instance=send_instance,
+            )
             continue
 
-        reply_text = await execute_decision(
-            decision,
-            ha=ha,
-            catalog=catalog,
-            phone=phone_norm,
-            user_text=user_text or "",
-            entities_context_used=True,
-        )
+        if action == "get_camera_snapshot" and http is not None and send_instance:
+            await handle_get_camera_snapshot(
+                decision,
+                settings=settings,
+                cameras=cameras,
+                evo=evo,
+                http=http,
+                phone=phone_norm,
+                instance=send_instance,
+                messenger=messenger,
+            )
+            await _finish_whatsapp_exchange(
+                phone=phone_norm,
+                user_text=user_text or "",
+                messenger=messenger,
+                reply_text=str(decision.get("response") or "").strip() or "Imagem da camera enviada.",
+                evo=evo,
+                evo_base=evo_base,
+                evo_key=evo_key,
+                instance=send_instance,
+            )
+            continue
 
-        reply_text = _truncate_whatsapp(reply_text)
+        reply_text = ""
+        if not skip_execute:
+            reply_text = await execute_decision(
+                decision,
+                ha=ha,
+                catalog=catalog,
+                phone=phone_norm,
+                user_text=user_text or "",
+                entities_context_used=True,
+                messenger=messenger,
+            )
 
-        send_instance = (hint or str(webhook_instance) or default_inst or settings.evolution_instance).strip()
-
-        if not phone_norm or not reply_text.strip():
+        if not phone_norm:
+            continue
+        if (
+            not skip_execute
+            and not reply_text.strip()
+            and not (messenger and messenger.sent_any)
+        ):
             continue
         if not evo_base or not evo_key or not send_instance:
             log.error(
@@ -890,11 +1144,13 @@ async def handle_evolution_payload(
             )
             continue
 
-        await evo.send_text(
-            base_url=evo_base,
-            api_key=evo_key,
+        await _finish_whatsapp_exchange(
+            phone=phone_norm,
+            user_text=user_text or "",
+            messenger=messenger,
+            reply_text=reply_text,
+            evo=evo,
+            evo_base=evo_base,
+            evo_key=evo_key,
             instance=send_instance,
-            number=phone_norm,
-            text=reply_text,
         )
-        record_exchange(phone_norm, user_text or "", reply_text)

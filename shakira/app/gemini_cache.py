@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime
+import hashlib
 import json
 import logging
 import os
@@ -12,6 +13,7 @@ from typing import Any
 import google.generativeai as genai
 from google.api_core import exceptions as google_exceptions
 
+from app.cameras_catalog import CamerasCatalog
 from app.devices_catalog import DevicesCatalog
 from app.prompts import SYSTEM_INSTRUCTION
 
@@ -83,11 +85,17 @@ def _cache_exists(name: str) -> bool:
         return False
 
 
+def _combined_content_hash(devices_hash: str, cameras_hash: str) -> str:
+    payload = f"{devices_hash}:{cameras_hash}".encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
 def ensure_catalog_cache(
     *,
     api_key: str,
     model: str,
     catalog: DevicesCatalog,
+    cameras: CamerasCatalog | None = None,
     ttl_hours: int = 24,
 ) -> str | None:
     """Cria ou reutiliza cache Gemini. Retorna cache name ou None (fallback inline)."""
@@ -99,8 +107,14 @@ def ensure_catalog_cache(
 
     genai.configure(api_key=api_key)
     catalog_text = catalog.build_catalog_context()
-    full_system = f"{SYSTEM_INSTRUCTION}\n\n{catalog_text}"
-    content_hash = catalog.content_hash or hash(catalog_text)
+    cameras_text = ""
+    if cameras and cameras.cameras:
+        cameras_text = "\n\n" + cameras.build_catalog_context()
+    full_system = f"{SYSTEM_INSTRUCTION}\n\n{catalog_text}{cameras_text}"
+    content_hash = _combined_content_hash(
+        catalog.content_hash or "",
+        (cameras.content_hash if cameras else "") or "",
+    )
 
     meta = _load_meta()
     existing_name = meta.get("cache_name")
