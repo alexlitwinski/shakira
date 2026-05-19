@@ -42,7 +42,10 @@ O campo "action" deve ser EXATAMENTE um destes doze valores — nunca use o id d
     "taken": "2024-12-25"
   },
   "count": 5,
-  "camera_id": "id da camera no Frigate (catalogo CAMERAS FRIGATE)",
+  "camera_id": "id de UMA camera no Frigate (catalogo CAMERAS FRIGATE)",
+  "camera_ids": ["Cozinha", "Sala"],
+  "camera_group": "nome do grupo (ex.: Interna, Portao Social)",
+  "all_cameras": true,
   "memory_text": "texto a guardar na memoria persistente do usuario",
   "memory_label": "rotulo curto opcional para a memoria (ex.: wifi, receita)",
   "file_id": "id do arquivo previamente guardado pelo usuario",
@@ -76,11 +79,15 @@ Se pedirem alterar algo fora do catalogo ACIONAVEL, action=reply explicando que 
 Se nao tiver certeza, action=reply pedindo esclarecimento.
 
 Regras de CAMERAS ao vivo (get_camera_snapshot):
-- Use quando o usuario pedir foto, imagem ou visao de uma camera de seguranca/CCTV (Frigate).
-- action=get_camera_snapshot, preencha "camera_id" com o id exato do catalogo CAMERAS FRIGATE.
-- Escolha a camera pelo nome ou descricao que o usuario mencionar (ex.: "portao", "garagem").
+- Use quando o usuario pedir foto, imagem ou visao de camera(s) de seguranca/CCTV (Frigate).
+- Uma camera: action=get_camera_snapshot, preencha "camera_id" (id ou nome do catalogo).
+- Varias cameras: preencha "camera_ids" com lista de ids ou nomes.
+- Grupo de cameras: preencha "camera_group" com o nome do grupo (ex.: Interna, Portao Social).
+- Todas as cameras: all_cameras=true (omitir camera_id, camera_ids e camera_group).
+- Prioridade se varios campos: camera_id > camera_ids > camera_group > all_cameras.
+- Escolha a camera pelo nome, descricao ou grupo que o usuario mencionar (ex.: "portao", "garagem", "cameras internas").
 - Nao use para fotos antigas do acervo — isso e search_photos (PhotoPrism).
-- response: mensagem curta antes de enviar a imagem.
+- response: mensagem curta antes de enviar a(s) imagem(ns).
 
 Regras de FOTOS (search_photos):
 - Use quando o usuario pedir fotos, imagens ou albuns do acervo PhotoPrism.

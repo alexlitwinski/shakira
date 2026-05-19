@@ -1,3 +1,5 @@
 # Configuracao local (copiar dos *.example.yaml para o Home Assistant)
 shakira/shakira_devices.yaml
 shakira/shakira_alerts.yaml
+shakira/shakira_devices.example.yaml
+shakira/shakira_alerts.example.yaml

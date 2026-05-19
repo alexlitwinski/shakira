@@ -29,6 +29,22 @@ MIN_CHECK_INTERVAL_SECONDS = 60
 MAX_CHECK_INTERVAL_SECONDS = 86_400
 DEFAULT_CHECK_INTERVAL_SECONDS = 300
 DEFAULT_COOLDOWN_SECONDS = 3600
+LIVE_INTERVAL_TOKEN = "live"
+
+
+def is_live_interval(value: Any) -> bool:
+    """True se check_interval for o modo live (WebSocket HA)."""
+    if isinstance(value, str) and value.strip().lower() == LIVE_INTERVAL_TOKEN:
+        return True
+    return False
+
+
+def live_alerts(catalog: AlertsCatalog) -> list[AlertConfig]:
+    return [a for a in catalog.alerts if a.enabled and a.live]
+
+
+def polling_alerts(catalog: AlertsCatalog) -> list[AlertConfig]:
+    return [a for a in catalog.alerts if a.enabled and not a.live]
 
 
 class AlertsCatalogValidationError(ValueError):
@@ -110,12 +126,14 @@ class AlertConfig:
     when_state: str
     message: str
     enabled: bool = True
+    live: bool = False
     check_interval_seconds: int = DEFAULT_CHECK_INTERVAL_SECONDS
     cooldown_seconds: int = DEFAULT_COOLDOWN_SECONDS
     notify: AlertNotifyConfig = field(default_factory=AlertNotifyConfig)
     recovery_when_state: str = ""
     recovery_context: str = ""
     recovery_label: str = ""
+    camera_group: str = ""
 
 
 @dataclass
@@ -181,10 +199,15 @@ class AlertsCatalog:
         interval_raw = row.get("check_interval_seconds")
         if interval_raw is None:
             interval_raw = row.get("check_interval")
-        interval = parse_interval_seconds(interval_raw)
-        if interval is None:
+
+        live = is_live_interval(interval_raw)
+        if live:
             interval = DEFAULT_CHECK_INTERVAL_SECONDS
-        interval = clamp_interval(interval)
+        else:
+            interval = parse_interval_seconds(interval_raw)
+            if interval is None:
+                interval = DEFAULT_CHECK_INTERVAL_SECONDS
+            interval = clamp_interval(interval)
 
         cooldown_raw = row.get("cooldown_seconds")
         if cooldown_raw is None:
@@ -211,12 +234,14 @@ class AlertsCatalog:
             when_state=when_state,
             message=message,
             enabled=bool(row.get("enabled", True)),
+            live=live,
             check_interval_seconds=interval,
             cooldown_seconds=cooldown,
             notify=AlertNotifyConfig(phones=phones),
             recovery_when_state=str(row.get("recovery_when_state") or "").strip(),
             recovery_context=str(row.get("recovery_context") or "").strip(),
             recovery_label=str(row.get("recovery_label") or "").strip(),
+            camera_group=str(row.get("camera_group") or "").strip(),
         )
 
     @classmethod
@@ -270,6 +295,7 @@ class AlertsCatalog:
             "recovery_when_state",
             "recovery_context",
             "recovery_label",
+            "camera_group",
         }
 
         for i, row in enumerate(data["alerts"]):
@@ -326,16 +352,27 @@ class AlertsCatalog:
             if recovery_label is not None and not isinstance(recovery_label, str):
                 errors.append(f"{path}: 'recovery_label' deve ser texto.")
 
+            camera_group = row.get("camera_group")
+            if camera_group is not None and not isinstance(camera_group, str):
+                errors.append(f"{path}: 'camera_group' deve ser texto.")
+
             if "enabled" in row and not isinstance(row["enabled"], bool):
                 errors.append(f"{path}: 'enabled' deve ser true ou false.")
 
             for interval_key in ("check_interval", "check_interval_seconds"):
                 if interval_key not in row:
                     continue
-                parsed = parse_interval_seconds(row[interval_key])
+                raw_val = row[interval_key]
+                if is_live_interval(raw_val):
+                    if interval_key == "check_interval_seconds":
+                        errors.append(
+                            f"{path}: use check_interval: live (nao check_interval_seconds)."
+                        )
+                    continue
+                parsed = parse_interval_seconds(raw_val)
                 if parsed is None:
                     errors.append(
-                        f"{path}: '{interval_key}' invalido (use segundos ou ex.: 5m, 1h)."
+                        f"{path}: '{interval_key}' invalido (use live, segundos ou ex.: 5m, 1h)."
                     )
                 elif parsed < MIN_CHECK_INTERVAL_SECONDS:
                     errors.append(
@@ -362,3 +399,9 @@ class AlertsCatalog:
 
     def enabled_alerts(self) -> list[AlertConfig]:
         return [a for a in self.alerts if a.enabled]
+
+    def enabled_live_alerts(self) -> list[AlertConfig]:
+        return live_alerts(self)
+
+    def enabled_polling_alerts(self) -> list[AlertConfig]:
+        return polling_alerts(self)

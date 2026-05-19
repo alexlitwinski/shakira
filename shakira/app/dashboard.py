@@ -270,7 +270,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
           <button type="button" class="primary btn-save-yaml">Salvar</button>
           <button type="button" class="btn-reload-yaml">Recarregar do disco</button>
         </div>
-        <p class="meta">cameras: id igual ao Frigate · name e description para o assistente</p>
+        <p class="meta">cameras: id igual ao Frigate · name, description e group para o assistente</p>
       </div>
     </section>
 

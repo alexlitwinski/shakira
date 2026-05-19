@@ -93,7 +93,14 @@ async def lifespan(app: FastAPI):
 
     alerts = AlertsCatalog.load(settings.alerts_config_path)
     app.state.alerts = alerts
-    alerts_runner = AlertsRunner(settings=settings, ha=app.state.ha, evo=app.state.evo, catalog=alerts)
+    alerts_runner = AlertsRunner(
+        settings=settings,
+        ha=app.state.ha,
+        evo=app.state.evo,
+        catalog=alerts,
+        cameras=cameras,
+        http=client,
+    )
     if alerts.enabled_alerts():
         alerts_runner.start()
     else:
@@ -289,6 +296,9 @@ async def put_cameras_yaml(request: Request, body: CamerasYamlBody) -> dict[str,
         raise HTTPException(status_code=400, detail={"errors": [str(e)]}) from e
 
     _refresh_gemini_cache(request)
+    runner: AlertsRunner | None = getattr(request.app.state, "alerts_runner", None)
+    if runner is not None:
+        runner.cameras = request.app.state.cameras
     result["message"] = (
         "Arquivo salvo. Catalogo de cameras recarregado; cache Gemini atualizado."
     )
@@ -327,9 +337,9 @@ async def put_alerts_yaml(request: Request, body: AlertsYamlBody) -> dict[str, A
     request.app.state.alerts = catalog
     runner: AlertsRunner = request.app.state.alerts_runner
     runner.reload(catalog)
-    runner.ensure_running()
+    await runner.ensure_running()
     result["message"] = (
-        "Arquivo salvo. Regras de alerta recarregadas; verificacoes periodicas atualizadas."
+        "Arquivo salvo. Alertas periodicos e live recarregados."
     )
     return result
 

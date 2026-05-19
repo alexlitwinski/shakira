@@ -37,6 +37,17 @@ class CameraConfig:
     id: str
     name: str = ""
     description: str = ""
+    groups: list[str] = field(default_factory=list)
+
+
+def _parse_groups(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return [str(g).strip() for g in value if str(g).strip()]
+    if isinstance(value, str):
+        return [g.strip() for g in value.split(",") if g.strip()]
+    return []
 
 
 @dataclass
@@ -101,6 +112,7 @@ class CamerasCatalog:
                     id=cid,
                     name=str(row.get("name") or cid).strip(),
                     description=str(row.get("description") or "").strip(),
+                    groups=_parse_groups(row.get("group")),
                 )
             )
         return cameras
@@ -149,9 +161,12 @@ class CamerasCatalog:
                 desc = row.get("description")
                 if desc is not None and not isinstance(desc, str):
                     errors.append(f"{path}: 'description' deve ser texto.")
-                extra = set(row.keys()) - {"id", "name", "description"}
+                group = row.get("group")
+                if group is not None and not isinstance(group, (str, list)):
+                    errors.append(f"{path}: 'group' deve ser texto ou lista.")
+                extra = set(row.keys()) - {"id", "name", "description", "group"}
                 for k in sorted(extra):
-                    errors.append(f"{path}: chave desconhecida '{k}' (use id, name, description).")
+                    errors.append(f"{path}: chave desconhecida '{k}' (use id, name, description, group).")
 
         return errors
 
@@ -171,15 +186,98 @@ class CamerasCatalog:
                 return cam.id
         return None
 
+    def list_groups(self) -> list[str]:
+        seen: set[str] = set()
+        out: list[str] = []
+        for cam in self.cameras:
+            for group in cam.groups:
+                key = group.lower()
+                if key not in seen:
+                    seen.add(key)
+                    out.append(group)
+        return sorted(out, key=str.lower)
+
+    def cameras_for_group(self, group_name: str) -> list[CameraConfig]:
+        needle = group_name.strip().lower()
+        if not needle:
+            return []
+        return [
+            cam
+            for cam in self.cameras
+            if any(g.lower() == needle for g in cam.groups)
+        ]
+
+    def resolve_group_name(self, group_name: str | None) -> str | None:
+        """Resolve nome de grupo ignorando maiusculas/acentos parciais."""
+        if not group_name or not str(group_name).strip():
+            return None
+        needle = str(group_name).strip().lower()
+        for group in self.list_groups():
+            if group.lower() == needle:
+                return group
+        return None
+
+    def resolve_camera_targets(
+        self,
+        *,
+        camera_id: str | None = None,
+        camera_ids: list[str] | None = None,
+        camera_group: str | None = None,
+        all_cameras: bool = False,
+    ) -> tuple[list[str], str | None]:
+        """
+        Resolve lista de ids Frigate a partir dos filtros.
+        Prioridade: camera_id > camera_ids > camera_group > all_cameras.
+        Retorna (ids, mensagem_erro).
+        """
+        if camera_id and str(camera_id).strip():
+            resolved = self.resolve_camera_id(str(camera_id))
+            if resolved:
+                return [resolved], None
+            return [], f"Camera '{camera_id}' nao encontrada no catalogo."
+
+        if camera_ids:
+            resolved: list[str] = []
+            for raw in camera_ids:
+                cid = self.resolve_camera_id(str(raw))
+                if cid and cid not in resolved:
+                    resolved.append(cid)
+            if resolved:
+                return resolved, None
+            return [], "Nenhuma camera da lista foi reconhecida."
+
+        if camera_group and str(camera_group).strip():
+            group = self.resolve_group_name(str(camera_group))
+            if not group:
+                known = ", ".join(self.list_groups()) or "(nenhum)"
+                return [], f"Grupo '{camera_group}' nao encontrado. Grupos disponiveis: {known}."
+            ids = [c.id for c in self.cameras_for_group(group)]
+            if ids:
+                return ids, None
+            return [], f"Nenhuma camera no grupo '{group}'."
+
+        if all_cameras:
+            if not self.cameras:
+                return [], "Nenhuma camera configurada."
+            return [c.id for c in self.cameras], None
+
+        return [], None
+
     def build_catalog_context(self) -> str:
         lines: list[str] = [
             "CAMERAS FRIGATE (use get_camera_snapshot para enviar foto ao usuario):",
             "",
         ]
+        groups = self.list_groups()
+        if groups:
+            lines.append("Grupos disponiveis: " + ", ".join(groups))
+            lines.append("")
         for cam in self.cameras:
             lines.append(f"  - id: {cam.id}")
             if cam.name:
                 lines.append(f"    nome: {cam.name}")
+            if cam.groups:
+                lines.append(f"    grupo(s): {', '.join(cam.groups)}")
             if cam.description:
                 lines.append(f"    descricao: {cam.description}")
         if not self.cameras:

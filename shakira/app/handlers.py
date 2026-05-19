@@ -15,6 +15,7 @@ from typing import Any
 
 import httpx
 
+from app.camera_snapshots import handle_camera_snapshot_decision
 from app.cameras_catalog import CamerasCatalog
 from app.config import AppSettings
 from app.confirmation_context import (
@@ -23,7 +24,6 @@ from app.confirmation_context import (
 )
 from app.conversation_history import format_for_prompt, get_recent, record_exchange
 from app.devices_catalog import DevicesCatalog
-from app.frigate import FrigateClient, FrigateError
 from app.evolution import EvolutionClient
 from app.gemini import GeminiAssistant
 from app.gemini_cache import ensure_catalog_cache
@@ -73,6 +73,7 @@ from app.user_memory_actions import (
     handle_delete_from_memory,
     try_memory_delete_override,
 )
+from app.portao_social_routine import try_handle_portao_social_inbound
 from app.pending_media import (
     build_media_choice_prompt,
     build_pending_clarification,
@@ -1980,88 +1981,17 @@ async def handle_get_camera_snapshot(
     instance: str,
     messenger: StepMessenger | None = None,
 ) -> None:
-    """Obtem snapshot do Frigate e envia pelo WhatsApp."""
-    evo_base = settings.evolution_base_url.strip()
-    evo_key = settings.evolution_api_key.strip()
-    if not evo_base or not evo_key or not instance:
-        log.error("Envio de camera bloqueado: Evolution nao configurado")
-        return
-
-    intro = str(decision.get("response") or "").strip()
-    raw_id = decision.get("camera_id")
-    camera_id = cameras.resolve_camera_id(str(raw_id) if raw_id is not None else None)
-
-    async def say(text: str) -> None:
-        if messenger:
-            await messenger.step(text)
-        else:
-            await evo.send_text(
-                base_url=evo_base,
-                api_key=evo_key,
-                instance=instance,
-                number=phone,
-                text=_truncate_whatsapp(text),
-            )
-
-    if not settings.frigate_url:
-        msg = (
-            intro + "\n\nFrigate nao configurado. Defina frigate_url nas opcoes do add-on."
-        ).strip()
-        await say(msg)
-        return
-
-    if not cameras.cameras:
-        msg = (
-            intro
-            + "\n\nNenhuma camera configurada. Crie /config/shakira_cameras.yaml."
-        ).strip()
-        await say(msg)
-        return
-
-    if not camera_id:
-        known = ", ".join(f"{c.id} ({c.name})" for c in cameras.cameras[:8])
-        msg = (
-            intro + f"\n\nNao identifiquei a camera. Cameras disponiveis: {known}."
-        ).strip()
-        await say(msg)
-        return
-
-    cam = cameras.camera_map().get(camera_id)
-    frigate = FrigateClient(http, base_url=settings.frigate_url)
-    log.info("Frigate snapshot camera=%s url=%s", camera_id, settings.frigate_url)
-
-    label = cam.name if cam else camera_id
-    if intro:
-        await say(intro)
-    await say(f"Vou buscar a imagem da camera {label}...")
-
-    try:
-        image_bytes = await frigate.get_latest_snapshot(camera_id)
-    except FrigateError as e:
-        log.error("Frigate falhou: %s", e, exc_info=True)
-        await say(f"Nao consegui obter a imagem: {e}")
-        return
-
-    caption = f"Camera: {label}"[:1024]
-    fname = f"shakira_{camera_id}.jpg"
-    await pulse_whatsapp_typing()
-    ok = await evo.send_image_bytes(
-        base_url=evo_base,
-        api_key=evo_key,
+    """Obtem snapshot(s) do Frigate e envia pelo WhatsApp."""
+    await handle_camera_snapshot_decision(
+        decision,
+        settings=settings,
+        cameras=cameras,
+        evo=evo,
+        http=http,
+        phone=phone,
         instance=instance,
-        number=phone,
-        image_bytes=image_bytes,
-        filename=fname,
-        caption=caption,
+        messenger=messenger,
     )
-    if ok is None:
-        await evo.send_text(
-            base_url=evo_base,
-            api_key=evo_key,
-            instance=instance,
-            number=phone,
-            text="Capturei a imagem mas nao consegui enviar pelo WhatsApp.",
-        )
 
 
 async def handle_search_photos(
@@ -2429,6 +2359,19 @@ async def handle_evolution_payload(
             send_instance_early = _resolve_evolution_instance(
                 _inst_hint, webhook_instance, default_inst, settings
             )
+            if await try_handle_portao_social_inbound(
+                phone_norm,
+                user_text or "",
+                ha=ha,
+                catalog=catalog,
+                evo=evo,
+                evo_base=evo_base or "",
+                evo_key=evo_key or "",
+                instance=send_instance_early or "",
+            ):
+                log.info("Rotina portao social tratou mensagem phone=%s", phone_norm)
+                continue
+
             await _process_inbound_message(
                 inbound=inbound,
                 _inst_hint=_inst_hint,

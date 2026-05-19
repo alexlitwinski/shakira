@@ -25,9 +25,13 @@ _DOOR_HINTS = (
     "fechadura",
     "portao",
     "portão",
+    "portao social",
+    "portão social",
+    "codigo de acesso",
     "senha para",
     "porta social",
     "porta principal",
+    "entrar em casa",
 )
 _BOILER_HINTS = (
     "boiler",
