@@ -47,24 +47,24 @@ ROUTINE_ENTITIES = (
 _SENSOR_CHECK_DELAY_SEC = 5.0
 
 _PASSWORD_PROMPT = (
-    "Para abrir o portao social preciso confirmar o codigo de acesso. "
-    "Qual o codigo? (Envie *cancelar* para desistir.)"
+    "Para abrir o portão social preciso confirmar o código de acesso. "
+    "Qual o código? (Envie *cancelar* para desistir.)"
 )
 
 _FALLBACK_PROMPT = (
-    "Nao consegui abrir o portao social completamente. O que deseja fazer?\n\n"
-    "1 — Acionar a fechadura do portao social mesmo assim\n"
-    "2 — Abrir o portao de servico\n"
+    "Não consegui abrir o portão social completamente. O que deseja fazer?\n\n"
+    "1 — Acionar a fechadura do portão social mesmo assim\n"
+    "2 — Abrir o portão de serviço\n"
     "3 — Cancelar"
 )
 
 _FOLLOWUP_PROMPT = (
-    "Portao social aberto! Quer que eu abra tambem?\n\n"
+    "Portão social aberto! Quer que eu abra também?\n\n"
     "1 — Grade lateral\n"
     "2 — Porta social\n"
     "3 — Porta da cozinha\n"
     "4 — Todos\n"
-    "5 — Nao, obrigado"
+    "5 — Não, obrigado"
 )
 
 _CANCEL_RE = re.compile(r"^\s*(cancelar|cancela|nao|não|desistir)\s*[.!?]?\s*$", re.I)
@@ -220,19 +220,19 @@ async def _run_open_routine(
     messenger: StepMessenger,
 ) -> bool:
     """Executa sequencia completa. Retorna True se sensor indicar portao aberto."""
-    await messenger.step("A iniciar abertura do portao social...")
+    await messenger.step("A iniciar abertura do portão social...")
 
     states = await _fetch_states(ha, ROUTINE_ENTITIES)
     sensor_state = _state_str(states.get(ENTITY_SENSOR))
     if _is_sensor_open(sensor_state):
-        await messenger.step("O portao social ja esta aberto.")
+        await messenger.step("O portão social já está aberto.")
         return True
 
     failed_steps: list[str] = []
 
     alarm_state = _state_str(states.get(ENTITY_ALARM))
     if _needs_disarm(alarm_state):
-        await messenger.step("Desarmando a particao 1 do alarme (perimetro externo)...")
+        await messenger.step("Desarmando a partição 1 do alarme (perímetro externo)...")
         ok, err = await _call_service_safe(
             ha, catalog, "alarm_control_panel", "alarm_disarm", ENTITY_ALARM
         )
@@ -240,44 +240,44 @@ async def _run_open_routine(
             await messenger.step("Alarme desarmado.")
         else:
             failed_steps.append("desarmar alarme")
-            await messenger.step(f"Nao consegui desarmar o alarme ({err or 'erro'}).")
+            await messenger.step(f"Não consegui desarmar o alarme ({err or 'erro'}).")
 
     alim_state = _state_str(states.get(ENTITY_ALIMENTACAO))
     if _is_off(alim_state):
-        await messenger.step("Ligando alimentacao da fechadura...")
+        await messenger.step("Ligando alimentação da fechadura...")
         ok, err = await _call_service_safe(
             ha, catalog, "switch", "turn_on", ENTITY_ALIMENTACAO
         )
         if ok:
-            await messenger.step("Alimentacao ligada.")
+            await messenger.step("Alimentação ligada.")
             await asyncio.sleep(0.5)
         else:
             failed_steps.append("ligar alimentacao")
-            await messenger.step(f"Nao consegui ligar a alimentacao ({err or 'erro'}).")
+            await messenger.step(f"Não consegui ligar a alimentação ({err or 'erro'}).")
 
     cadeado_state = _state_str(states.get(ENTITY_CADEADO))
     if _is_locked(cadeado_state):
-        await messenger.step("Destrancando cadeado do portao...")
+        await messenger.step("Destrancando cadeado do portão...")
         ok, err = await _call_service_safe(ha, catalog, "lock", "unlock", ENTITY_CADEADO)
         if ok:
             await messenger.step("Cadeado destrancado.")
             await asyncio.sleep(0.5)
         else:
             failed_steps.append("destrancar cadeado")
-            await messenger.step(f"Nao consegui destrancar o cadeado ({err or 'erro'}).")
+            await messenger.step(f"Não consegui destrancar o cadeado ({err or 'erro'}).")
 
-    await messenger.step("Acionando fechadura do portao social...")
+    await messenger.step("Acionando fechadura do portão social...")
     ok, err = await _call_service_safe(
         ha, catalog, "switch", "turn_on", ENTITY_FECHADURA
     )
     if not ok:
         failed_steps.append("acionar fechadura")
-        await messenger.step(f"Nao consegui acionar a fechadura ({err or 'erro'}).")
+        await messenger.step(f"Não consegui acionar a fechadura ({err or 'erro'}).")
     else:
         if await _is_portao_open(ha):
-            await messenger.step("Portao social aberto com sucesso!")
+            await messenger.step("Portão social aberto com sucesso!")
             return True
-        await messenger.step("Fechadura acionada, mas o sensor ainda indica portao fechado.")
+        await messenger.step("Fechadura acionada, mas o sensor ainda indica portão fechado.")
 
     if failed_steps:
         log.info("Portao social: rotina incompleta falhas=%s", failed_steps)
@@ -290,18 +290,18 @@ async def _run_fallback_fechadura(
     catalog: DevicesCatalog,
     messenger: StepMessenger,
 ) -> bool:
-    await messenger.step("A acionar apenas a fechadura do portao social...")
+    await messenger.step("A acionar apenas a fechadura do portão social...")
     ok, err = await _call_service_safe(
         ha, catalog, "switch", "turn_on", ENTITY_FECHADURA
     )
     if ok:
         if await _is_portao_open(ha):
-            await messenger.step("Portao aberto.")
+            await messenger.step("Portão aberto.")
             return True
-        await messenger.step("Fechadura acionada. Verifique se o portao abriu.")
+        await messenger.step("Fechadura acionada. Verifique se o portão abriu.")
         return False
     await messenger.step(
-        f"Nao foi possivel acionar a fechadura ({err or 'erro'})."
+        f"Não foi possível acionar a fechadura ({err or 'erro'})."
     )
     return False
 
@@ -312,15 +312,15 @@ async def _run_fallback_servico(
     catalog: DevicesCatalog,
     messenger: StepMessenger,
 ) -> None:
-    await messenger.step("A abrir o portao de servico...")
+    await messenger.step("A abrir o portão de serviço...")
     ok, err = await _call_service_safe(
         ha, catalog, "scene", "turn_on", ENTITY_SCENE_SERVICO
     )
     if ok:
-        await messenger.step("Portao de servico acionado.", final=True)
+        await messenger.step("Portão de serviço acionado.", final=True)
     else:
         await messenger.step(
-            f"Nao foi possivel abrir o portao de servico ({err or 'erro'}).", final=True
+            f"Não foi possível abrir o portão de serviço ({err or 'erro'}).", final=True
         )
 
 
@@ -392,7 +392,7 @@ async def _run_followup_actions(
         )
     else:
         await messenger.step(
-            f"Nao consegui abrir: {', '.join(fail_labels)}.", final=True
+            f"Não consegui abrir: {', '.join(fail_labels)}.", final=True
         )
 
 
@@ -497,9 +497,9 @@ async def try_handle_portao_social_inbound(
         choice = _parse_followup_choice(text)
         if choice is None:
             reply = (
-                "Nao entendi a opcao. Responda com:\n"
+                "Não entendi a opção. Responda com:\n"
                 "1 — grade lateral\n2 — porta social\n3 — porta da cozinha\n"
-                "4 — todos\n5 — nao, obrigado"
+                "4 — todos\n5 — não, obrigado"
             )
             if evo_base and evo_key and instance:
                 messenger = StepMessenger(
@@ -578,8 +578,8 @@ async def try_handle_portao_social_inbound(
         choice = _parse_fallback_choice(text)
         if choice is None:
             reply = (
-                "Nao entendi a opcao. Responda com:\n"
-                "1 — fechadura\n2 — portao de servico\n3 — cancelar"
+                "Não entendi a opção. Responda com:\n"
+                "1 — fechadura\n2 — portão de serviço\n3 — cancelar"
             )
             if evo_base and evo_key and instance:
                 messenger = StepMessenger(
@@ -647,7 +647,7 @@ async def try_handle_portao_social_inbound(
                     await messenger.step(_FOLLOWUP_PROMPT, final=True)
                 else:
                     await messenger.step(
-                        "Nao confirmei a abertura do portao.", final=True
+                        "Não confirmei a abertura do portão.", final=True
                     )
             else:
                 await _run_fallback_servico(ha=ha, catalog=catalog, messenger=messenger)
@@ -667,7 +667,7 @@ async def try_handle_portao_social_inbound(
     if pending and pending.stage == "password":
         if _CANCEL_RE.match(text):
             clear_pending(phone)
-            reply = "Abertura do portao social cancelada."
+            reply = "Abertura do portão social cancelada."
             if evo_base and evo_key and instance:
                 messenger = StepMessenger(
                     evo=evo,
@@ -700,7 +700,7 @@ async def try_handle_portao_social_inbound(
         candidate = text if re.fullmatch(r"\d{4,8}", text) else None
         if not candidate or candidate != PORTAO_SOCIAL_PASSWORD:
             reply = append_security_delete_notice(
-                "Codigo incorreto. Tente novamente ou envie *cancelar*.",
+                "Código incorreto. Tente novamente ou envie *cancelar*.",
                 deleted=pwd_deleted,
             )
             if evo_base and evo_key and instance:

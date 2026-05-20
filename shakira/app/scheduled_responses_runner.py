@@ -293,7 +293,7 @@ class ScheduledResponsesRunner:
             text = format_ha_error_user()
         except Exception:
             log.exception("Acao agendada erro id=%s entity=%s", fired.id, target)
-            text = "Nao consegui executar a acao agendada."
+            text = "Não consegui executar a ação agendada."
 
         text = polish_user_message(text)
         try:

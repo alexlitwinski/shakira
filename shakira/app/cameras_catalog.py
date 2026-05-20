@@ -234,7 +234,7 @@ class CamerasCatalog:
             resolved = self.resolve_camera_id(str(camera_id))
             if resolved:
                 return [resolved], None
-            return [], f"Camera '{camera_id}' nao encontrada no catalogo."
+            return [], f"Câmera '{camera_id}' não encontrada no catálogo."
 
         if camera_ids:
             resolved: list[str] = []
@@ -250,7 +250,7 @@ class CamerasCatalog:
             group = self.resolve_group_name(str(camera_group))
             if not group:
                 known = ", ".join(self.list_groups()) or "(nenhum)"
-                return [], f"Grupo '{camera_group}' nao encontrado. Grupos disponiveis: {known}."
+                return [], f"Grupo '{camera_group}' não encontrado. Grupos disponíveis: {known}."
             ids = [c.id for c in self.cameras_for_group(group)]
             if ids:
                 return ids, None
@@ -258,7 +258,7 @@ class CamerasCatalog:
 
         if all_cameras:
             if not self.cameras:
-                return [], "Nenhuma camera configurada."
+                return [], "Nenhuma câmera configurada."
             return [c.id for c in self.cameras], None
 
         return [], None
@@ -281,7 +281,7 @@ class CamerasCatalog:
             if cam.description:
                 lines.append(f"    descricao: {cam.description}")
         if not self.cameras:
-            lines.append("(Nenhuma camera configurada em shakira_cameras.yaml.)")
+            lines.append("(Nenhuma câmera configurada em shakira_cameras.yaml.)")
         return "\n".join(lines)
 
 

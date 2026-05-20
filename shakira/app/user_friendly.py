@@ -83,7 +83,7 @@ def format_state_value(entity_id: str, state: dict[str, Any], catalog: DevicesCa
     domain = entity_id.split(".", 1)[0] if "." in entity_id else ""
 
     if raw in (None, "unknown", "unavailable", ""):
-        return f"Nao consegui obter o estado de {label} agora."
+        return f"Não consegui obter o estado de {label} agora."
 
     if domain == "sensor":
         unit = ""
@@ -95,7 +95,7 @@ def format_state_value(entity_id: str, state: dict[str, Any], catalog: DevicesCa
         try:
             val = float(str(raw).replace(",", "."))
             if "temp" in entity_id.lower() or unit.strip() in ("°C", "C"):
-                return f"A temperatura de {label} esta em {val:g}°C."
+                return f"A temperatura de {label} está em {val:g}°C."
             return f"{label}: {val:g}{unit}."
         except ValueError:
             pass
@@ -123,17 +123,17 @@ def format_state_value(entity_id: str, state: dict[str, Any], catalog: DevicesCa
     if domain in ("switch", "input_boolean", "light", "fan"):
         on = str(raw).lower() in ("on", "true", "ligado", "open", "unlocked")
         if on:
-            return f"{label} esta ligado(a)."
-        return f"{label} esta desligado(a)."
+            return f"{label} está ligado(a)."
+        return f"{label} está desligado(a)."
 
     if domain == "input_select":
-        return f"{label} esta em «{raw}»."
+        return f"{label} está em «{raw}»."
 
     if domain == "lock":
         if str(raw).lower() == "unlocked":
-            return f"{label} esta destrancada."
+            return f"{label} está destrancada."
         if str(raw).lower() == "locked":
-            return f"{label} esta trancada."
+            return f"{label} está trancada."
         return f"{label}: {raw}."
 
     return f"{label}: {raw}."
@@ -216,7 +216,7 @@ def format_action_success(
             if str(opt).lower() == "ligado":
                 return "Pronto! Liguei o aquecimento do boiler."
         if opt:
-            return f"Pronto! {label} esta em «{opt}»."
+            return f"Pronto! {label} está em «{opt}»."
         return f"Pronto! Ajustei {label}."
 
     if domain == "switch" and service == "turn_on":
@@ -234,11 +234,11 @@ def format_action_success(
     if domain == "lock" and service == "lock":
         return f"Pronto! {label} trancada."
 
-    return f"Pronto! Alteracao feita em {label}."
+    return f"Pronto! Alteração feita em {label}."
 
 
 def format_ha_error_user() -> str:
-    return "Nao consegui completar essa acao agora. Tente de novo em instantes."
+    return "Não consegui completar essa ação agora. Tente de novo em instantes."
 
 
 def format_whatsapp_layout(text: str) -> str:

@@ -98,14 +98,14 @@ async def send_camera_snapshots(
         result.summary = "Frigate nao configurado."
         if intro:
             await say(intro)
-        await say("Frigate nao configurado. Defina frigate_url nas opcoes do add-on.", final=True)
+        await say("Frigate não configurado. Defina frigate_url nas opções do add-on.", final=True)
         return result
 
     if not cameras.cameras:
         result.summary = "Nenhuma camera configurada."
         if intro:
             await say(intro)
-        await say("Nenhuma camera configurada. Crie /config/shakira_cameras.yaml.", final=True)
+        await say("Nenhuma câmera configurada. Crie /config/shakira_cameras.yaml.", final=True)
         return result
 
     if not camera_ids:
@@ -117,7 +117,7 @@ async def send_camera_snapshots(
         result.summary = "Nenhuma camera selecionada."
         if intro:
             await say(intro)
-        await say(f"Nao identifiquei quais cameras enviar. Disponiveis: {hint}.", final=True)
+        await say(f"Não identifiquei quais câmeras enviar. Disponíveis: {hint}.", final=True)
         return result
 
     if intro:
@@ -127,9 +127,9 @@ async def send_camera_snapshots(
     if total == 1:
         cam = cameras.camera_map().get(camera_ids[0])
         label = cam.name if cam else camera_ids[0]
-        await say(f"Vou buscar a imagem da camera {label}...")
+        await say(f"Vou buscar a imagem da câmera {label}...")
     else:
-        await say(f"Vou buscar imagens de {total} cameras e enviar numa unica mensagem...")
+        await say(f"Vou buscar imagens de {total} câmeras e enviar numa única mensagem...")
 
     frigate = FrigateClient(http, base_url=settings.frigate_url)
     cam_map = cameras.camera_map()
@@ -158,17 +158,17 @@ async def send_camera_snapshots(
     if not fetched:
         if total == 1:
             failed = result.failed[0] if result.failed else camera_ids[0]
-            await say(f"Nao consegui obter a imagem da camera {failed}.", final=True)
+            await say(f"Não consegui obter a imagem da câmera {failed}.", final=True)
         else:
-            await say("Nao consegui obter imagens das cameras solicitadas.", final=True)
-        result.summary = "Nao foi possivel enviar as imagens das cameras."
+            await say("Não consegui obter imagens das câmeras solicitadas.", final=True)
+        result.summary = "Não foi possível enviar as imagens das câmeras."
         return result
 
     await pulse_whatsapp_typing()
 
     if len(fetched) == 1:
         image_bytes, label, camera_id = fetched[0]
-        caption = f"Camera: {label}"[:1024]
+        caption = f"Câmera: {label}"[:1024]
         fname = f"shakira_{camera_id}.jpg"
         ok = await evo.send_image_bytes(
             base_url=evo_base,
@@ -181,7 +181,7 @@ async def send_camera_snapshots(
         )
         if ok is None:
             result.failed.append(camera_id)
-            await say(f"Capturei {label} mas nao consegui enviar pelo WhatsApp.", final=True)
+            await say(f"Capturei {label} mas não consegui enviar pelo WhatsApp.", final=True)
         else:
             result.sent = 1
             result.summary = "1 imagem enviada."
@@ -192,12 +192,12 @@ async def send_camera_snapshots(
         collage_bytes = build_image_grid(collage_items)
     except Exception:
         log.exception("Falha ao montar collage de %s cameras", len(collage_items))
-        await say("Nao consegui montar as imagens numa unica mensagem.", final=True)
+        await say("Não consegui montar as imagens numa única mensagem.", final=True)
         result.summary = "Falha ao montar collage das cameras."
         return result
 
     labels = [label for _, label, _ in fetched]
-    caption = "Cameras: " + ", ".join(labels)
+    caption = "Câmeras: " + ", ".join(labels)
     if result.failed:
         caption += f" (falharam: {', '.join(result.failed)})"
     caption = caption[:1024]
@@ -213,8 +213,8 @@ async def send_camera_snapshots(
     )
     if ok is None:
         result.failed.extend(camera_id for _, _, camera_id in fetched)
-        await say("Capturei as cameras mas nao consegui enviar pelo WhatsApp.", final=True)
-        result.summary = "Nao foi possivel enviar as imagens das cameras."
+        await say("Capturei as câmeras mas não consegui enviar pelo WhatsApp.", final=True)
+        result.summary = "Não foi possível enviar as imagens das câmeras."
         return result
 
     result.sent = len(fetched)
@@ -224,7 +224,7 @@ async def send_camera_snapshots(
             f" Falharam: {', '.join(result.failed)}."
         )
     else:
-        result.summary = f"{result.sent} imagem(ns) enviada(s) numa unica mensagem."
+        result.summary = f"{result.sent} imagem(ns) enviada(s) numa única mensagem."
 
     await say(result.summary, final=True)
     return result

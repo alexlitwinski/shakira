@@ -245,6 +245,6 @@ async def build_friendly_reply_from_scenario(
         lines.append(line)
 
     if not lines:
-        return "Nao consegui obter os dados do Home Assistant agora. Tente de novo em instantes."
+        return "Não consegui obter os dados do Home Assistant agora. Tente de novo em instantes."
 
     return "Situação atual:\n\n" + "\n".join(lines)

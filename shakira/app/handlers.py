@@ -72,8 +72,12 @@ from app.user_memory_prompts import USER_MEMORY_ACTIONS_INSTRUCTION
 from app.user_memory_actions import (
     handle_delete_from_memory,
     try_memory_delete_override,
+    try_personal_registry_list_reply,
 )
-from app.password_vault_routine import try_handle_password_vault_inbound
+from app.password_vault_routine import (
+    handle_vault_gemini_decision,
+    try_handle_password_vault_pending,
+)
 from app.password_security import (
     append_security_delete_notice,
     try_delete_inbound_password_message,
@@ -136,6 +140,9 @@ VALID_GEMINI_ACTIONS = frozenset(
         "save_memory",
         "send_user_file",
         "delete_from_memory",
+        "vault_save",
+        "vault_retrieve",
+        "vault_list",
         "schedule_response",
         "schedule_action",
         "cancel_scheduled_response",
@@ -150,6 +157,9 @@ _SINGLE_USER_MESSAGE_ACTIONS = frozenset(
         "cancel_scheduled_response",
         "save_memory",
         "delete_from_memory",
+        "vault_save",
+        "vault_retrieve",
+        "vault_list",
     }
 )
 
@@ -745,7 +755,7 @@ async def _ensure_user_friendly_decision(
 
     out = dict(decision)
     out["action"] = "reply"
-    out["response"] = "Nao consegui concluir a resposta agora. Tente de novo em instantes."
+    out["response"] = "Não consegui concluir a resposta agora. Tente de novo em instantes."
     return out
 
 
@@ -864,7 +874,7 @@ async def _execute_unlock_pending(
             e.response.status_code,
             e.response.text[:500],
         )
-        return "Nao foi possivel destrancar a porta. Tente novamente em instantes."
+        return "Não foi possível destrancar a porta. Tente novamente em instantes."
 
 
 async def try_handle_pending_password(
@@ -1130,8 +1140,8 @@ async def _upload_many_to_photoprism(
 ) -> str:
     if not settings.photoprism_url or not settings.photoprism_token:
         return (
-            "PhotoPrism nao esta configurado no add-on. "
-            "Defina photoprism_url e photoprism_token nas opcoes."
+            "PhotoPrism não está configurado no add-on. "
+            "Defina photoprism_url e photoprism_token nas opções."
         )
     pp = PhotoprismClient(
         http,
@@ -1146,10 +1156,10 @@ async def _upload_many_to_photoprism(
             supervisor_token=settings.supervisor_token,
         )
     except PhotoprismAuthError:
-        return "Erro de autenticacao no PhotoPrism. Verifique o token nas opcoes."
+        return "Erro de autenticação no PhotoPrism. Verifique o token nas opções."
     except PhotoprismError as e:
         log.warning("Upload PhotoPrism falhou: %s", e)
-        return f"Nao consegui enviar ao PhotoPrism: {e}"
+        return f"Não consegui enviar ao PhotoPrism: {e}"
 
     return format_upload_user_message(result, album=album)
 
@@ -1169,7 +1179,7 @@ async def _save_inbound_media(
         content, settings=settings, evo=evo, instance=instance
     )
     if not downloaded:
-        return "O usuario enviou um arquivo, mas nao foi possivel baixa-lo para guardar."
+        return "O usuário enviou um arquivo, mas não foi possível baixá-lo para guardar."
 
     raw, mimetype, fname = downloaded
     media = content.media
@@ -1190,7 +1200,7 @@ async def _save_inbound_media(
             f"tamanho={entry.size_bytes} bytes. Legenda/caption: {caption or '(sem legenda)'}."
         )
     except ValueError as e:
-        return f"[Sistema] Nao foi possivel guardar o arquivo: {e}"
+        return f"[Sistema] Não foi possível guardar o arquivo: {e}"
     except OSError as e:
         log.warning("Falha ao gravar arquivo usuario %s: %s", content.phone, e)
         return "[Sistema] Erro ao gravar o arquivo no disco."
@@ -1248,7 +1258,7 @@ async def try_handle_pending_media_reply(
                 saved += 1
         except ValueError as e:
             store.clear_pending_file()
-            return f"Nao foi possivel guardar: {e}"
+            return f"Não foi possível guardar: {e}"
         except OSError:
             store.clear_pending_file()
             return "Erro ao gravar o arquivo."
@@ -1274,11 +1284,11 @@ async def try_handle_pending_media_reply(
         ]
         if not gallery_items:
             return (
-                "So posso enviar *fotos e videos* ao PhotoPrism. "
+                "Só posso enviar *fotos e vídeos* ao PhotoPrism. "
                 "Para estes arquivos, responda *pessoal*."
             )
         if http is None:
-            return "Servico temporariamente indisponivel para PhotoPrism."
+            return "Serviço temporariamente indisponível para PhotoPrism."
         album = extract_album_name(user_text)
         store.set_pending_stage("processing")
         if on_step:
@@ -1315,7 +1325,7 @@ async def try_handle_pending_media_reply(
                 except ValueError:
                     pass
             return (
-                f"{msg}\n\nAinda restam {len(non_gallery)} arquivo(s) que nao vao "
+                f"{msg}\n\nAinda restam {len(non_gallery)} arquivo(s) que não vão "
                 "para a galeria. Responda *pessoal* para guardar."
             )
         return msg
@@ -1342,7 +1352,7 @@ async def try_handle_pending_media_reply(
             saved += 1
     except ValueError as e:
         store.clear_pending_file()
-        return f"Nao foi possivel guardar: {e}"
+        return f"Não foi possível guardar: {e}"
     except OSError:
         store.clear_pending_file()
         return "Erro ao gravar o arquivo."
@@ -1372,7 +1382,7 @@ async def handle_ambiguous_inbound_media(
         inbound, settings=settings, evo=evo, instance=instance
     )
     if not downloaded:
-        return "Recebi seu arquivo, mas nao consegui baixa-lo. Tente enviar de novo."
+        return "Recebi seu arquivo, mas não consegui baixá-lo. Tente enviar de novo."
 
     raw, mimetype, fname = downloaded
     media = inbound.media
@@ -1391,7 +1401,7 @@ async def handle_ambiguous_inbound_media(
                     caption=media.caption,
                 )
             except ValueError as e:
-                return f"Nao foi possivel receber o arquivo: {e}"
+                return f"Não foi possível receber o arquivo: {e}"
 
             if stage_before in (None, "collecting", "destination"):
                 store.set_pending_stage("collecting")
@@ -1419,7 +1429,7 @@ async def handle_ambiguous_inbound_media(
             caption=media.caption,
         )
     except ValueError as e:
-        return f"Nao foi possivel receber o arquivo: {e}"
+        return f"Não foi possível receber o arquivo: {e}"
 
     pending_items = store.get_pending_files()
     pending_files = [p for p, _ in pending_items]
@@ -1449,7 +1459,7 @@ async def route_explicit_inbound_media(
         inbound, settings=settings, evo=evo, instance=instance
     )
     if not downloaded:
-        return "Nao consegui baixar o arquivo para processar seu pedido."
+        return "Não consegui baixar o arquivo para processar seu pedido."
 
     raw, mimetype, fname = downloaded
     media = inbound.media
@@ -1460,11 +1470,11 @@ async def route_explicit_inbound_media(
     if intent == "photoprism":
         if not is_gallery_media(media.mediatype, mimetype or media.mimetype):
             return (
-                "PhotoPrism aceita fotos e videos. Para este arquivo use memoria pessoal "
+                "PhotoPrism aceita fotos e vídeos. Para este arquivo use memória pessoal "
                 '(responda "guardar" na legenda).'
             )
         if http is None:
-            return "Servico indisponivel para envio ao PhotoPrism."
+            return "Serviço indisponível para envio ao PhotoPrism."
         combined = f"{inbound.media.caption} {inbound.text}".strip()
         album = extract_album_name(combined)
         store.clear_pending_file()
@@ -1499,7 +1509,7 @@ async def route_explicit_inbound_media(
             )
             store.set_pending_stage("description")
         except ValueError as e:
-            return f"Nao foi possivel receber o arquivo: {e}"
+            return f"Não foi possível receber o arquivo: {e}"
         return build_personal_description_prompt()
 
     return await _commit_bytes_to_personal_memory(
@@ -1545,12 +1555,12 @@ async def handle_send_user_file(
                 )
 
     if not hit:
-        msg = intro or "Nao encontrei esse arquivo na sua memoria."
+        msg = intro or "Não encontrei esse arquivo na sua memória."
         if not hit and not intro:
             files = store.list_files()
             if files:
                 names = ", ".join(f"{f.filename} (id={f.id})" for f in files[-5:])
-                msg = f"Nao achei o arquivo. Os ultimos guardados: {names}."
+                msg = f"Não achei o arquivo. Os últimos guardados: {names}."
         await say(msg)
         return msg
 
@@ -1558,7 +1568,7 @@ async def handle_send_user_file(
     evo_base = settings.evolution_base_url.strip()
     evo_key = settings.evolution_api_key.strip()
     if not evo_base or not evo_key or not instance:
-        return "Evolution nao configurado para enviar o arquivo."
+        return "Evolution não configurado para enviar o arquivo."
 
     if intro:
         await say(intro)
@@ -1577,7 +1587,7 @@ async def handle_send_user_file(
         mimetype=meta.mime_type,
     )
     if ok is None:
-        msg = "Encontrei o arquivo mas nao consegui enviar pelo WhatsApp."
+        msg = "Encontrei o arquivo mas não consegui enviar pelo WhatsApp."
         await say(msg)
         return msg
     return intro or f"Enviei o arquivo {meta.filename}."
@@ -1587,7 +1597,7 @@ def handle_save_memory(decision: dict[str, Any], phone: str) -> str:
     text = str(decision.get("memory_text") or "").strip()
     if not text:
         reply = str(decision.get("response") or "").strip()
-        return reply or "Nao entendi o que devo guardar na memoria."
+        return reply or "Não entendi o que devo guardar na memória."
     label = str(decision.get("memory_label") or "").strip()
     store = get_store(phone)
     store.add_memory(text, label=label)
@@ -1596,7 +1606,7 @@ def handle_save_memory(decision: dict[str, Any], phone: str) -> str:
     if confirm:
         return confirm
     short = text if len(text) <= 80 else text[:77] + "..."
-    return f"Guardei na sua memoria: {short}"
+    return f"Guardei na sua memória: {short}"
 
 
 async def handle_schedule_response(
@@ -1608,11 +1618,11 @@ async def handle_schedule_response(
     context = str(decision.get("context") or "").strip()
     if not context:
         reply = str(decision.get("response") or "").strip()
-        return reply or "Nao entendi o que devo agendar."
+        return reply or "Não entendi o que devo agendar."
 
     trigger_type = str(decision.get("trigger_type") or "entity").lower()
     if trigger_type not in ("time", "entity"):
-        return "Tipo de agendamento invalido."
+        return "Tipo de agendamento inválido."
 
     label = str(decision.get("label") or decision.get("schedule_label") or "").strip()
     trigger_on = str(decision.get("trigger_on") or "enter").lower()
@@ -1637,7 +1647,7 @@ async def handle_schedule_response(
         entity_id = str(decision.get("entity_id") or "").strip()
         when_state = str(decision.get("when_state") or "").strip()
         if not entity_id or not when_state:
-            return "Para agendar por entidade, preciso do aparelho e da condicao."
+            return "Para agendar por entidade, preciso do aparelho e da condição."
         st = await ha.get_state(entity_id)
         if st:
             last_known_state = str(st.get("state", ""))
@@ -1689,11 +1699,11 @@ async def handle_schedule_action(
     service = str(decision.get("service") or "").strip()
     if not domain or not service:
         reply = str(decision.get("response") or "").strip()
-        return reply or "Comando incompleto para agendar acao (domain/service)."
+        return reply or "Comando incompleto para agendar ação (domain/service)."
 
     raw_svc_data = decision.get("service_data")
     if raw_svc_data is not None and not isinstance(raw_svc_data, dict):
-        return "service_data invalido."
+        return "service_data inválido."
     raw_svc_data = dict(raw_svc_data) if isinstance(raw_svc_data, dict) else {}
 
     target = extract_target_entity_id(domain, service, raw_svc_data, decision.get("entity_id"))
@@ -1702,17 +1712,17 @@ async def handle_schedule_action(
 
     allowed = catalog.actionable_entity_ids()
     if not allowed:
-        return "Ainda nao tenho nenhum aparelho autorizado para controlar por aqui."
+        return "Ainda não tenho nenhum aparelho autorizado para controlar por aqui."
     if target not in allowed:
         return (
-            "Nao tenho permissao para agendar alteracao nesse aparelho. "
-            "So posso controlar o que esta na lista de dispositivos do assistente."
+            "Não tenho permissão para agendar alteração nesse aparelho. "
+            "Só posso controlar o que está na lista de dispositivos do assistente."
         )
 
     if catalog.service_requires_password(target, service):
         return (
-            "Nao consigo agendar acoes que exigem senha. "
-            "Faca agora ou peca para executar imediatamente."
+            "Não consigo agendar ações que exigem senha. "
+            "Faça agora ou peça para executar imediatamente."
         )
 
     svc_data = build_ha_service_data(domain, service, target, raw_svc_data)
@@ -1750,7 +1760,7 @@ async def handle_schedule_action(
         entity_id = str(decision.get("entity_id") or "").strip()
         when_state = str(decision.get("when_state") or "").strip()
         if not entity_id or not when_state:
-            return "Para agendar acao por entidade, preciso do gatilho (entity_id e when_state)."
+            return "Para agendar ação por entidade, preciso do gatilho (entity_id e when_state)."
         st = await ha.get_state(entity_id)
         if st:
             last_known_state = str(st.get("state", ""))
@@ -1766,7 +1776,7 @@ async def handle_schedule_action(
         elif isinstance(raw_after, str) and raw_after.strip().isdigit():
             fire_after_seconds = int(raw_after.strip())
         if not fire_at and not fire_after_seconds:
-            return "Para agendar acao, preciso de fire_after_seconds ou fire_at."
+            return "Para agendar ação, preciso de fire_after_seconds ou fire_at."
         if fire_after_seconds is not None and fire_after_seconds < MIN_ACTION_DELAY_SECONDS:
             mins = max(1, MIN_ACTION_DELAY_SECONDS // 60)
             return f"Agendamento minimo de {mins} minuto(s)."
@@ -1796,7 +1806,7 @@ async def handle_schedule_action(
     confirm = str(decision.get("response") or "").strip()
     if confirm:
         return confirm
-    return f"Acao agendada (id {entry.id}): {entry.summary()}."
+    return f"Ação agendada (id {entry.id}): {entry.summary()}."
 
 
 async def _maybe_auto_schedule_boiler_ready(
@@ -1859,7 +1869,7 @@ def handle_cancel_scheduled_response(decision: dict[str, Any], phone: str) -> st
 
     if not target or not target.is_pending():
         reply = str(decision.get("response") or "").strip()
-        return reply or "Nao encontrei nenhum agendamento pendente com esse identificador."
+        return reply or "Não encontrei nenhum agendamento pendente com esse identificador."
 
     store.cancel(target.id)
     confirm = str(decision.get("response") or "").strip()
@@ -1883,6 +1893,7 @@ async def execute_decision(
     evo_base: str = "",
     evo_key: str = "",
     instance: str = "",
+    settings: AppSettings | None = None,
 ) -> str:
     action = _normalize_action_name(decision.get("action"))
     if action not in VALID_GEMINI_ACTIONS:
@@ -1944,12 +1955,12 @@ async def execute_decision(
     if action == "get_state":
         eid = decision.get("entity_id")
         if not isinstance(eid, str) or not eid.strip():
-            return await finalize("Nao entendi qual aparelho devo verificar.")
+            return await finalize("Não entendi qual aparelho devo verificar.")
         eid = eid.strip()
         await deliver(format_checking(eid, catalog))
         st = await ha.get_state(eid)
         if not st:
-            return await finalize("Nao encontrei esse aparelho na casa.")
+            return await finalize("Não encontrei esse aparelho na casa.")
         result = format_state_value(eid, st, catalog)
         if messenger:
             await deliver(result, final=True)
@@ -1963,7 +1974,7 @@ async def execute_decision(
         if not isinstance(domain, str) or not isinstance(service, str):
             return await finalize("Comando incompleto (domain/service).")
         if svc_data is not None and not isinstance(svc_data, dict):
-            return await finalize("service_data invalido.")
+            return await finalize("service_data inválido.")
 
         domain = domain.strip()
         service = service.strip()
@@ -1986,12 +1997,12 @@ async def execute_decision(
         allowed = catalog.actionable_entity_ids()
         if not allowed:
             return await finalize(
-                "Ainda nao tenho nenhum aparelho autorizado para controlar por aqui."
+                "Ainda não tenho nenhum aparelho autorizado para controlar por aqui."
             )
         if target not in allowed:
             return await finalize(
-                "Nao tenho permissao para alterar esse aparelho. "
-                "So posso controlar o que esta na lista de dispositivos do assistente."
+                "Não tenho permissão para alterar esse aparelho. "
+                "Só posso controlar o que está na lista de dispositivos do assistente."
             )
 
         pwd_deleted = False
@@ -2090,12 +2101,12 @@ async def execute_decision(
 
     if action == "search_photos":
         return await finalize(
-            "Pedido de fotos recebido. Se nada chegar, verifique PhotoPrism nas opcoes do add-on."
+            "Pedido de fotos recebido. Se nada chegar, verifique PhotoPrism nas opções do add-on."
         )
 
     if action == "get_camera_snapshot":
         return await finalize(
-            "Pedido de camera recebido. Se nada chegar, verifique Frigate nas opcoes do add-on."
+            "Pedido de câmera recebido. Se nada chegar, verifique Frigate nas opções do add-on."
         )
 
     if action == "save_memory":
@@ -2111,6 +2122,33 @@ async def execute_decision(
         result = handle_delete_from_memory(decision, phone)
         return await finalize(result)
 
+    if action in ("vault_save", "vault_retrieve", "vault_list"):
+        if not evo or not evo_base or not evo_key or not instance:
+            return await finalize("Cofre de senhas indisponível (Evolution não configurado).")
+        settings_key = settings.vault_master_key if settings else ""
+        result, redact_user, redact_assistant = await handle_vault_gemini_decision(
+            decision,
+            phone=phone,
+            user_text=user_text,
+            settings_key=settings_key,
+            message_record=message_record,
+            evo=evo,
+            evo_base=evo_base,
+            evo_key=evo_key,
+            instance=instance,
+            messenger=messenger,
+        )
+        if messenger and messenger.sent_any:
+            record_exchange(
+                phone,
+                "[senha omitida]" if redact_user else user_text,
+                "Senha exibida (removida do chat por segurança)."
+                if redact_assistant
+                else messenger.combined(),
+            )
+            return ""
+        return await finalize(result)
+
     if action == "schedule_response":
         result = await handle_schedule_response(decision, phone=phone, ha=ha)
         return await finalize(result)
@@ -2123,7 +2161,7 @@ async def execute_decision(
         result = handle_cancel_scheduled_response(decision, phone)
         return await finalize(result)
 
-    fallback = reply or "Nao entendi o proximo passo."
+    fallback = reply or "Não entendi o próximo passo."
     if messenger:
         await deliver(fallback)
         return ""
@@ -2250,8 +2288,8 @@ async def handle_search_photos(
 
     if not settings.photoprism_url or not settings.photoprism_token:
         msg = (
-            intro + "\n\nPhotoPrism nao configurado. "
-            "Defina photoprism_url e photoprism_token nas opcoes do add-on."
+            intro + "\n\nPhotoPrism não configurado. "
+            "Defina photoprism_url e photoprism_token nas opções do add-on."
         ).strip()
         await say(msg)
         return
@@ -2340,7 +2378,7 @@ async def handle_search_photos(
                 )
                 break
     except PhotoprismAuthError:
-        await say("Erro de autenticacao no PhotoPrism. Verifique o token.")
+        await say("Erro de autenticação no PhotoPrism. Verifique o token.")
         return
     except PhotoprismError as e:
         log.error("PhotoPrism falhou: %s", e, exc_info=True)
@@ -2348,14 +2386,14 @@ async def handle_search_photos(
         diag = getattr(e, "diagnostic", None) or {}
         if isinstance(diag, dict) and diag.get("hints"):
             extra = f" {diag['hints'][0]}"
-        await say(f"Nao consegui buscar fotos: {e}{extra}")
+        await say(f"Não consegui buscar fotos: {e}{extra}")
         return
 
     if not photos:
         detail = ""
         if city:
             detail = f" (pessoa + {city})"
-        await say(f"Nao encontrei fotos com esses criterios{detail}.")
+        await say(f"Não encontrei fotos com esses critérios{detail}.")
         return
 
     await say(f"Encontrei {len(photos)} foto(s). A enviar...")
@@ -2396,7 +2434,7 @@ async def handle_search_photos(
             api_key=evo_key,
             instance=instance,
             number=phone,
-            text="Encontrei fotos mas nao consegui enviar as imagens.",
+            text="Encontrei fotos mas não consegui enviar as imagens.",
         )
     elif sent < total:
         await evo.send_text(
@@ -2594,7 +2632,7 @@ async def handle_evolution_payload(
             send_instance_early = _resolve_evolution_instance(
                 _inst_hint, webhook_instance, default_inst, settings
             )
-            if await try_handle_password_vault_inbound(
+            if await try_handle_password_vault_pending(
                 phone_norm,
                 user_text or "",
                 record=inbound.record,
@@ -2604,7 +2642,25 @@ async def handle_evolution_payload(
                 evo_key=evo_key,
                 instance=send_instance_early,
             ):
-                log.info("Cofre de senhas tratou mensagem phone=%s", phone_norm)
+                log.info("Cofre de senhas (pendente) phone=%s", phone_norm)
+                continue
+
+            registry_list_reply = try_personal_registry_list_reply(
+                phone_norm, user_text or ""
+            )
+            if registry_list_reply:
+                reply_text = _truncate_whatsapp(registry_list_reply)
+                if evo_base and evo_key and send_instance_early:
+                    await pulse_whatsapp_typing()
+                    await evo.send_text(
+                        base_url=evo_base,
+                        api_key=evo_key,
+                        instance=send_instance_early,
+                        number=phone_norm,
+                        text=reply_text,
+                    )
+                    record_exchange(phone_norm, user_text or "", reply_text)
+                log.info("Listagem registro pessoal phone=%s", phone_norm)
                 continue
 
             if await try_handle_portao_social_inbound(
@@ -2923,6 +2979,7 @@ async def _process_inbound_message(
             evo_base=evo_base,
             evo_key=evo_key,
             instance=send_instance,
+            settings=settings,
         )
 
         if not phone_norm:

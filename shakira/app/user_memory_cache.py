@@ -14,12 +14,12 @@ from app.user_memory import UserMemoryStore
 
 log = logging.getLogger(__name__)
 
-USER_MEMORY_CACHE_INSTRUCTION = """Voce tem acesso a MEMORIA PERSISTENTE deste usuario WhatsApp.
-Use essas informacoes para responder perguntas sobre o que ele pediu para guardar ou lembrar.
-Nao invente fatos que nao estejam na memoria ou no contexto da conversa atual.
-Para guardar nova informacao use action=save_memory.
+USER_MEMORY_CACHE_INSTRUCTION = """Você tem acesso a MEMÓRIA PERSISTENTE deste usuário WhatsApp.
+Use essas informações para responder perguntas sobre o que ele pediu para guardar ou lembrar.
+Não invente fatos que não estejam na memória ou no contexto da conversa atual.
+Para guardar nova informação use action=save_memory.
 Para reenviar um arquivo guardado use action=send_user_file com file_id ou file_name.
-Para apagar anotacao ou arquivo use action=delete_from_memory — nunca send_user_file.
+Para apagar anotação ou arquivo use action=delete_from_memory — nunca send_user_file.
 """
 
 

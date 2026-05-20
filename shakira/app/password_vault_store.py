@@ -36,6 +36,7 @@ class VaultPending:
     mode: str  # save | retrieve_pick
     stage: str  # label | secret | pick
     label: str = ""
+    secret_prefill: str = ""
     candidates: list[str] = field(default_factory=list)
 
 
@@ -164,6 +165,7 @@ class PasswordVaultStore:
             mode=str(row.get("mode") or ""),
             stage=str(row.get("stage") or ""),
             label=str(row.get("label") or ""),
+            secret_prefill=str(row.get("secret_prefill") or ""),
             candidates=[str(x) for x in row.get("candidates") or [] if str(x).strip()],
         )
 

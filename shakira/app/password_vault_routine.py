@@ -1,11 +1,11 @@
-"""Rotina dedicada para cofre de senhas (guardar/recuperar com encriptacao)."""
+"""Cofre de senhas: intencao via Gemini; execucao e passos pendentes aqui."""
 
 from __future__ import annotations
 
 import asyncio
 import logging
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 from app.conversation_history import record_exchange
@@ -22,47 +22,19 @@ SECRET_REVEAL_DELETE_SEC = 10.0
 
 _CANCEL_RE = re.compile(r"^\s*(cancelar|cancela|nao|não|desistir)\s*[.!?]?\s*$", re.I)
 
-_SAVE_INTENT_PATTERNS = (
-    re.compile(r"\b(guardar|salvar|anotar|registrar|gravar)\b.*\bsenha\b", re.I),
-    re.compile(r"\bsenha\b.*\b(guardar|salvar|anotar|registrar|gravar)\b", re.I),
-    re.compile(r"\bcofre\b.*\bsenha\b", re.I),
-    re.compile(r"\bsenha\b.*\bcofre\b", re.I),
-)
-
-_RETRIEVE_INTENT_PATTERNS = (
-    re.compile(r"\b(qual|mostrar|mostra|buscar|recuperar|pegar|passa|me\s+d[aá])\b.*\bsenha\b", re.I),
-    re.compile(r"\bsenha\b.*\b(de|do|da)\b", re.I),
-    re.compile(r"^\s*senha\s+(de|do|da)\s+", re.I),
-)
-
-_LIST_INTENT_RE = re.compile(
-    r"\b(listar|quais|minhas)\b.*\bsenhas?\b|\bsenhas?\s+(salvas|guardadas)\b",
-    re.I,
-)
-
-_HA_PASSWORD_CONTEXT_RE = re.compile(
-    r"\b(port[aã]o|porta\s+social|destranc|trancar|alarme|parti[cç][aã]o|cadeado)\b",
-    re.I,
-)
-
-_LABEL_EXTRACT_RE = re.compile(
-    r"senha(?:\s+(?:de|do|da))?\s+(.+?)\s*$",
-    re.I,
-)
-
 _NOT_CONFIGURED_MSG = (
-    "O cofre de senhas ainda nao esta configurado neste servidor. "
-    "Defina a chave mestra nas opcoes do add-on (vault_master_key)."
+    "O cofre de senhas ainda não está configurado neste servidor. "
+    "Defina a chave mestra nas opções do add-on (vault_master_key)."
 )
 
 _SAVE_LABEL_PROMPT = (
-    "De qual servico, site ou conta e a senha?\n\n"
+    "De qual serviço, site ou conta é a senha?\n\n"
     "Envie *cancelar* para desistir."
 )
 
 _SAVE_SECRET_PROMPT = (
     "Agora envie a senha.\n\n"
-    "Ela sera apagada desta conversa assim que for guardada."
+    "Ela será apagada desta conversa assim que for guardada."
 )
 
 
@@ -79,33 +51,10 @@ class _SentSecretCleanup:
 _pending_cleanups: list[asyncio.Task[None]] = []
 
 
-def detect_vault_save_intent(user_text: str) -> bool:
-    text = (user_text or "").strip()
-    if not text or _HA_PASSWORD_CONTEXT_RE.search(text):
-        return False
-    return any(p.search(text) for p in _SAVE_INTENT_PATTERNS)
-
-
-def detect_vault_retrieve_intent(user_text: str) -> bool:
-    text = (user_text or "").strip()
-    if not text or _HA_PASSWORD_CONTEXT_RE.search(text):
-        return False
-    if detect_vault_save_intent(text):
-        return False
-    if _LIST_INTENT_RE.search(text):
-        return True
-    return any(p.search(text) for p in _RETRIEVE_INTENT_PATTERNS)
-
-
-def extract_vault_label_query(user_text: str) -> str:
-    text = (user_text or "").strip()
-    m = _LABEL_EXTRACT_RE.search(text)
-    if m:
-        return m.group(1).strip(" .!?")
-    for prefix in ("mostrar senha ", "qual senha ", "buscar senha ", "recuperar senha "):
-        if text.casefold().startswith(prefix):
-            return text[len(prefix) :].strip(" .!?")
-    return ""
+def _vault_fields(decision: dict[str, Any]) -> tuple[str, str]:
+    label = str(decision.get("vault_label") or "").strip()
+    secret = str(decision.get("vault_secret") or "").strip()
+    return label[:120], secret
 
 
 async def _send_text_and_key(
@@ -174,7 +123,7 @@ async def _finish_exchange(
     if messenger and messenger.sent_any:
         assistant = messenger.combined()
         if redact_assistant:
-            assistant = "Senha exibida (removida do chat por seguranca)."
+            assistant = "Senha exibida (removida do chat por segurança)."
         record_exchange(
             phone,
             "[senha omitida]" if redact_user else user_text,
@@ -214,7 +163,7 @@ def _schedule_secret_cleanup(job: _SentSecretCleanup) -> None:
                 evo_key=job.evo_key,
                 instance=job.instance,
             )
-            notice = "Apaguei a mensagem com a senha por seguranca."
+            notice = "Apaguei a mensagem com a senha por segurança."
             await _send_text_and_key(
                 phone=job.phone,
                 text=notice,
@@ -269,10 +218,20 @@ async def _reply_with_secret(
 
 
 def _format_pick_prompt(labels: list[str]) -> str:
-    lines = ["Encontrei varias senhas. Qual delas?", ""]
+    lines = ["Encontrei várias senhas. Qual delas?", ""]
     for i, label in enumerate(labels[:10], start=1):
         lines.append(f"{i} — {label}")
-    lines.append("\nResponda com o numero ou o nome. *cancelar* para desistir.")
+    lines.append("\nResponda com o número ou o nome. *cancelar* para desistir.")
+    return "\n".join(lines)
+
+
+def _format_list_labels(labels: list[str]) -> str:
+    if not labels:
+        return "Ainda não há senhas guardadas no seu cofre."
+    lines = ["Senhas guardadas:", ""] + [f"• {label}" for label in labels[:30]]
+    if len(labels) > 30:
+        lines.append(f"\n(+ {len(labels) - 30} outras)")
+    lines.append("\nPara ver uma, peça a senha pelo nome (ex.: wifi, casa).")
     return "\n".join(lines)
 
 
@@ -294,6 +253,35 @@ def _resolve_pick(text: str, labels: list[str]) -> str | None:
     return None
 
 
+async def _save_vault_entry(
+    *,
+    store: PasswordVaultStore,
+    master_key: str,
+    label: str,
+    secret: str,
+    user_text: str,
+    record: dict[str, Any] | None,
+    evo: EvolutionClient,
+    evo_base: str,
+    evo_key: str,
+    instance: str,
+) -> str:
+    store.upsert_entry(master_key=master_key, label=label, secret=secret)
+    deleted = await try_delete_inbound_password_message(
+        record=record,
+        user_text=user_text,
+        should_treat_as_password=True,
+        evo=evo,
+        evo_base=evo_base,
+        evo_key=evo_key,
+        instance=instance,
+    )
+    confirm = f"Senha guardada para *{label}*."
+    if deleted:
+        confirm += "\n\nApaguei a mensagem com a senha no WhatsApp por segurança."
+    return confirm
+
+
 async def _handle_save_pending(
     *,
     phone: str,
@@ -313,6 +301,25 @@ async def _handle_save_pending(
         if len(label) < 2:
             return "Preciso de um nome para identificar a senha (ex.: *wifi*, *email pessoal*)."
         pending.label = label[:120]
+        if pending.secret_prefill:
+            try:
+                return await _save_vault_entry(
+                    store=store,
+                    master_key=master_key,
+                    label=pending.label,
+                    secret=pending.secret_prefill,
+                    user_text=text,
+                    record=record,
+                    evo=evo,
+                    evo_base=evo_base,
+                    evo_key=evo_key,
+                    instance=instance,
+                )
+            except ValueError as e:
+                store.clear_pending()
+                return f"Não foi possível guardar: {e}"
+            finally:
+                store.clear_pending()
         pending.stage = "secret"
         store.save_pending(pending)
         return _SAVE_SECRET_PROMPT
@@ -320,26 +327,25 @@ async def _handle_save_pending(
     if pending.stage == "secret":
         secret = text.strip()
         if len(secret) < 1:
-            return "A senha nao pode estar vazia. Envie novamente ou *cancelar*."
+            return "A senha não pode estar vazia. Envie novamente ou *cancelar*."
         try:
-            store.upsert_entry(master_key=master_key, label=pending.label, secret=secret)
+            return await _save_vault_entry(
+                store=store,
+                master_key=master_key,
+                label=pending.label,
+                secret=secret,
+                user_text=text,
+                record=record,
+                evo=evo,
+                evo_base=evo_base,
+                evo_key=evo_key,
+                instance=instance,
+            )
         except ValueError as e:
             store.clear_pending()
-            return f"Nao foi possivel guardar: {e}"
-        store.clear_pending()
-        deleted = await try_delete_inbound_password_message(
-            record=record,
-            user_text=text,
-            should_treat_as_password=True,
-            evo=evo,
-            evo_base=evo_base,
-            evo_key=evo_key,
-            instance=instance,
-        )
-        confirm = f"Senha guardada para *{pending.label}*."
-        if deleted:
-            confirm += "\n\nApaguei a mensagem com a senha no WhatsApp por seguranca."
-        return confirm
+            return f"Não foi possível guardar: {e}"
+        finally:
+            store.clear_pending()
 
     store.clear_pending()
     return "Algo deu errado no cofre. Tente de novo."
@@ -364,7 +370,7 @@ async def _handle_retrieve_pick(
     matches = store.find_entries(label)
     if not matches:
         store.clear_pending()
-        return f"Nao encontrei senha para *{label}*."
+        return f"Não encontrei senha para *{label}*."
     store.clear_pending()
     secret = store.decrypt_entry(matches[0], master_key=master_key)
     return await _reply_with_secret(
@@ -379,10 +385,10 @@ async def _handle_retrieve_pick(
     )
 
 
-async def _start_retrieve(
+async def _handle_vault_retrieve(
     *,
     phone: str,
-    query: str,
+    label_query: str,
     store: PasswordVaultStore,
     master_key: str,
     evo: EvolutionClient,
@@ -390,20 +396,11 @@ async def _start_retrieve(
     evo_key: str,
     instance: str,
     messenger: StepMessenger | None,
-) -> str:
+) -> tuple[str, bool]:
+    """Retorna (mensagem, redact_assistant se a senha foi enviada no chat)."""
     labels = store.list_labels()
     if not labels:
-        return "Ainda nao ha senhas guardadas no seu cofre."
-
-    if _LIST_INTENT_RE.search(query) and not extract_vault_label_query(query):
-        lines = ["Senhas guardadas:", ""] + [f"• {label}" for label in labels[:30]]
-        if len(labels) > 30:
-            lines.append(f"\n(+ {len(labels) - 30} outras)")
-        lines.append("\nPara ver uma, diga por exemplo: *qual a senha do wifi*")
-        return "\n".join(lines)
-
-    label_query = extract_vault_label_query(query)
-    matches = store.find_entries(label_query) if label_query else []
+        return "Ainda não há senhas guardadas no seu cofre.", False
 
     if not label_query:
         if len(labels) == 1:
@@ -415,10 +412,13 @@ async def _start_retrieve(
                 candidates=labels[:10],
             )
             store.save_pending(pending)
-            return _format_pick_prompt(pending.candidates)
+            return _format_pick_prompt(pending.candidates), False
+
+    else:
+        matches = store.find_entries(label_query)
 
     if not matches:
-        return f"Nao encontrei senha para *{label_query or query}*."
+        return f"Não encontrei senha para *{label_query}*.", False
 
     if len(matches) > 1:
         pending = VaultPending(
@@ -427,22 +427,103 @@ async def _start_retrieve(
             candidates=[m.label for m in matches[:10]],
         )
         store.save_pending(pending)
-        return _format_pick_prompt(pending.candidates)
+        return _format_pick_prompt(pending.candidates), False
 
-    secret = store.decrypt_entry(matches[0], master_key=master_key)
-    return await _reply_with_secret(
+    await _reply_with_secret(
         phone=phone,
         label=matches[0].label,
-        secret=secret,
+        secret=store.decrypt_entry(matches[0], master_key=master_key),
         evo=evo,
         evo_base=evo_base,
         evo_key=evo_key,
         instance=instance,
         messenger=messenger,
     )
+    return "", True
 
 
-async def try_handle_password_vault_inbound(
+async def handle_vault_gemini_decision(
+    decision: dict[str, Any],
+    *,
+    phone: str,
+    user_text: str,
+    settings_key: str,
+    message_record: dict[str, Any] | None,
+    evo: EvolutionClient,
+    evo_base: str,
+    evo_key: str,
+    instance: str,
+    messenger: StepMessenger | None = None,
+) -> tuple[str, bool, bool]:
+    """
+    Executa vault_save / vault_retrieve / vault_list decidido pelo Gemini.
+    Retorna (texto_resposta, redact_user, redact_assistant).
+    """
+    action = str(decision.get("action") or "").strip().lower()
+    store = get_vault_store(phone)
+    master_key = vault_master_key(settings_key)
+    gemini_reply = str(decision.get("response") or "").strip()
+
+    if not vault_configured(settings_key):
+        store.clear_pending()
+        return _NOT_CONFIGURED_MSG, False, False
+
+    if action == "vault_list":
+        return _format_list_labels(store.list_labels()), False, False
+
+    if action == "vault_save":
+        label, secret = _vault_fields(decision)
+        if label and secret:
+            try:
+                msg = await _save_vault_entry(
+                    store=store,
+                    master_key=master_key,
+                    label=label,
+                    secret=secret,
+                    user_text=user_text,
+                    record=message_record,
+                    evo=evo,
+                    evo_base=evo_base,
+                    evo_key=evo_key,
+                    instance=instance,
+                )
+                return msg, True, False
+            except ValueError as e:
+                return f"Não foi possível guardar: {e}", False, False
+        if label and not secret:
+            store.save_pending(
+                VaultPending(mode="save", stage="secret", label=label)
+            )
+            return gemini_reply or _SAVE_SECRET_PROMPT, False, False
+        if secret and not label:
+            store.save_pending(
+                VaultPending(mode="save", stage="label", secret_prefill=secret)
+            )
+            return gemini_reply or _SAVE_LABEL_PROMPT, False, False
+        store.save_pending(VaultPending(mode="save", stage="label"))
+        return gemini_reply or _SAVE_LABEL_PROMPT, False, False
+
+    if action == "vault_retrieve":
+        label_query, _ = _vault_fields(decision)
+        msg, redact_asst = await _handle_vault_retrieve(
+            phone=phone,
+            label_query=label_query,
+            store=store,
+            master_key=master_key,
+            evo=evo,
+            evo_base=evo_base,
+            evo_key=evo_key,
+            instance=instance,
+            messenger=messenger,
+        )
+        if msg:
+            return msg, False, redact_asst
+        return gemini_reply or "Senha enviada.", False, True
+
+    return "Não entendi o pedido sobre o cofre de senhas.", False, False
+
+
+async def try_handle_password_vault_pending(
     phone: str,
     user_text: str,
     *,
@@ -454,17 +535,17 @@ async def try_handle_password_vault_inbound(
     instance: str,
 ) -> bool:
     """
-    Cofre de senhas dedicado (nao passa pelo Gemini).
-    Retorna True se a mensagem foi consumida.
+    Continua fluxo multi-passo do cofre (rotulo, senha, escolha na lista).
+    Retorna True se havia pendencia e a mensagem foi consumida.
     """
-    text = (user_text or "").strip()
     store = get_vault_store(phone)
     pending = store.load_pending()
+    if not pending:
+        return False
+
+    text = (user_text or "").strip()
     settings_key = getattr(settings, "vault_master_key", "")
     master_key = vault_master_key(settings_key)
-
-    if not pending and not detect_vault_save_intent(text) and not detect_vault_retrieve_intent(text):
-        return False
 
     if not evo_base or not evo_key or not instance:
         log.error("Cofre senhas sem Evolution phone=%s", phone)
@@ -484,13 +565,13 @@ async def try_handle_password_vault_inbound(
     async with TypingSession(
         evo, evo_base=evo_base, evo_key=evo_key, instance=instance, phone=phone
     ):
-        if pending and _CANCEL_RE.match(text):
+        if _CANCEL_RE.match(text):
             store.clear_pending()
             reply = "Ok, cancelado."
         elif not vault_configured(settings_key):
             store.clear_pending()
             reply = _NOT_CONFIGURED_MSG
-        elif pending and pending.mode == "save":
+        elif pending.mode == "save":
             was_secret = pending.stage == "secret"
             reply = await _handle_save_pending(
                 phone=phone,
@@ -506,27 +587,11 @@ async def try_handle_password_vault_inbound(
                 messenger=messenger,
             )
             redact_user = was_secret
-        elif pending and pending.mode == "retrieve_pick":
+        elif pending.mode == "retrieve_pick":
             reply = await _handle_retrieve_pick(
                 phone=phone,
                 text=text,
                 pending=pending,
-                store=store,
-                master_key=master_key,
-                evo=evo,
-                evo_base=evo_base,
-                evo_key=evo_key,
-                instance=instance,
-                messenger=messenger,
-            )
-            redact_assistant = messenger.sent_any
-        elif detect_vault_save_intent(text):
-            store.save_pending(VaultPending(mode="save", stage="label"))
-            reply = _SAVE_LABEL_PROMPT
-        else:
-            reply = await _start_retrieve(
-                phone=phone,
-                query=text,
                 store=store,
                 master_key=master_key,
                 evo=evo,

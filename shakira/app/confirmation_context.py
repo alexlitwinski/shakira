@@ -27,7 +27,7 @@ _DOOR_HINTS = (
     "portão",
     "portao social",
     "portão social",
-    "codigo de acesso",
+    "código de acesso",
     "senha para",
     "porta social",
     "porta principal",
@@ -37,9 +37,9 @@ _BOILER_HINTS = (
     "boiler",
     "aquec",
     "banho",
-    "agua do banho",
-    "agua quente",
-    "temperatura da agua",
+    "água do banho",
+    "água quente",
+    "temperatura da água",
 )
 
 
@@ -78,20 +78,20 @@ def augment_user_message_for_affirmative(
     if topic == "door":
         return (
             f"{base}\n\n"
-            "[Confirmacao do usuario] Sim — referente a sua ULTIMA mensagem sobre porta "
-            "(abrir/destrancar). Prossiga com a porta social se foi isso que voce ofereceu. "
-            "Nao execute acoes de boiler, banho ou outros assuntos antigos do historico."
+            "[Confirmação do usuário] Sim — referente à sua ÚLTIMA mensagem sobre porta "
+            "(abrir/destrancar). Prossiga com a porta social se foi isso que você ofereceu. "
+            "Não execute ações de boiler, banho ou outros assuntos antigos do histórico."
         )
     if topic == "boiler":
         return (
             f"{base}\n\n"
-            "[Confirmacao do usuario] Sim — referente a sua ULTIMA mensagem sobre boiler, "
-            "banho ou aquecer a agua. Ignore pedidos mais antigos sobre outros assuntos."
+            "[Confirmação do usuário] Sim — referente à sua ÚLTIMA mensagem sobre boiler, "
+            "banho ou aquecer a água. Ignore pedidos mais antigos sobre outros assuntos."
         )
     return (
         f"{base}\n\n"
-        "[Confirmacao do usuario] Sim — execute somente o que voce perguntou na mensagem "
-        "imediatamente anterior. Ignore cenarios ou pedidos mais antigos no historico."
+        "[Confirmação do usuário] Sim — execute somente o que você perguntou na mensagem "
+        "imediatamente anterior. Ignore cenários ou pedidos mais antigos no histórico."
     )
 
 

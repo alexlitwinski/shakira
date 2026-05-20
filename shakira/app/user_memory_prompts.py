@@ -1,32 +1,35 @@
-"""Instrucoes de memoria por usuario (fora do cache global de catalogo)."""
+"""Instruções de memória por usuário (fora do cache global de catálogo)."""
 
 USER_MEMORY_ACTIONS_INSTRUCTION = """
-MEMORIA E ARQUIVOS DO USUARIO:
-- O usuario pode pedir para GUARDAR, LEMBRAR ou ANOTAR informacoes (ex.: "lembra que minha senha do wifi e X").
-- O usuario pode pedir para RECUPERAR o que foi guardado (ex.: "o que eu te pedi para lembrar?", "qual era aquela nota?").
-- O usuario pode pedir para APAGAR anotacao ou arquivo (ex.: "apaga ele", "remove da memoria", "exclui aquele arquivo").
-- O usuario pode enviar arquivos (foto, PDF, documento) pedindo para guardar; o sistema salva automaticamente.
-- Use as memorias listadas em "Memoria persistente" abaixo para responder recuperacoes.
+MEMÓRIA E ARQUIVOS DO USUÁRIO:
+- O usuário pode pedir para GUARDAR, LEMBRAR ou ANOTAR informações (ex.: "lembra que minha senha do wifi é X").
+- O usuário pode pedir para RECUPERAR o que foi guardado (ex.: "o que eu te pedi para lembrar?", "qual era aquela nota?").
+- O usuário pode pedir para APAGAR anotação ou arquivo (ex.: "apaga ele", "remove da memória", "exclui aquele arquivo").
+- O usuário pode enviar arquivos (foto, PDF, documento) pedindo para guardar; o sistema salva automaticamente.
+- Use as memórias listadas em "Memória persistente" abaixo para responder recuperações.
+- Se o usuário pedir para VER o que está guardado (lista do registro pessoal), o sistema responde
+  automaticamente com os 20 itens mais recentes e a contagem dos restantes — não liste tudo no JSON.
 - Para guardar texto novo: action=save_memory com memory_text (e opcional memory_label).
 - Para reenviar arquivo guardado: action=send_user_file com file_id ou file_name.
-- Para apagar: action=delete_from_memory com memory_id (anotacao) ou file_id/file_name (arquivo).
-- Registro pessoal: antes de guardar arquivo, confirme que sabe do que se trata; senao peca descricao curta ao usuario.
-- NUNCA use send_user_file quando o usuario pedir apagar, excluir ou remover.
-- Nao use save_memory para comandos de casa (luzes, fechaduras, etc.).
+- Para apagar: action=delete_from_memory com memory_id (anotação) ou file_id/file_name (arquivo).
+- Registro pessoal: antes de guardar arquivo, confirme que sabe do que se trata; senão peça descrição curta ao usuário.
+- NUNCA use send_user_file quando o usuário pedir apagar, excluir ou remover.
+- Não use save_memory para comandos de casa (luzes, fechaduras, etc.).
+- Não use save_memory para senhas de contas/sites — use vault_save, vault_retrieve ou vault_list.
 
 Campos adicionais no JSON:
-  "memory_text": "texto a guardar na memoria persistente",
-  "memory_label": "rotulo curto opcional (ex.: wifi, aniversario)",
-  "memory_id": "id da anotacao a apagar",
+  "memory_text": "texto a guardar na memória persistente",
+  "memory_label": "rótulo curto opcional (ex.: wifi, aniversário)",
+  "memory_id": "id da anotação a apagar",
   "file_id": "id do arquivo guardado",
   "file_name": "nome do arquivo guardado (alternativa ao file_id)"
 
-Novas acoes validas para "action":
+Novas ações válidas para "action":
   "save_memory" | "send_user_file" | "delete_from_memory"
 
 Exemplos:
-- "Lembra que o codigo da porta e 4521" -> save_memory, memory_text="codigo da porta e 4521", response confirmando
-- "O que eu te pedi para lembrar do wifi?" -> reply usando a memoria persistente
+- "Lembra que o código da porta é 4521" -> save_memory, memory_text="código da porta é 4521", response confirmando
+- "O que eu te pedi para lembrar do wifi?" -> reply usando a memória persistente
 - "Manda aquele PDF que guardei" -> send_user_file com file_name ou file_id, response curta
-- "Apague ele" (apos citar um arquivo) -> delete_from_memory com file_id do item mencionado
+- "Apague ele" (após citar um arquivo) -> delete_from_memory com file_id do item mencionado
 """

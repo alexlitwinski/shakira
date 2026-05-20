@@ -76,7 +76,7 @@ def _log_config_dir_hint(target: Path) -> None:
 class SecurityConfig:
     require_password_for_services: list[str] = field(default_factory=list)
     password: str = ""
-    password_prompt: str = "Informe a senha para confirmar esta acao."
+    password_prompt: str = "Informe a senha para confirmar esta ação."
 
 
 @dataclass
@@ -195,7 +195,7 @@ class DevicesCatalog:
                         require_password_for_services=[str(x).strip() for x in rps if str(x).strip()],
                         password=str(s.get("password") or ""),
                         password_prompt=str(s.get("password_prompt") or "").strip()
-                        or "Informe a senha para confirmar esta acao.",
+                        or "Informe a senha para confirmar esta ação.",
                     )
                 defaults: dict[str, Any] = {}
                 raw_defaults = ent.get("service_defaults")
@@ -420,4 +420,4 @@ class DevicesCatalog:
         ent = self.get_entity(entity_id)
         if ent and ent.security and ent.security.password_prompt:
             return ent.security.password_prompt
-        return "Informe a senha para confirmar esta acao."
+        return "Informe a senha para confirmar esta ação."

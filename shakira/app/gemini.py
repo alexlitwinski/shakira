@@ -90,7 +90,7 @@ class GeminiAssistant:
         if user_memory_context.strip():
             if memory_in_cache:
                 memory_block = (
-                    "[Memoria persistente do usuario carregada no cache Gemini — "
+                    "[Memória persistente do usuário carregada no cache Gemini — "
                     "use o system instruction do cache.]\n\n"
                 )
             else:
@@ -123,7 +123,7 @@ Mensagem atual do usuario:
             log.exception("Gemini generate_content falhou")
             return {
                 "action": "reply",
-                "response": "Nao consegui processar agora. Tente de novo em instantes.",
+                "response": "Não consegui processar agora. Tente de novo em instantes.",
             }
         log.debug("Gemini decide OK (%.0fms)", (time.monotonic() - t0) * 1000.0)
 

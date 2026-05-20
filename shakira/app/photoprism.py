@@ -181,25 +181,25 @@ class UploadResult:
 
 
 def format_upload_user_message(result: UploadResult, *, album: str = "") -> str:
-    album_bit = f" no album *{album.strip()}*" if album.strip() else ""
+    album_bit = f" no álbum *{album.strip()}*" if album.strip() else ""
     count = max(result.files_uploaded, 1)
     if result.files_uploaded > 0 and result.import_processed:
         if count > 1:
             if result.has_video:
-                noun = f"{count} midias enviadas"
+                noun = f"{count} mídias enviadas"
             else:
                 noun = f"{count} fotos enviadas"
         elif result.has_video:
-            noun = "Video enviado"
+            noun = "Vídeo enviado"
         else:
             noun = "Foto enviada"
         return f"{noun} ao PhotoPrism{album_bit}."
     if result.files_uploaded > 0:
         return (
-            "O PhotoPrism recebeu o arquivo, mas a importacao nao foi concluida. "
+            "O PhotoPrism recebeu o arquivo, mas a importação não foi concluída. "
             "Tente novamente em instantes."
         )
-    return "Nao foi possivel confirmar o envio ao PhotoPrism."
+    return "Não foi possível confirmar o envio ao PhotoPrism."
 
 
 def expand_city_variants(city: str, extra: list[str] | None = None) -> list[str]:

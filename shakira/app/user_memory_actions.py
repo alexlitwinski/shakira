@@ -1,4 +1,4 @@
-"""Acoes e fallbacks da memoria pessoal (apagar, etc.)."""
+"""Acoes e fallbacks da memoria pessoal (apagar, listar, etc.)."""
 
 from __future__ import annotations
 
@@ -6,8 +6,26 @@ import re
 from typing import Any
 
 from app.conversation_history import HistoryEntry
-from app.user_memory import UserMemoryStore, get_store
+from app.user_memory import MemoryEntry, StoredFile, UserMemoryStore, get_store
 from app.user_memory_cache import invalidate_user_memory_cache
+
+REGISTRY_LIST_DISPLAY_LIMIT = 20
+
+_LIST_REGISTRY_INTENT_RE = re.compile(
+    r"(?:"
+    r"\b(?:listar|mostrar|mostre|mostra|quais|ver)\b.*\b(?:"
+    r"guardad|registro\s+pessoal|mem[oó]ria\s+pessoal|"
+    r"no\s+registro|na\s+mem[oó]ria\s+pessoal"
+    r")\b"
+    r"|"
+    r"\b(?:registro\s+pessoal|mem[oó]ria\s+pessoal)\b.*\b(?:"
+    r"listar|mostrar|itens|conte[uú]do|tem\s+guardado"
+    r")\b"
+    r"|"
+    r"\bo\s+que\s+(?:eu\s+)?(?:tenho\s+)?guardad"
+    r")",
+    re.IGNORECASE,
+)
 
 _DELETE_WORDS = (
     "apaga",
@@ -38,6 +56,99 @@ def is_delete_memory_intent(text: str) -> bool:
     if not lower:
         return False
     return any(w in lower for w in _DELETE_WORDS)
+
+
+def is_list_personal_registry_intent(text: str) -> bool:
+    """Pedido para ver o que esta guardado no registro pessoal (nao recuperar um item)."""
+    t = (text or "").strip()
+    if not t or is_delete_memory_intent(t):
+        return False
+    if re.search(
+        r"\b(?:manda|envia|reenvia|mande|envie|recupera|recupere|busca|busque|pega|pegue)\b",
+        t,
+        re.I,
+    ):
+        return False
+    if re.search(r"\b(?:pdf|arquivo|foto|imagem|documento|anexo)\b", t, re.I) and re.search(
+        r"\b(?:manda|envia|reenvia|aquele|aquela|esse|essa|o\s+que\s+guardei)\b",
+        t,
+        re.I,
+    ):
+        return False
+    return bool(_LIST_REGISTRY_INTENT_RE.search(t))
+
+
+def _format_file_display_line(meta: StoredFile) -> str:
+    line = meta.filename
+    if meta.label:
+        return f"{line} ({meta.label})"
+    if meta.caption:
+        cap = meta.caption.strip()
+        if len(cap) > 80:
+            cap = cap[:80] + "..."
+        return f"{line} (legenda: {cap})"
+    return line
+
+
+def _format_memory_display_line(entry: MemoryEntry) -> str:
+    if entry.label:
+        return entry.label
+    text = entry.text.strip()
+    if len(text) > 80:
+        return text[:80] + "..."
+    return text
+
+
+def _unified_display_items(store: UserMemoryStore) -> list[tuple[str, str, str]]:
+    """Ordem unificada (mais recente primeiro), alinhada com a listagem ao usuario."""
+    rows: list[tuple[str, str, str, str]] = []
+    for f in store.list_files():
+        rows.append((f.created_at, f.id, f.filename, ""))
+    for m in store.list_memories():
+        rows.append((m.created_at, "", "", m.id))
+    rows.sort(key=lambda r: r[0], reverse=True)
+    return [(fid, fname, mid) for _at, fid, fname, mid in rows]
+
+
+def format_personal_registry_list(
+    store: UserMemoryStore,
+    *,
+    limit: int = REGISTRY_LIST_DISPLAY_LIMIT,
+) -> str:
+    """Lista os itens mais recentes do registro pessoal e indica quantos ha alem do limite."""
+    unified = _unified_display_items(store)
+    if not unified:
+        return "Seu registro pessoal está vazio — ainda não há anotações nem arquivos guardados."
+
+    files_by_id = {f.id: f for f in store.list_files()}
+    mems_by_id = {m.id: m for m in store.list_memories()}
+
+    lines = [
+        "Itens no seu registro pessoal (mais recentes primeiro):",
+        "",
+    ]
+    for i, (fid, _fname, mid) in enumerate(unified[:limit], start=1):
+        if fid and fid in files_by_id:
+            lines.append(f"{i}. {_format_file_display_line(files_by_id[fid])}")
+        elif mid and mid in mems_by_id:
+            lines.append(f"{i}. {_format_memory_display_line(mems_by_id[mid])}")
+
+    extra = len(unified) - min(len(unified), limit)
+    if extra > 0:
+        lines.append("")
+        lines.append(f"(+ {extra} registros mais antigos)")
+    lines.append("")
+    lines.append(
+        "Para reenviar um arquivo, diga o nome ou o número da lista. "
+        "Para apagar, diga por exemplo: *apague 2*."
+    )
+    return "\n".join(lines)
+
+
+def try_personal_registry_list_reply(phone: str, user_text: str) -> str | None:
+    if not is_list_personal_registry_intent(user_text):
+        return None
+    return format_personal_registry_list(get_store(phone))
 
 
 def _is_valid_store_id(value: str) -> bool:
@@ -91,16 +202,6 @@ def last_assistant_text(
         elif in_assistant and parts:
             parts.append(line)
     return "\n".join(parts)
-
-
-def _unified_display_items(store: UserMemoryStore) -> list[tuple[str, str, str]]:
-    """Ordem unificada (arquivos, depois anotacoes) como listas do assistente."""
-    out: list[tuple[str, str, str]] = []
-    for f in store.list_files():
-        out.append((f.id, f.filename, ""))
-    for m in store.list_memories():
-        out.append(("", "", m.id))
-    return out
 
 
 def _match_line_to_target(store: UserMemoryStore, line: str) -> tuple[str, str, str]:
@@ -301,14 +402,14 @@ def try_memory_delete_override(
             "file_id": fid,
             "file_name": fname,
             "memory_id": mid,
-            "response": "Vou apagar da sua memoria pessoal.",
+            "response": "Vou apagar da sua memória pessoal.",
         }
 
     return {
         "action": "reply",
         "response": (
-            "Nao entendi qual item apagar. Diga o numero da lista, o nome do arquivo "
-            "ou peca para listar o que esta na sua memoria pessoal."
+            "Não entendi qual item apagar. Diga o número da lista, o nome do arquivo "
+            "ou peça para listar o que está na sua memória pessoal."
         ),
     }
 
@@ -325,18 +426,18 @@ def handle_delete_from_memory(decision: dict[str, Any], phone: str) -> str:
         label = next((m.label or m.text[:40] for m in mems if m.id == memory_id), memory_id)
         if store.delete_memory(memory_id):
             invalidate_user_memory_cache(store)
-            return confirm or f"Apaguei a anotacao «{label}» da sua memoria pessoal."
-        return "Nao encontrei essa anotacao na sua memoria."
+            return confirm or f"Apaguei a anotação «{label}» da sua memória pessoal."
+        return "Não encontrei essa anotação na sua memória."
 
     if file_id or file_name:
         hit = store.find_file(file_id=file_id, filename=file_name)
         if not hit:
-            return "Nao encontrei esse arquivo na sua memoria pessoal."
+            return "Não encontrei esse arquivo na sua memória pessoal."
         meta, _path = hit
         display = meta.label or meta.filename
         if store.delete_file(meta.id):
             invalidate_user_memory_cache(store)
-            return confirm or f"Apaguei «{display}» da sua memoria pessoal."
-        return "Nao consegui apagar o arquivo."
+            return confirm or f"Apaguei «{display}» da sua memória pessoal."
+        return "Não consegui apagar o arquivo."
 
-    return confirm or "Nao entendi o que devo apagar da memoria."
+    return confirm or "Não entendi o que devo apagar da memória."

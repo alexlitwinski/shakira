@@ -221,9 +221,9 @@ def build_media_choice_prompt(
 
     n = gallery_count
     if has_video and n > 1:
-        kind = "fotos e videos"
+        kind = "fotos e vídeos"
     elif has_video:
-        kind = "video"
+        kind = "vídeo"
     elif n > 1:
         kind = f"{n} fotos"
     else:
@@ -248,7 +248,7 @@ def build_pending_append_notice(
             "Responda *sim* ou *guardar* quando terminar."
         )
     if has_video:
-        kind = "midias"
+        kind = "mídias"
     elif gallery_count > 1:
         kind = "fotos"
     else:
@@ -277,15 +277,15 @@ def build_pending_progress_message(
         album_name = album.strip()
         if count > 1:
             if has_video:
-                base = f"Enviando {count} midias ao PhotoPrism"
+                base = f"Enviando {count} mídias ao PhotoPrism"
             else:
                 base = f"Enviando {count} fotos ao PhotoPrism"
         elif has_video:
-            base = "Enviando o video ao PhotoPrism"
+            base = "Enviando o vídeo ao PhotoPrism"
         else:
             base = "Enviando a foto ao PhotoPrism"
         if album_name:
-            return f"{base} (album *{album_name}*)..."
+            return f"{base} (álbum *{album_name}*)..."
         return f"{base}..."
     if choice == "personal":
         if count > 1:
@@ -448,7 +448,7 @@ def build_pending_clarification(*, supports_gallery: bool) -> str:
     if supports_gallery:
         return (
             "Não entendi. Responda *pessoal* (arquivo seu) "
-            "ou *galeria* (fotos e videos da casa)."
+            "ou *galeria* (fotos e vídeos da casa)."
         )
     return (
         "Não entendi. Responda *sim* ou *guardar* para guardar no seu arquivo, "
