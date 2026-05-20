@@ -91,7 +91,8 @@ from app.pending_media import (
     is_placeholder_user_text,
     media_has_explicit_intent,
     pending_gallery_stats,
-    schedule_media_batch_notification,
+    _enqueue_media_batch_notification,
+    _media_batch_lock,
 )
 from app.user_friendly import (
     format_action_in_progress,
@@ -1317,8 +1318,38 @@ async def handle_ambiguous_inbound_media(
     raw, mimetype, fname = downloaded
     media = inbound.media
     store = get_store(inbound.phone)
-    stage_before = store.get_pending_stage()
-    prompt_already_sent = stage_before == "destination"
+
+    if is_gallery_media(media.mediatype, mimetype or media.mimetype):
+        async with _media_batch_lock(inbound.phone):
+            stage_before = store.get_pending_stage()
+            prompt_already_sent = stage_before == "destination"
+            try:
+                _pending, total = store.append_pending_file(
+                    raw,
+                    filename=fname or media.filename,
+                    mime_type=mimetype or media.mimetype,
+                    mediatype=media.mediatype,
+                    caption=media.caption,
+                )
+            except ValueError as e:
+                return f"Nao foi possivel receber o arquivo: {e}"
+
+            if stage_before in (None, "collecting", "destination"):
+                store.set_pending_stage("collecting")
+            _enqueue_media_batch_notification(
+                inbound.phone,
+                prompt_already_sent=prompt_already_sent,
+                settings=settings,
+                evo=evo,
+                instance=instance,
+            )
+        log.info(
+            "Midia em lote phone=%s total=%s prompt_ja_enviado=%s",
+            inbound.phone,
+            total,
+            prompt_already_sent,
+        )
+        return ""
 
     try:
         _pending, total = store.append_pending_file(
@@ -1330,24 +1361,6 @@ async def handle_ambiguous_inbound_media(
         )
     except ValueError as e:
         return f"Nao foi possivel receber o arquivo: {e}"
-
-    if is_gallery_media(media.mediatype, mimetype or media.mimetype):
-        if stage_before in (None, "collecting", "destination"):
-            store.set_pending_stage("collecting")
-        await schedule_media_batch_notification(
-            inbound.phone,
-            prompt_already_sent=prompt_already_sent,
-            settings=settings,
-            evo=evo,
-            instance=instance,
-        )
-        log.info(
-            "Midia em lote phone=%s total=%s prompt_ja_enviado=%s",
-            inbound.phone,
-            total,
-            prompt_already_sent,
-        )
-        return ""
 
     pending_items = store.get_pending_files()
     pending_files = [p for p, _ in pending_items]
