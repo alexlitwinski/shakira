@@ -34,7 +34,7 @@ from app.cameras_yaml_io import (
     write_yaml_file as write_cameras_yaml_file,
 )
 from app.devices_yaml_io import read_yaml_file, validate_yaml_content, write_yaml_file
-from app.evolution import EvolutionClient
+from app.entities_browser import build_entities_payload
 from app.gemini_cache import ensure_catalog_cache
 from app.handlers import handle_evolution_payload
 from app.homeassistant import HomeAssistantClient
@@ -356,6 +356,20 @@ async def get_scheduled_responses_status(request: Request) -> dict[str, Any]:
     """Estado do executor de respostas agendadas (painel / diagnostico)."""
     runner: ScheduledResponsesRunner = request.app.state.scheduled_runner
     return runner.status_snapshot()
+
+
+@app.get("/api/entities")
+async def api_entities(request: Request, refresh: bool = False) -> dict[str, Any]:
+    """Lista entidades HA para o browser do painel (somente leitura)."""
+    ha: HomeAssistantClient = request.app.state.ha
+    settings: AppSettings = request.app.state.settings
+    catalog: DevicesCatalog = request.app.state.catalog
+    return await build_entities_payload(
+        ha=ha,
+        settings=settings,
+        catalog=catalog,
+        refresh=refresh,
+    )
 
 
 async def _run_webhook(

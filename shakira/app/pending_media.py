@@ -141,7 +141,25 @@ def extract_album_name(text: str) -> str:
     return ""
 
 
-def classify_pending_reply(text: str, *, is_image: bool) -> str:
+def is_gallery_media(mediatype: str, mime_type: str = "") -> bool:
+    """Foto ou video elegivel para PhotoPrism."""
+    if mediatype in ("image", "video"):
+        return True
+    mime = (mime_type or "").split(";", 1)[0].strip().lower()
+    return mime.startswith("image/") or mime.startswith("video/")
+
+
+def pending_gallery_stats(items: list) -> tuple[int, bool, int]:
+    """Retorna (total, has_video, gallery_count) a partir de PendingFile."""
+    total = len(items)
+    gallery = [p for p in items if is_gallery_media(p.mediatype, p.mime_type)]
+    has_video = any(
+        p.mediatype == "video" or (p.mime_type or "").startswith("video/") for p in gallery
+    )
+    return total, has_video, len(gallery)
+
+
+def classify_pending_reply(text: str, *, supports_gallery: bool) -> str:
     """
     personal | photoprism | cancel | unknown
     """
@@ -156,22 +174,61 @@ def classify_pending_reply(text: str, *, is_image: bool) -> str:
         return "personal"
     if lower in ("sim", "s", "yes", "ok", "pode"):
         return "personal"
-    if is_image and re.search(r"\b(?:álbum|album)\b", lower):
+    if supports_gallery and re.search(r"\b(?:álbum|album)\b", lower):
         return "photoprism"
     return "unknown"
 
 
-def build_media_choice_prompt(*, is_image: bool, filename: str = "") -> str:
-    if is_image:
+def build_media_choice_prompt(
+    *,
+    total_count: int = 1,
+    gallery_count: int = 0,
+    has_video: bool = False,
+) -> str:
+    if gallery_count <= 0:
         return (
-            "Recebi uma foto. Quer guardar no seu *registro pessoal* "
-            "(ingressos, convites, documentos) ou na *galeria de fotos da casa*?\n\n"
-            "Responda *pessoal* ou *galeria*."
+            "Recebi um arquivo. Quer guardar no seu *registro pessoal* "
+            "para recuperar depois (ex.: ingresso ou convite)?\n\n"
+            "Responda *sim* ou *guardar*."
         )
+
+    n = gallery_count
+    if has_video and n > 1:
+        kind = "fotos e videos"
+    elif has_video:
+        kind = "video"
+    elif n > 1:
+        kind = f"{n} fotos"
+    else:
+        kind = "uma foto"
+
     return (
-        "Recebi um arquivo. Quer guardar no seu *registro pessoal* "
-        "para recuperar depois (ex.: ingresso ou convite)?\n\n"
-        "Responda *sim* ou *guardar*."
+        f"Recebi {kind}. Quer guardar no seu *registro pessoal* "
+        "(ingressos, convites, documentos) ou na *galeria da casa* (PhotoPrism)?\n\n"
+        "Responda *pessoal* ou *galeria*."
+    )
+
+
+def build_pending_append_notice(
+    *,
+    total_count: int,
+    gallery_count: int,
+    has_video: bool,
+) -> str:
+    if gallery_count <= 0:
+        return (
+            f"Acrescentei mais um arquivo. Total: *{total_count}*. "
+            "Responda *sim* ou *guardar* quando terminar."
+        )
+    if has_video:
+        kind = "midias"
+    elif gallery_count > 1:
+        kind = "fotos"
+    else:
+        kind = "foto"
+    return (
+        f"Acrescentei mais uma {kind}. Total na fila: *{total_count}*. "
+        "Responda *pessoal* ou *galeria* quando terminar de enviar."
     )
 
 
@@ -182,13 +239,30 @@ def build_personal_description_prompt() -> str:
     )
 
 
-def build_pending_progress_message(choice: str, *, album: str = "") -> str:
+def build_pending_progress_message(
+    choice: str,
+    *,
+    album: str = "",
+    count: int = 1,
+    has_video: bool = False,
+) -> str:
     if choice == "photoprism":
         album_name = album.strip()
+        if count > 1:
+            if has_video:
+                base = f"Enviando {count} midias ao PhotoPrism"
+            else:
+                base = f"Enviando {count} fotos ao PhotoPrism"
+        elif has_video:
+            base = "Enviando o video ao PhotoPrism"
+        else:
+            base = "Enviando a foto ao PhotoPrism"
         if album_name:
-            return f"Enviando a foto ao PhotoPrism (album *{album_name}*)..."
-        return "Enviando a foto ao PhotoPrism..."
+            return f"{base} (album *{album_name}*)..."
+        return f"{base}..."
     if choice == "personal":
+        if count > 1:
+            return f"Guardando {count} arquivos no seu registro pessoal..."
         return "Guardando no seu registro pessoal..."
     return ""
 
@@ -197,11 +271,11 @@ def build_pending_processing_wait() -> str:
     return "Ainda estou processando seu arquivo. Aguarde um instante."
 
 
-def build_pending_clarification(*, is_image: bool) -> str:
-    if is_image:
+def build_pending_clarification(*, supports_gallery: bool) -> str:
+    if supports_gallery:
         return (
             "Não entendi. Responda *pessoal* (arquivo seu) "
-            "ou *galeria* (fotos da casa)."
+            "ou *galeria* (fotos e videos da casa)."
         )
     return (
         "Não entendi. Responda *sim* ou *guardar* para guardar no seu arquivo, "

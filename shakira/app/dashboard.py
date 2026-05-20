@@ -1,4 +1,4 @@
-"""Pagina HTML do painel Ingress (status + editor shakira_devices.yaml)."""
+"""Pagina HTML do painel Ingress (status + entidades HA + editores YAML)."""
 
 from __future__ import annotations
 
@@ -215,6 +215,74 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     }
     .tag.time { background: rgba(245, 197, 66, 0.12); color: var(--warn); }
     .tag.action { background: rgba(96, 165, 250, 0.12); color: #93c5fd; }
+    .tag.catalog { background: rgba(61, 214, 140, 0.15); color: var(--ok); }
+    .entities-card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 1rem;
+    }
+    .entities-filters {
+      display: grid;
+      gap: 0.65rem;
+      margin-bottom: 0.85rem;
+    }
+    @media (min-width: 720px) {
+      .entities-filters {
+        grid-template-columns: 1.4fr 1fr 1fr 1fr auto;
+        align-items: end;
+      }
+    }
+    .filter-field label {
+      display: block;
+      font-size: 0.72rem;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.03em;
+      margin-bottom: 0.25rem;
+    }
+    .filter-field input,
+    .filter-field select {
+      width: 100%;
+      background: #0a0e14;
+      border: 1px solid var(--border);
+      color: var(--text);
+      border-radius: 8px;
+      padding: 0.45rem 0.6rem;
+      font-size: 0.85rem;
+    }
+    .filter-check {
+      display: flex;
+      align-items: center;
+      gap: 0.45rem;
+      font-size: 0.85rem;
+      color: var(--muted);
+      padding-bottom: 0.35rem;
+    }
+    .filter-check input { accent-color: var(--accent); }
+    .entities-toolbar {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.5rem;
+      align-items: center;
+      margin-bottom: 0.75rem;
+    }
+    .entities-count { font-size: 0.85rem; color: var(--muted); margin-left: auto; }
+    .entities-table-wrap {
+      max-height: 62vh;
+      overflow: auto;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+    }
+    .entities-table { margin: 0; }
+    .entities-table tbody tr:hover { background: rgba(255, 255, 255, 0.03); }
+    .entities-table tbody tr.selected { background: rgba(37, 211, 102, 0.08); }
+    .entities-table td.state-cell { font-family: "Cascadia Code", "Consolas", monospace; font-size: 0.78rem; }
+    .entities-table .btn-copy-row {
+      padding: 0.2rem 0.5rem;
+      font-size: 0.75rem;
+    }
+    .entities-loading { color: var(--muted); font-size: 0.9rem; padding: 1rem 0; }
   </style>
 </head>
 <body>
@@ -229,6 +297,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 
     <nav class="tabs">
       <button type="button" class="tab active" data-tab="status">Status</button>
+      <button type="button" class="tab" data-tab="entities">Entidades HA</button>
       <button type="button" class="tab" data-tab="yaml-devices">shakira_devices.yaml</button>
       <button type="button" class="tab" data-tab="yaml-cameras">shakira_cameras.yaml</button>
       <button type="button" class="tab" data-tab="yaml-alerts">shakira_alerts.yaml</button>
@@ -244,6 +313,43 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <div class="grid" id="grid"></div>
       <h2 class="section-title">Agendamentos pendentes (avisos e acoes)</h2>
       <div class="pending-card" id="scheduled-pending"></div>
+    </section>
+
+    <section id="panel-entities" class="panel">
+      <div class="entities-card">
+        <div class="entities-filters">
+          <div class="filter-field">
+            <label for="ent-filter-text">Buscar</label>
+            <input type="search" id="ent-filter-text" placeholder="entity_id ou nome…" autocomplete="off" />
+          </div>
+          <div class="filter-field">
+            <label for="ent-filter-domain">Tipo (dominio)</label>
+            <select id="ent-filter-domain"><option value="">Todos</option></select>
+          </div>
+          <div class="filter-field">
+            <label for="ent-filter-platform">Integracao</label>
+            <select id="ent-filter-platform"><option value="">Todas</option></select>
+          </div>
+          <div class="filter-field">
+            <label for="ent-filter-state">Estado</label>
+            <input type="text" id="ent-filter-state" placeholder="ex.: on, off, open…" autocomplete="off" />
+          </div>
+          <label class="filter-check">
+            <input type="checkbox" id="ent-filter-catalog" />
+            So no catalogo Shakira
+          </label>
+        </div>
+        <div class="entities-toolbar">
+          <button type="button" id="btn-entities-refresh">Atualizar do HA</button>
+          <button type="button" id="btn-entities-copy" disabled>Copiar selecionados</button>
+          <button type="button" id="btn-entities-select-visible">Selecionar visiveis</button>
+          <button type="button" id="btn-entities-clear">Limpar selecao</button>
+          <span class="entities-count" id="entities-count">Carregando…</span>
+        </div>
+        <div class="entities-table-wrap" id="entities-table-wrap">
+          <p class="entities-loading" id="entities-loading">Carregando entidades…</p>
+        </div>
+      </div>
     </section>
 
     <section id="panel-yaml-devices" class="panel">
@@ -319,6 +425,11 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     };
     const yamlDirty = { devices: false, cameras: false, alerts: false };
     const yamlLoaded = { devices: false, cameras: false, alerts: false };
+    let entitiesLoaded = false;
+    let entitiesAll = [];
+    let entitiesVisible = [];
+    const entitiesSelected = new Set();
+    let entitiesFilterTimer = null;
 
     function esc(s) {
       const d = document.createElement("div");
@@ -343,6 +454,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         if (tab === "yaml-devices" && !yamlLoaded.devices) loadYamlEditor("devices");
         if (tab === "yaml-cameras" && !yamlLoaded.cameras) loadYamlEditor("cameras");
         if (tab === "yaml-alerts" && !yamlLoaded.alerts) loadYamlEditor("alerts");
+        if (tab === "entities" && !entitiesLoaded) loadEntities(false);
       });
     });
 
@@ -524,6 +636,175 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       });
     });
     document.getElementById("btn-refresh").addEventListener("click", loadStatus);
+
+    function fillEntitySelect(selectId, values, emptyLabel) {
+      const sel = document.getElementById(selectId);
+      const current = sel.value;
+      sel.innerHTML = '<option value="">' + esc(emptyLabel) + '</option>' +
+        values.map(function(v) {
+          return '<option value="' + esc(v) + '">' + esc(v) + '</option>';
+        }).join("");
+      if (values.indexOf(current) >= 0) sel.value = current;
+    }
+
+    function entityFilterValues() {
+      return {
+        text: (document.getElementById("ent-filter-text").value || "").trim().toLowerCase(),
+        domain: document.getElementById("ent-filter-domain").value || "",
+        platform: document.getElementById("ent-filter-platform").value || "",
+        state: (document.getElementById("ent-filter-state").value || "").trim().toLowerCase(),
+        catalogOnly: document.getElementById("ent-filter-catalog").checked
+      };
+    }
+
+    function filterEntities(list) {
+      const f = entityFilterValues();
+      return list.filter(function(ent) {
+        if (f.domain && ent.domain !== f.domain) return false;
+        if (f.platform && ent.platform !== f.platform) return false;
+        if (f.catalogOnly && !ent.in_catalog) return false;
+        if (f.state && String(ent.state || "").toLowerCase().indexOf(f.state) < 0) return false;
+        if (f.text) {
+          const hay = (ent.entity_id + " " + (ent.friendly_name || "")).toLowerCase();
+          if (hay.indexOf(f.text) < 0) return false;
+        }
+        return true;
+      });
+    }
+
+    function updateEntitiesCount() {
+      const el = document.getElementById("entities-count");
+      const sel = entitiesSelected.size;
+      el.textContent = entitiesVisible.length + " visiveis de " + entitiesAll.length +
+        (sel ? " · " + sel + " selecionada(s)" : "");
+      document.getElementById("btn-entities-copy").disabled = sel === 0;
+    }
+
+    function renderEntitiesTable() {
+      const wrap = document.getElementById("entities-table-wrap");
+      entitiesVisible = filterEntities(entitiesAll);
+      updateEntitiesCount();
+
+      if (!entitiesVisible.length) {
+        wrap.innerHTML = '<p class="entities-loading">Nenhuma entidade corresponde aos filtros.</p>';
+        return;
+      }
+
+      const allVisibleSelected = entitiesVisible.length > 0 &&
+        entitiesVisible.every(function(ent) { return entitiesSelected.has(ent.entity_id); });
+
+      const rows = entitiesVisible.map(function(ent) {
+        const checked = entitiesSelected.has(ent.entity_id) ? " checked" : "";
+        const rowClass = checked ? " selected" : "";
+        const catalogBadge = ent.in_catalog
+          ? ' <span class="tag catalog">catalogo</span>' : "";
+        const platform = ent.platform ? esc(ent.platform) : '<span class="meta">—</span>';
+        const deviceClass = ent.device_class ? esc(ent.device_class) : '<span class="meta">—</span>';
+        const name = ent.friendly_name ? esc(ent.friendly_name) : '<span class="meta">—</span>';
+        return '<tr class="' + rowClass.trim() + '" data-eid="' + esc(ent.entity_id) + '">' +
+          '<td><input type="checkbox" class="ent-row-check"' + checked + ' aria-label="Selecionar"></td>' +
+          '<td class="mono">' + esc(ent.entity_id) + catalogBadge + '</td>' +
+          '<td>' + name + '</td>' +
+          '<td>' + esc(ent.domain) + '</td>' +
+          '<td>' + platform + '</td>' +
+          '<td>' + deviceClass + '</td>' +
+          '<td class="state-cell">' + esc(ent.state) + '</td>' +
+          '<td><button type="button" class="btn-copy-row" data-eid="' + esc(ent.entity_id) + '">Copiar</button></td>' +
+          '</tr>';
+      }).join("");
+
+      wrap.innerHTML = '<table class="pending-table entities-table"><thead><tr>' +
+        '<th><input type="checkbox" id="ent-check-all"' + (allVisibleSelected ? " checked" : "") + ' aria-label="Selecionar visiveis"></th>' +
+        '<th>Entity ID</th><th>Nome</th><th>Tipo</th><th>Integracao</th><th>Device class</th><th>Estado</th><th></th>' +
+        '</tr></thead><tbody>' + rows + '</tbody></table>';
+
+      document.getElementById("ent-check-all").addEventListener("change", function(ev) {
+        if (ev.target.checked) {
+          entitiesVisible.forEach(function(ent) { entitiesSelected.add(ent.entity_id); });
+        } else {
+          entitiesVisible.forEach(function(ent) { entitiesSelected.delete(ent.entity_id); });
+        }
+        renderEntitiesTable();
+      });
+
+      wrap.querySelectorAll(".ent-row-check").forEach(function(cb) {
+        cb.addEventListener("change", function(ev) {
+          const tr = ev.target.closest("tr");
+          const eid = tr && tr.getAttribute("data-eid");
+          if (!eid) return;
+          if (ev.target.checked) entitiesSelected.add(eid);
+          else entitiesSelected.delete(eid);
+          renderEntitiesTable();
+        });
+      });
+
+      wrap.querySelectorAll(".btn-copy-row").forEach(function(btn) {
+        btn.addEventListener("click", function() {
+          const eid = btn.getAttribute("data-eid");
+          if (eid) copyEntityIds([eid]);
+        });
+      });
+    }
+
+    async function copyEntityIds(ids) {
+      const text = ids.join("\\n");
+      try {
+        await navigator.clipboard.writeText(text);
+        showMsg(ids.length === 1
+          ? "Copiado: " + ids[0]
+          : ids.length + " entity_id(s) copiados.", "ok");
+      } catch (e) {
+        showMsg("Nao foi possivel copiar: " + e.message, "error");
+      }
+    }
+
+    function scheduleEntitiesFilter() {
+      if (entitiesFilterTimer) clearTimeout(entitiesFilterTimer);
+      entitiesFilterTimer = setTimeout(renderEntitiesTable, 200);
+    }
+
+    async function loadEntities(refresh) {
+      const wrap = document.getElementById("entities-table-wrap");
+      wrap.innerHTML = '<p class="entities-loading">Carregando entidades…</p>';
+      document.getElementById("entities-count").textContent = "Carregando…";
+      try {
+        const url = "api/entities" + (refresh ? "?refresh=true" : "");
+        const r = await fetch(url, { headers: { Accept: "application/json" } });
+        if (!r.ok) throw new Error("HTTP " + r.status);
+        const data = await r.json();
+        entitiesAll = data.entities || [];
+        entitiesLoaded = true;
+        fillEntitySelect("ent-filter-domain", data.domains || [], "Todos");
+        fillEntitySelect("ent-filter-platform", data.platforms || [], "Todas");
+        renderEntitiesTable();
+        if (refresh) showMsg("Lista atualizada do Home Assistant.", "ok");
+      } catch (e) {
+        wrap.innerHTML = '<p class="entities-loading">Erro ao carregar entidades.</p>';
+        showMsg("Nao foi possivel carregar entidades: " + e.message, "error");
+      }
+    }
+
+    ["ent-filter-text", "ent-filter-state"].forEach(function(id) {
+      document.getElementById(id).addEventListener("input", scheduleEntitiesFilter);
+    });
+    ["ent-filter-domain", "ent-filter-platform", "ent-filter-catalog"].forEach(function(id) {
+      document.getElementById(id).addEventListener("change", renderEntitiesTable);
+    });
+    document.getElementById("btn-entities-refresh").addEventListener("click", function() {
+      loadEntities(true);
+    });
+    document.getElementById("btn-entities-copy").addEventListener("click", function() {
+      if (!entitiesSelected.size) return;
+      copyEntityIds(Array.from(entitiesSelected).sort());
+    });
+    document.getElementById("btn-entities-select-visible").addEventListener("click", function() {
+      entitiesVisible.forEach(function(ent) { entitiesSelected.add(ent.entity_id); });
+      renderEntitiesTable();
+    });
+    document.getElementById("btn-entities-clear").addEventListener("click", function() {
+      entitiesSelected.clear();
+      renderEntitiesTable();
+    });
 
     loadStatus();
     setInterval(loadStatus, 30000);

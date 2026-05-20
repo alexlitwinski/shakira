@@ -30,6 +30,12 @@ _MIME_TO_EXT: dict[str, str] = {
     "image/webp": ".webp",
     "image/heic": ".heic",
     "image/heif": ".heif",
+    "video/mp4": ".mp4",
+    "video/quicktime": ".mov",
+    "video/webm": ".webm",
+    "video/3gpp": ".3gp",
+    "video/x-msvideo": ".avi",
+    "video/x-matroska": ".mkv",
 }
 _EXT_TO_MIME: dict[str, str] = {
     ".jpg": "image/jpeg",
@@ -39,6 +45,12 @@ _EXT_TO_MIME: dict[str, str] = {
     ".webp": "image/webp",
     ".heic": "image/heic",
     ".heif": "image/heif",
+    ".mp4": "video/mp4",
+    ".mov": "video/quicktime",
+    ".webm": "video/webm",
+    ".3gp": "video/3gpp",
+    ".avi": "video/x-msvideo",
+    ".mkv": "video/x-matroska",
 }
 
 DEFAULT_THUMB_SIZE = "fit_720"
@@ -165,12 +177,23 @@ class UploadResult:
     files_uploaded: int
     import_processed: bool
     photos_approved: int
+    has_video: bool = False
 
 
 def format_upload_user_message(result: UploadResult, *, album: str = "") -> str:
     album_bit = f" no album *{album.strip()}*" if album.strip() else ""
+    count = max(result.files_uploaded, 1)
     if result.files_uploaded > 0 and result.import_processed:
-        return f"Foto enviada ao PhotoPrism{album_bit}."
+        if count > 1:
+            if result.has_video:
+                noun = f"{count} midias enviadas"
+            else:
+                noun = f"{count} fotos enviadas"
+        elif result.has_video:
+            noun = "Video enviado"
+        else:
+            noun = "Foto enviada"
+        return f"{noun} ao PhotoPrism{album_bit}."
     if result.files_uploaded > 0:
         return (
             "O PhotoPrism recebeu o arquivo, mas a importacao nao foi concluida. "
@@ -642,14 +665,17 @@ def _photo_recently_touched(row: dict[str, Any], since_ts: float) -> bool:
 
 
 def _normalize_upload_filename(filename: str, mime_type: str = "") -> tuple[str, str]:
-    name = (filename.strip() or "foto").replace("\\", "/").split("/")[-1]
+    name = (filename.strip() or "arquivo").replace("\\", "/").split("/")[-1]
     mime = (mime_type or "").split(";", 1)[0].strip().lower()
     known_exts = tuple(_EXT_TO_MIME)
 
     lower = name.casefold()
     has_ext = any(lower.endswith(ext) for ext in known_exts)
     if not has_ext:
-        ext = _MIME_TO_EXT.get(mime, ".jpg")
+        if mime.startswith("video/"):
+            ext = _MIME_TO_EXT.get(mime, ".mp4")
+        else:
+            ext = _MIME_TO_EXT.get(mime, ".jpg")
         name = f"{name}{ext}"
         if not mime:
             mime = _EXT_TO_MIME.get(ext, "image/jpeg")
@@ -1254,18 +1280,22 @@ class PhotoprismClient:
         approved = await self._approve_photo_uids(uids[:expected])
         return uids[0], approved
 
-    async def upload_photo(
+    async def upload_media_files(
         self,
+        files: list[tuple[bytes, str, str]],
         *,
-        file_bytes: bytes,
-        filename: str,
         album: str = "",
-        mime_type: str = "",
         supervisor_token: str = "",
     ) -> UploadResult:
-        """Envia foto ao PhotoPrism e confirma se entrou na galeria."""
-        if not file_bytes:
+        """Envia um ou mais arquivos (foto/video) ao PhotoPrism."""
+        clean_files = [(raw, name, mime) for raw, name, mime in files if raw]
+        if not clean_files:
             raise PhotoprismError("Arquivo vazio; nada para enviar ao PhotoPrism.")
+
+        has_video = any(
+            (mime or "").startswith("video/") or name.lower().endswith((".mp4", ".mov", ".webm", ".mkv", ".avi", ".3gp"))
+            for _, name, mime in clean_files
+        )
 
         if not await self.ensure_api_prefix(supervisor_token=supervisor_token):
             diag = await self.probe(supervisor_token=supervisor_token)
@@ -1279,8 +1309,6 @@ class PhotoprismClient:
         upload_url = self._url(f"/api/v1/users/{user_uid}/upload/{upload_token}")
         upload_started_at = time.time()
 
-        safe_name, content_type = _normalize_upload_filename(filename, mime_type)
-
         album_uid = ""
         album_name = album.strip()
         if album_name:
@@ -1288,41 +1316,43 @@ class PhotoprismClient:
 
         headers = self._headers(json_accept=False)
         headers.pop("Accept", None)
-        files = {"files": (safe_name, file_bytes, content_type)}
 
-        self._log_request("POST", upload_url)
-        try:
-            r = await self._client.post(
-                upload_url,
-                headers=headers,
-                files=files,
-                timeout=120.0,
-            )
-        except httpx.RequestError as e:
-            raise PhotoprismError(f"Envio ao PhotoPrism falhou: {e}") from e
+        files_uploaded = 0
+        for raw, filename, mime_type in clean_files:
+            safe_name, content_type = _normalize_upload_filename(filename, mime_type)
+            multipart = {"files": (safe_name, raw, content_type)}
+            self._log_request("POST", upload_url)
+            try:
+                r = await self._client.post(
+                    upload_url,
+                    headers=headers,
+                    files=multipart,
+                    timeout=180.0,
+                )
+            except httpx.RequestError as e:
+                raise PhotoprismError(f"Envio ao PhotoPrism falhou: {e}") from e
 
-        self._log_response(r, context="upload")
+            self._log_response(r, context="upload")
 
-        if r.status_code == 401:
-            raise PhotoprismAuthError("Token PhotoPrism invalido ou expirado")
-        if r.status_code >= 400:
-            body = _body_preview(r.text or "")
-            detail = f": {body}" if body else ""
-            raise PhotoprismError(f"Upload falhou: HTTP {r.status_code}{detail}")
+            if r.status_code == 401:
+                raise PhotoprismAuthError("Token PhotoPrism invalido ou expirado")
+            if r.status_code >= 400:
+                body = _body_preview(r.text or "")
+                detail = f": {body}" if body else ""
+                raise PhotoprismError(f"Upload falhou: HTTP {r.status_code}{detail}")
 
-        post_payload = _parse_pp_json_response(r)
-        post_message = _pp_response_message(post_payload)
-        if post_message:
-            log.info("PhotoPrism upload POST resposta: %s", post_message)
-        files_uploaded = _extract_upload_count(post_message)
-        if files_uploaded == 0:
-            detail = post_message or "nenhum arquivo aceito"
-            raise PhotoprismError(
-                f"PhotoPrism rejeitou o arquivo ({detail}). "
-                "Verifique formato, tamanho e permissoes de upload."
-            )
-        if files_uploaded is None:
-            files_uploaded = 1
+            post_payload = _parse_pp_json_response(r)
+            post_message = _pp_response_message(post_payload)
+            if post_message:
+                log.info("PhotoPrism upload POST resposta: %s", post_message)
+            count = _extract_upload_count(post_message)
+            if count == 0:
+                detail = post_message or "nenhum arquivo aceito"
+                raise PhotoprismError(
+                    f"PhotoPrism rejeitou {safe_name} ({detail}). "
+                    "Verifique formato, tamanho e permissoes de upload."
+                )
+            files_uploaded += count if count is not None else 1
 
         process_url = self._url(f"/api/v1/users/{user_uid}/upload/{upload_token}")
         process_body: dict[str, list[str]] = {}
@@ -1335,7 +1365,7 @@ class PhotoprismClient:
                 process_url,
                 headers=self._headers(),
                 json=process_body,
-                timeout=180.0,
+                timeout=240.0,
             )
         except httpx.RequestError as e:
             raise PhotoprismError(f"Importacao no PhotoPrism falhou: {e}") from e
@@ -1367,6 +1397,23 @@ class PhotoprismClient:
             files_uploaded=files_uploaded,
             import_processed=import_processed,
             photos_approved=photos_approved,
+            has_video=has_video,
+        )
+
+    async def upload_photo(
+        self,
+        *,
+        file_bytes: bytes,
+        filename: str,
+        album: str = "",
+        mime_type: str = "",
+        supervisor_token: str = "",
+    ) -> UploadResult:
+        """Envia um arquivo ao PhotoPrism."""
+        return await self.upload_media_files(
+            [(file_bytes, filename, mime_type)],
+            album=album,
+            supervisor_token=supervisor_token,
         )
 
     async def get_thumbnail_bytes(

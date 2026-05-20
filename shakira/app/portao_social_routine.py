@@ -26,6 +26,9 @@ ENTITY_CADEADO = "lock.cadeado_portao_social_cadeado_portao_social"
 ENTITY_FECHADURA = "switch.fechadura_portao_social"
 ENTITY_SENSOR = "sensor.amt_8000_zone_1"
 ENTITY_SCENE_SERVICO = "scene.abrir_portao_de_servico"
+ENTITY_SCENE_GRADE = "scene.abrir_grade_lateral"
+ENTITY_PORTA_SOCIAL = "lock.porta_social"
+ENTITY_PORTA_COZINHA = "lock.porta_cozinha"
 
 ROUTINE_ENTITIES = (
     ENTITY_ALARM,
@@ -35,6 +38,8 @@ ROUTINE_ENTITIES = (
     ENTITY_SENSOR,
     ENTITY_SCENE_SERVICO,
 )
+
+_SENSOR_CHECK_DELAY_SEC = 5.0
 
 _PASSWORD_PROMPT = (
     "Para abrir o portao social preciso confirmar o codigo de acesso. "
@@ -46,6 +51,15 @@ _FALLBACK_PROMPT = (
     "1 — Acionar a fechadura do portao social mesmo assim\n"
     "2 — Abrir o portao de servico\n"
     "3 — Cancelar"
+)
+
+_FOLLOWUP_PROMPT = (
+    "Portao social aberto! Quer que eu abra tambem?\n\n"
+    "1 — Grade lateral\n"
+    "2 — Porta social\n"
+    "3 — Porta da cozinha\n"
+    "4 — Todos\n"
+    "5 — Nao, obrigado"
 )
 
 _CANCEL_RE = re.compile(r"^\s*(cancelar|cancela|nao|não|desistir)\s*[.!?]?\s*$", re.I)
@@ -70,13 +84,21 @@ _FALLBACK_CHOICE_RE = {
     "cancelar": re.compile(r"^\s*(3|cancelar|cancela|nao|não|desistir)\b", re.I),
 }
 
+_FOLLOWUP_CHOICE_RE = {
+    "grade": re.compile(r"^\s*(1|grade(\s+lateral)?)\b", re.I),
+    "porta_social": re.compile(r"^\s*(2|porta\s+social)\b", re.I),
+    "cozinha": re.compile(r"^\s*(3|porta(\s+da)?\s+cozinha|cozinha)\b", re.I),
+    "todos": re.compile(r"^\s*(4|todos|tudo)\b", re.I),
+    "nao": re.compile(r"^\s*(5|nao|não|obrigado|nada|cancelar)\b", re.I),
+}
+
 _SENSOR_OPEN = frozenset({"open", "on"})
 _ARMED_PREFIX = "armed"
 
 
 @dataclass
 class _PendingPortaoSocial:
-    stage: str  # password | fallback
+    stage: str  # password | fallback | followup
     created_at: float = 0.0
 
     def __post_init__(self) -> None:
@@ -140,14 +162,32 @@ async def _fetch_states(
     return out
 
 
+async def _get_fresh_sensor_state(ha: HomeAssistantClient) -> str:
+    """Consulta o sensor do portao direto na API HA (invalida cache local antes)."""
+    from app.ha_states_cache import invalidate_ha_states_cache
+
+    invalidate_ha_states_cache()
+    st = await ha.get_state(ENTITY_SENSOR)
+    return _state_str(st)
+
+
+async def _is_portao_open(ha: HomeAssistantClient) -> bool:
+    await asyncio.sleep(_SENSOR_CHECK_DELAY_SEC)
+    return _is_sensor_open(await _get_fresh_sensor_state(ha))
+
+
 async def _call_service_safe(
     ha: HomeAssistantClient,
     catalog: DevicesCatalog,
     domain: str,
     service: str,
     entity_id: str,
+    *,
+    extra_data: dict[str, Any] | None = None,
 ) -> tuple[bool, str]:
     svc_data = catalog.apply_service_defaults(entity_id, {"entity_id": entity_id})
+    if extra_data:
+        svc_data.update(extra_data)
     try:
         await ha.call_service(domain, service, svc_data)
         return True, ""
@@ -180,7 +220,7 @@ async def _run_open_routine(
     states = await _fetch_states(ha, ROUTINE_ENTITIES)
     sensor_state = _state_str(states.get(ENTITY_SENSOR))
     if _is_sensor_open(sensor_state):
-        await messenger.step("O portao social ja esta aberto.", final=True)
+        await messenger.step("O portao social ja esta aberto.")
         return True
 
     failed_steps: list[str] = []
@@ -229,10 +269,8 @@ async def _run_open_routine(
         failed_steps.append("acionar fechadura")
         await messenger.step(f"Nao consegui acionar a fechadura ({err or 'erro'}).")
     else:
-        await asyncio.sleep(2.5)
-        st_after = await ha.get_state(ENTITY_SENSOR)
-        if _is_sensor_open(_state_str(st_after)):
-            await messenger.step("Portao social aberto com sucesso!", final=True)
+        if await _is_portao_open(ha):
+            await messenger.step("Portao social aberto com sucesso!")
             return True
         await messenger.step("Fechadura acionada, mas o sensor ainda indica portao fechado.")
 
@@ -246,24 +284,21 @@ async def _run_fallback_fechadura(
     ha: HomeAssistantClient,
     catalog: DevicesCatalog,
     messenger: StepMessenger,
-) -> None:
+) -> bool:
     await messenger.step("A acionar apenas a fechadura do portao social...")
     ok, err = await _call_service_safe(
         ha, catalog, "switch", "turn_on", ENTITY_FECHADURA
     )
     if ok:
-        await asyncio.sleep(2.0)
-        st = await ha.get_state(ENTITY_SENSOR)
-        if _is_sensor_open(_state_str(st)):
-            await messenger.step("Portao aberto.", final=True)
-        else:
-            await messenger.step(
-                "Fechadura acionada. Verifique se o portao abriu.", final=True
-            )
-    else:
-        await messenger.step(
-            f"Nao foi possivel acionar a fechadura ({err or 'erro'}).", final=True
-        )
+        if await _is_portao_open(ha):
+            await messenger.step("Portao aberto.")
+            return True
+        await messenger.step("Fechadura acionada. Verifique se o portao abriu.")
+        return False
+    await messenger.step(
+        f"Nao foi possivel acionar a fechadura ({err or 'erro'})."
+    )
+    return False
 
 
 async def _run_fallback_servico(
@@ -292,6 +327,82 @@ def _parse_fallback_choice(user_text: str) -> str | None:
         if pattern.search(text):
             return choice
     return None
+
+
+def _parse_followup_choice(user_text: str) -> str | None:
+    text = (user_text or "").strip()
+    if not text:
+        return None
+    for choice, pattern in _FOLLOWUP_CHOICE_RE.items():
+        if pattern.search(text):
+            return choice
+    return None
+
+
+async def _run_followup_actions(
+    choice: str,
+    *,
+    ha: HomeAssistantClient,
+    catalog: DevicesCatalog,
+    messenger: StepMessenger,
+) -> None:
+    steps: list[tuple[str, str, str, str, dict[str, Any] | None]] = []
+    if choice in ("grade", "todos"):
+        steps.append(("grade lateral", ENTITY_SCENE_GRADE, "scene", "turn_on", None))
+    if choice in ("porta_social", "todos"):
+        steps.append(
+            (
+                "porta social",
+                ENTITY_PORTA_SOCIAL,
+                "lock",
+                "unlock",
+                {"code": PORTAO_SOCIAL_PASSWORD},
+            )
+        )
+    if choice in ("cozinha", "todos"):
+        steps.append(("porta da cozinha", ENTITY_PORTA_COZINHA, "lock", "unlock", None))
+
+    if not steps:
+        return
+
+    ok_labels: list[str] = []
+    fail_labels: list[str] = []
+    for label, entity_id, domain, service, extra in steps:
+        await messenger.step(f"A abrir {label}...")
+        ok, err = await _call_service_safe(
+            ha, catalog, domain, service, entity_id, extra_data=extra
+        )
+        if ok:
+            ok_labels.append(label)
+        else:
+            fail_labels.append(f"{label} ({err or 'erro'})")
+
+    if ok_labels and not fail_labels:
+        await messenger.step(f"Pronto: {', '.join(ok_labels)}.", final=True)
+    elif ok_labels:
+        await messenger.step(
+            f"Concluido parcialmente — ok: {', '.join(ok_labels)}; "
+            f"falhou: {', '.join(fail_labels)}.",
+            final=True,
+        )
+    else:
+        await messenger.step(
+            f"Nao consegui abrir: {', '.join(fail_labels)}.", final=True
+        )
+
+
+async def _offer_followup_or_fallback(
+    *,
+    phone: str,
+    success: bool,
+    messenger: StepMessenger,
+) -> None:
+    if success:
+        _pending[phone] = _PendingPortaoSocial(stage="followup")
+        await messenger.step(_FOLLOWUP_PROMPT, final=True)
+    else:
+        _pending[phone] = _PendingPortaoSocial(stage="fallback")
+        await messenger.step(_FALLBACK_PROMPT, final=True)
 
 
 def clear_pending(phone: str) -> None:
@@ -350,6 +461,87 @@ async def try_handle_portao_social_inbound(
     """
     text = (user_text or "").strip()
     pending = _pending.get(phone)
+
+    if pending and pending.stage == "followup":
+        choice = _parse_followup_choice(text)
+        if choice is None:
+            reply = (
+                "Nao entendi a opcao. Responda com:\n"
+                "1 — grade lateral\n2 — porta social\n3 — porta da cozinha\n"
+                "4 — todos\n5 — nao, obrigado"
+            )
+            if evo_base and evo_key and instance:
+                messenger = StepMessenger(
+                    evo=evo,
+                    evo_base=evo_base,
+                    evo_key=evo_key,
+                    instance=instance,
+                    phone=phone,
+                )
+                await _finish_exchange(
+                    phone=phone,
+                    user_text=text,
+                    messenger=messenger,
+                    reply_text=reply,
+                    evo=evo,
+                    evo_base=evo_base,
+                    evo_key=evo_key,
+                    instance=instance,
+                )
+            return True
+
+        clear_pending(phone)
+        if choice == "nao":
+            reply = "Ok, fico por aqui."
+            if evo_base and evo_key and instance:
+                messenger = StepMessenger(
+                    evo=evo,
+                    evo_base=evo_base,
+                    evo_key=evo_key,
+                    instance=instance,
+                    phone=phone,
+                )
+                await _finish_exchange(
+                    phone=phone,
+                    user_text=text,
+                    messenger=messenger,
+                    reply_text=reply,
+                    evo=evo,
+                    evo_base=evo_base,
+                    evo_key=evo_key,
+                    instance=instance,
+                )
+            return True
+
+        if not evo_base or not evo_key or not instance:
+            log.error("Portao social followup sem Evolution configurado phone=%s", phone)
+            return True
+
+        messenger = StepMessenger(
+            evo=evo,
+            evo_base=evo_base,
+            evo_key=evo_key,
+            instance=instance,
+            phone=phone,
+        )
+        async with TypingSession(
+            evo, evo_base=evo_base, evo_key=evo_key, instance=instance, phone=phone
+        ):
+            await _run_followup_actions(
+                choice, ha=ha, catalog=catalog, messenger=messenger
+            )
+
+        await _finish_exchange(
+            phone=phone,
+            user_text=text,
+            messenger=messenger,
+            reply_text="",
+            evo=evo,
+            evo_base=evo_base,
+            evo_key=evo_key,
+            instance=instance,
+        )
+        return True
 
     if pending and pending.stage == "fallback":
         choice = _parse_fallback_choice(text)
@@ -416,7 +608,16 @@ async def try_handle_portao_social_inbound(
             evo, evo_base=evo_base, evo_key=evo_key, instance=instance, phone=phone
         ):
             if choice == "fechadura":
-                await _run_fallback_fechadura(ha=ha, catalog=catalog, messenger=messenger)
+                opened = await _run_fallback_fechadura(
+                    ha=ha, catalog=catalog, messenger=messenger
+                )
+                if opened:
+                    _pending[phone] = _PendingPortaoSocial(stage="followup")
+                    await messenger.step(_FOLLOWUP_PROMPT, final=True)
+                else:
+                    await messenger.step(
+                        "Nao confirmei a abertura do portao.", final=True
+                    )
             else:
                 await _run_fallback_servico(ha=ha, catalog=catalog, messenger=messenger)
 
@@ -495,9 +696,9 @@ async def try_handle_portao_social_inbound(
             evo, evo_base=evo_base, evo_key=evo_key, instance=instance, phone=phone
         ):
             success = await _run_open_routine(ha=ha, catalog=catalog, messenger=messenger)
-            if not success:
-                _pending[phone] = _PendingPortaoSocial(stage="fallback")
-                await messenger.step(_FALLBACK_PROMPT, final=True)
+            await _offer_followup_or_fallback(
+                phone=phone, success=success, messenger=messenger
+            )
 
         await _finish_exchange(
             phone=phone,
@@ -531,9 +732,9 @@ async def try_handle_portao_social_inbound(
             evo, evo_base=evo_base, evo_key=evo_key, instance=instance, phone=phone
         ):
             success = await _run_open_routine(ha=ha, catalog=catalog, messenger=messenger)
-            if not success:
-                _pending[phone] = _PendingPortaoSocial(stage="fallback")
-                await messenger.step(_FALLBACK_PROMPT, final=True)
+            await _offer_followup_or_fallback(
+                phone=phone, success=success, messenger=messenger
+            )
 
         await _finish_exchange(
             phone=phone,

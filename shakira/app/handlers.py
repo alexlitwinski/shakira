@@ -76,6 +76,7 @@ from app.user_memory_actions import (
 from app.portao_social_routine import try_handle_portao_social_inbound
 from app.pending_media import (
     build_media_choice_prompt,
+    build_pending_append_notice,
     build_pending_clarification,
     build_pending_processing_wait,
     build_pending_progress_message,
@@ -85,8 +86,10 @@ from app.pending_media import (
     download_inbound_media_bytes,
     extract_album_name,
     extract_personal_description,
+    is_gallery_media,
     is_placeholder_user_text,
     media_has_explicit_intent,
+    pending_gallery_stats,
 )
 from app.user_friendly import (
     format_action_in_progress,
@@ -224,8 +227,19 @@ def _normalize_action_name(raw: Any) -> str:
     return str(raw or "reply").strip().lower()
 
 
-def _accept_inbound_once(phone: str, text: str) -> bool:
-    key = f"{phone}:{text}"
+def _inbound_dedup_key(phone: str, text: str, record: dict[str, Any] | None = None) -> str:
+    """Chave unica por mensagem; midias sem legenda compartilham o mesmo texto placeholder."""
+    if isinstance(record, dict):
+        key = record.get("key") or {}
+        if isinstance(key, dict):
+            msg_id = key.get("id") or record.get("messageId") or record.get("id")
+            if msg_id:
+                return f"{phone}:msg:{msg_id}"
+    return f"{phone}:{text}"
+
+
+def _accept_inbound_once(phone: str, text: str, record: dict[str, Any] | None = None) -> bool:
+    key = _inbound_dedup_key(phone, text, record)
     now = time.monotonic()
     with _inbound_dedup_lock:
         last = _inbound_dedup.get(key)
@@ -366,7 +380,7 @@ def extract_inbound_content(record: dict[str, Any]) -> InboundContent | None:
         log.info("Ignorando eco da ultima resposta do assistente phone=%s", digits)
         return None
 
-    if not _accept_inbound_once(digits, text or "[media]"):
+    if not _accept_inbound_once(digits, text or "[media]", record):
         log.info("Ignorando mensagem duplicada phone=%s", digits)
         return None
 
@@ -1010,6 +1024,8 @@ def _save_pending_bytes_to_personal(
     pending,
     path,
     description: str,
+    *,
+    clear_pending: bool = True,
 ) -> str:
     raw = path.read_bytes()
     entry = store.save_file(
@@ -1019,7 +1035,8 @@ def _save_pending_bytes_to_personal(
         label=description[:120],
         caption=pending.caption,
     )
-    store.clear_pending_file()
+    if clear_pending:
+        store.clear_pending_file()
     invalidate_user_memory_cache(store)
     display = entry.label or description
     return _personal_save_confirmation(display)
@@ -1031,6 +1048,21 @@ async def _upload_bytes_to_photoprism(
     filename: str,
     album: str,
     mime_type: str = "",
+    settings: AppSettings,
+    http: httpx.AsyncClient,
+) -> str:
+    return await _upload_many_to_photoprism(
+        [(raw, filename, mime_type)],
+        album=album,
+        settings=settings,
+        http=http,
+    )
+
+
+async def _upload_many_to_photoprism(
+    files: list[tuple[bytes, str, str]],
+    *,
+    album: str,
     settings: AppSettings,
     http: httpx.AsyncClient,
 ) -> str:
@@ -1046,11 +1078,9 @@ async def _upload_bytes_to_photoprism(
         api_prefix=settings.photoprism_api_prefix,
     )
     try:
-        result = await pp.upload_photo(
-            file_bytes=raw,
-            filename=filename,
+        result = await pp.upload_media_files(
+            files,
             album=album,
-            mime_type=mime_type,
             supervisor_token=settings.supervisor_token,
         )
     except PhotoprismAuthError:
@@ -1114,84 +1144,144 @@ async def try_handle_pending_media_reply(
 ) -> str | None:
     """Processa resposta do usuario apos pergunta sobre arquivo pendente."""
     store = get_store(phone)
-    hit = store.get_pending_file()
-    if not hit:
+    pending_items = store.get_pending_files()
+    if not pending_items:
         return None
 
-    pending, path = hit
+    stage = store.get_pending_stage() or "destination"
+    pending_files = [p for p, _ in pending_items]
+    total_count, has_video, gallery_count = pending_gallery_stats(pending_files)
+    supports_gallery = gallery_count > 0
 
-    if pending.stage == "processing":
+    if stage == "processing":
         return build_pending_processing_wait()
 
-    if pending.stage == "description":
+    if stage == "description":
         if any(w in user_text.casefold() for w in ("cancela", "cancelar", "esquece", "descarta", "deixa")):
             store.clear_pending_file()
-            return "Ok, descartei o arquivo."
-        description = extract_personal_description(user_text, pending.caption)
+            return "Ok, descartei os arquivos."
+        first = pending_files[0]
+        description = extract_personal_description(user_text, first.caption)
         if not description:
             return build_personal_description_prompt()
         store.set_pending_stage("processing")
         if on_step:
-            await on_step(build_pending_progress_message("personal"))
+            await on_step(
+                build_pending_progress_message("personal", count=total_count)
+            )
+        saved = 0
         try:
-            return _save_pending_bytes_to_personal(store, pending, path, description)
+            for i, (pending, path) in enumerate(pending_items):
+                _save_pending_bytes_to_personal(
+                    store,
+                    pending,
+                    path,
+                    description,
+                    clear_pending=(i == len(pending_items) - 1),
+                )
+                saved += 1
         except ValueError as e:
             store.clear_pending_file()
             return f"Nao foi possivel guardar: {e}"
         except OSError:
             store.clear_pending_file()
             return "Erro ao gravar o arquivo."
+        if saved > 1:
+            return f"Guardei {saved} arquivos no seu registro pessoal."
+        return _personal_save_confirmation(description)
 
-    choice = classify_pending_reply(user_text, is_image=pending.is_image)
+    choice = classify_pending_reply(user_text, supports_gallery=supports_gallery)
 
     if choice == "cancel":
         store.clear_pending_file()
-        return "Ok, descartei o arquivo."
+        return "Ok, descartei os arquivos."
 
     if choice == "unknown":
-        return build_pending_clarification(is_image=pending.is_image)
+        return build_pending_clarification(supports_gallery=supports_gallery)
 
     if choice == "photoprism":
-        if not pending.is_image:
+        gallery_items = [
+            (path.read_bytes(), pending.filename, pending.mime_type)
+            for pending, path in pending_items
+            if is_gallery_media(pending.mediatype, pending.mime_type)
+        ]
+        if not gallery_items:
             return (
-                "So posso enviar *fotos* ao PhotoPrism. "
-                "Para este arquivo, responda *pessoal* para guardar na memoria."
+                "So posso enviar *fotos e videos* ao PhotoPrism. "
+                "Para estes arquivos, responda *pessoal*."
             )
         if http is None:
             return "Servico temporariamente indisponivel para PhotoPrism."
         album = extract_album_name(user_text)
         store.set_pending_stage("processing")
         if on_step:
-            await on_step(build_pending_progress_message("photoprism", album=album))
-        raw = path.read_bytes()
-        msg = await _upload_bytes_to_photoprism(
-            raw,
-            filename=pending.filename,
+            await on_step(
+                build_pending_progress_message(
+                    "photoprism",
+                    album=album,
+                    count=len(gallery_items),
+                    has_video=has_video,
+                )
+            )
+        msg = await _upload_many_to_photoprism(
+            gallery_items,
             album=album,
-            mime_type=pending.mime_type,
             settings=settings,
             http=http,
         )
+        non_gallery = [
+            item
+            for item in pending_items
+            if not is_gallery_media(item[0].mediatype, item[0].mime_type)
+        ]
         store.clear_pending_file()
+        if non_gallery:
+            for pending, path in non_gallery:
+                try:
+                    store.append_pending_file(
+                        path.read_bytes(),
+                        filename=pending.filename,
+                        mime_type=pending.mime_type,
+                        mediatype=pending.mediatype,
+                        caption=pending.caption,
+                    )
+                except ValueError:
+                    pass
+            return (
+                f"{msg}\n\nAinda restam {len(non_gallery)} arquivo(s) que nao vao "
+                "para a galeria. Responda *pessoal* para guardar."
+            )
         return msg
 
-    label = extract_personal_description(user_text, pending.caption)
+    first = pending_files[0]
+    label = extract_personal_description(user_text, first.caption)
     if not label:
         store.set_pending_stage("description")
         return build_personal_description_prompt()
 
     store.set_pending_stage("processing")
     if on_step:
-        await on_step(build_pending_progress_message("personal"))
-    raw = path.read_bytes()
+        await on_step(build_pending_progress_message("personal", count=total_count))
+    saved = 0
     try:
-        return _save_pending_bytes_to_personal(store, pending, path, label)
+        for i, (pending, path) in enumerate(pending_items):
+            _save_pending_bytes_to_personal(
+                store,
+                pending,
+                path,
+                label,
+                clear_pending=(i == len(pending_items) - 1),
+            )
+            saved += 1
     except ValueError as e:
         store.clear_pending_file()
         return f"Nao foi possivel guardar: {e}"
     except OSError:
         store.clear_pending_file()
         return "Erro ao gravar o arquivo."
+    if saved > 1:
+        return f"Guardei {saved} arquivos no seu registro pessoal."
+    return _personal_save_confirmation(label)
 
 
 async def handle_ambiguous_inbound_media(
@@ -1220,7 +1310,7 @@ async def handle_ambiguous_inbound_media(
     media = inbound.media
     store = get_store(inbound.phone)
     try:
-        pending = store.save_pending_file(
+        pending, total = store.append_pending_file(
             raw,
             filename=fname or media.filename,
             mime_type=mimetype or media.mimetype,
@@ -1230,7 +1320,21 @@ async def handle_ambiguous_inbound_media(
     except ValueError as e:
         return f"Nao foi possivel receber o arquivo: {e}"
 
-    return build_media_choice_prompt(is_image=pending.is_image, filename=pending.filename)
+    pending_items = store.get_pending_files()
+    pending_files = [p for p, _ in pending_items]
+    _, has_video, gallery_count = pending_gallery_stats(pending_files)
+
+    if total > 1:
+        return build_pending_append_notice(
+            total_count=total,
+            gallery_count=gallery_count,
+            has_video=has_video,
+        )
+    return build_media_choice_prompt(
+        total_count=total,
+        gallery_count=gallery_count,
+        has_video=has_video,
+    )
 
 
 async def route_explicit_inbound_media(
@@ -1258,9 +1362,9 @@ async def route_explicit_inbound_media(
     store = get_store(inbound.phone)
 
     if intent == "photoprism":
-        if media.mediatype != "image" and not (mimetype or "").startswith("image/"):
+        if not is_gallery_media(media.mediatype, mimetype or media.mimetype):
             return (
-                "PhotoPrism aceita fotos. Para este arquivo use memoria pessoal "
+                "PhotoPrism aceita fotos e videos. Para este arquivo use memoria pessoal "
                 '(responda "guardar" na legenda).'
             )
         if http is None:

@@ -20,6 +20,7 @@ MAX_MEMORIES = int(os.environ.get("SHAKIRA_MAX_MEMORIES_PER_USER", "200"))
 MAX_MEMORY_CHARS = int(os.environ.get("SHAKIRA_MAX_MEMORY_ENTRY_CHARS", "4000"))
 MAX_FILES = int(os.environ.get("SHAKIRA_MAX_FILES_PER_USER", "50"))
 MAX_FILE_BYTES = int(os.environ.get("SHAKIRA_MAX_FILE_BYTES", str(15 * 1024 * 1024)))
+MAX_PENDING_FILES = int(os.environ.get("SHAKIRA_MAX_PENDING_FILES", "20"))
 
 
 def sanitize_phone(phone: str) -> str:
@@ -65,6 +66,15 @@ class PendingFile:
     caption: str = ""
     stage: str = "destination"  # destination | description | processing
     created_at: str = field(default_factory=_now_iso)
+
+
+@dataclass
+class PendingBatch:
+    """Fila de arquivos aguardando decisao do usuario."""
+
+    stage: str = "destination"  # destination | description | processing
+    items: list[PendingFile] = field(default_factory=list)
+    updated_at: str = field(default_factory=_now_iso)
 
 
 @dataclass
@@ -363,7 +373,66 @@ class UserMemoryStore:
     def cache_meta_path(self) -> Path:
         return self.root / "gemini_memory_cache.json"
 
-    def save_pending_file(
+    def _pending_file_from_row(self, row: dict[str, Any]) -> PendingFile | None:
+        pid = str(row.get("id") or "").strip()
+        if not pid:
+            return None
+        return PendingFile(
+            id=pid,
+            filename=str(row.get("filename") or "arquivo"),
+            mime_type=str(row.get("mime_type") or "application/octet-stream"),
+            mediatype=str(row.get("mediatype") or "document"),
+            size_bytes=int(row.get("size_bytes") or 0),
+            is_image=bool(row.get("is_image")),
+            caption=str(row.get("caption") or ""),
+            stage=str(row.get("stage") or "destination"),
+            created_at=str(row.get("created_at") or _now_iso()),
+        )
+
+    def _load_pending_batch(self) -> PendingBatch | None:
+        if not self.pending_meta_path.is_file():
+            return None
+        try:
+            row = json.loads(self.pending_meta_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            return None
+        if not isinstance(row, dict):
+            return None
+
+        if isinstance(row.get("items"), list):
+            items: list[PendingFile] = []
+            for item in row["items"]:
+                if isinstance(item, dict):
+                    pf = self._pending_file_from_row(item)
+                    if pf:
+                        items.append(pf)
+            if not items:
+                return None
+            return PendingBatch(
+                stage=str(row.get("stage") or "destination"),
+                items=items,
+                updated_at=str(row.get("updated_at") or _now_iso()),
+            )
+
+        legacy = self._pending_file_from_row(row)
+        if legacy:
+            return PendingBatch(stage=legacy.stage, items=[legacy], updated_at=legacy.created_at)
+        return None
+
+    def _save_pending_batch(self, batch: PendingBatch) -> None:
+        self.ensure_dirs()
+        batch.updated_at = _now_iso()
+        payload = {
+            "stage": batch.stage,
+            "updated_at": batch.updated_at,
+            "items": [asdict(item) for item in batch.items],
+        }
+        self.pending_meta_path.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+
+    def append_pending_file(
         self,
         data: bytes,
         *,
@@ -371,10 +440,21 @@ class UserMemoryStore:
         mime_type: str,
         mediatype: str,
         caption: str = "",
-    ) -> PendingFile:
+    ) -> tuple[PendingFile, int]:
         if len(data) > MAX_FILE_BYTES:
             raise ValueError(f"arquivo excede limite de {MAX_FILE_BYTES // (1024 * 1024)} MB")
-        self.clear_pending_file()
+
+        batch = self._load_pending_batch()
+        if batch and batch.stage == "processing":
+            raise ValueError("aguarde o processamento do lote anterior")
+        if batch and batch.stage == "description":
+            raise ValueError("descreva o arquivo pendente antes de enviar outro")
+        if batch and batch.stage != "destination":
+            self.clear_pending_file()
+            batch = None
+        if batch and len(batch.items) >= MAX_PENDING_FILES:
+            raise ValueError(f"limite de {MAX_PENDING_FILES} arquivos pendentes")
+
         self.ensure_dirs()
         safe_name = self._safe_filename(filename)
         pid = uuid.uuid4().hex[:12]
@@ -390,66 +470,78 @@ class UserMemoryStore:
             is_image=is_image,
             caption=caption.strip()[:500],
         )
-        self.pending_meta_path.write_text(
-            json.dumps(asdict(pending), ensure_ascii=False, indent=2),
-            encoding="utf-8",
+        if batch is None:
+            batch = PendingBatch(stage="destination", items=[])
+        batch.items.append(pending)
+        self._save_pending_batch(batch)
+        log.info(
+            "Arquivo pendente phone=%s id=%s total=%s",
+            self.phone,
+            pid,
+            len(batch.items),
         )
-        log.info("Arquivo pendente phone=%s id=%s", self.phone, pid)
+        return pending, len(batch.items)
+
+    def save_pending_file(
+        self,
+        data: bytes,
+        *,
+        filename: str,
+        mime_type: str,
+        mediatype: str,
+        caption: str = "",
+    ) -> PendingFile:
+        """Substitui fila pendente por um unico arquivo."""
+        self.clear_pending_file()
+        pending, _ = self.append_pending_file(
+            data,
+            filename=filename,
+            mime_type=mime_type,
+            mediatype=mediatype,
+            caption=caption,
+        )
         return pending
 
+    def get_pending_files(self) -> list[tuple[PendingFile, Path]]:
+        batch = self._load_pending_batch()
+        if not batch:
+            return []
+        out: list[tuple[PendingFile, Path]] = []
+        for pending in batch.items:
+            for path in self.pending_dir.glob(f"{pending.id}_*"):
+                if path.is_file():
+                    out.append((pending, path))
+                    break
+        return out
+
     def get_pending_file(self) -> tuple[PendingFile, Path] | None:
-        if not self.pending_meta_path.is_file():
+        hits = self.get_pending_files()
+        if not hits:
             return None
-        try:
-            row = json.loads(self.pending_meta_path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
-            return None
-        if not isinstance(row, dict):
-            return None
-        pid = str(row.get("id") or "").strip()
-        if not pid:
-            return None
-        pending = PendingFile(
-            id=pid,
-            filename=str(row.get("filename") or "arquivo"),
-            mime_type=str(row.get("mime_type") or "application/octet-stream"),
-            mediatype=str(row.get("mediatype") or "document"),
-            size_bytes=int(row.get("size_bytes") or 0),
-            is_image=bool(row.get("is_image")),
-            caption=str(row.get("caption") or ""),
-            stage=str(row.get("stage") or "destination"),
-            created_at=str(row.get("created_at") or _now_iso()),
-        )
-        for path in self.pending_dir.glob(f"{pid}_*"):
-            if path.is_file():
-                return pending, path
-        return None
+        return hits[0]
+
+    def get_pending_stage(self) -> str | None:
+        batch = self._load_pending_batch()
+        return batch.stage if batch else None
 
     def set_pending_stage(self, stage: str) -> bool:
-        if not self.pending_meta_path.is_file():
+        batch = self._load_pending_batch()
+        if not batch:
             return False
-        try:
-            row = json.loads(self.pending_meta_path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
-            return False
-        if not isinstance(row, dict):
-            return False
-        row["stage"] = stage.strip() or "destination"
-        self.pending_meta_path.write_text(
-            json.dumps(row, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+        batch.stage = stage.strip() or "destination"
+        self._save_pending_batch(batch)
         return True
 
     def clear_pending_file(self) -> None:
+        batch = self._load_pending_batch()
+        if batch:
+            for pending in batch.items:
+                for path in self.pending_dir.glob(f"{pending.id}_*"):
+                    try:
+                        path.unlink(missing_ok=True)
+                    except OSError:
+                        pass
         if self.pending_meta_path.is_file():
-            try:
-                hit = self.get_pending_file()
-                if hit:
-                    _, path = hit
-                    path.unlink(missing_ok=True)
-            except OSError:
-                pass
             try:
                 self.pending_meta_path.unlink(missing_ok=True)
             except OSError:
