@@ -2,14 +2,23 @@
 
 from __future__ import annotations
 
+import asyncio
+import logging
 import re
 from typing import TYPE_CHECKING
 
-from app.user_memory import InboundContent, UserMemoryStore
+from app.user_memory import InboundContent, UserMemoryStore, get_store
 
 if TYPE_CHECKING:
     from app.config import AppSettings
     from app.evolution import EvolutionClient
+
+log = logging.getLogger(__name__)
+
+MEDIA_BATCH_DELAY_SEC = 4.0
+
+_media_batch_tasks: dict[str, asyncio.Task[None]] = {}
+_media_batch_prompt_sent: dict[str, bool] = {}
 
 _PLACEHOLDER_PREFIX = "[usuario enviou"
 
@@ -269,6 +278,104 @@ def build_pending_progress_message(
 
 def build_pending_processing_wait() -> str:
     return "Ainda estou processando seu arquivo. Aguarde um instante."
+
+
+def build_pending_collecting_wait() -> str:
+    return "Ainda estou recebendo seus arquivos. Aguarde um instante."
+
+
+def cancel_media_batch_notification(phone: str) -> None:
+    task = _media_batch_tasks.pop(phone, None)
+    _media_batch_prompt_sent.pop(phone, None)
+    if task and not task.done():
+        task.cancel()
+
+
+async def schedule_media_batch_notification(
+    phone: str,
+    *,
+    prompt_already_sent: bool,
+    settings: AppSettings,
+    evo: EvolutionClient,
+    instance: str,
+) -> None:
+    """Aguarda novas fotos antes de enviar uma unica mensagem ao usuario."""
+    cancel_media_batch_notification(phone)
+    _media_batch_prompt_sent[phone] = prompt_already_sent
+
+    async def _fire() -> None:
+        try:
+            await asyncio.sleep(MEDIA_BATCH_DELAY_SEC)
+            store = get_store(phone)
+            pending_items = store.get_pending_files()
+            if not pending_items:
+                return
+
+            pending_files = [p for p, _ in pending_items]
+            total_count, has_video, gallery_count = pending_gallery_stats(pending_files)
+            already_sent = _media_batch_prompt_sent.get(phone, False)
+            store.set_pending_stage("destination")
+
+            if already_sent:
+                msg = build_pending_append_notice(
+                    total_count=total_count,
+                    gallery_count=gallery_count,
+                    has_video=has_video,
+                )
+            else:
+                msg = build_media_choice_prompt(
+                    total_count=total_count,
+                    gallery_count=gallery_count,
+                    has_video=has_video,
+                )
+
+            await _deliver_batch_prompt(
+                phone,
+                msg,
+                settings=settings,
+                evo=evo,
+                instance=instance,
+            )
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            log.exception("Falha ao enviar prompt de lote de midia phone=%s", phone)
+        finally:
+            _media_batch_tasks.pop(phone, None)
+            _media_batch_prompt_sent.pop(phone, None)
+
+    _media_batch_tasks[phone] = asyncio.create_task(_fire())
+
+
+async def _deliver_batch_prompt(
+    phone: str,
+    message: str,
+    *,
+    settings: AppSettings,
+    evo: EvolutionClient,
+    instance: str,
+) -> None:
+    from app.conversation_history import record_exchange
+    from app.user_friendly import polish_user_message
+    from app.whatsapp_steps import pulse_whatsapp_typing, truncate_whatsapp
+
+    evo_base = settings.evolution_base_url.strip()
+    evo_key = settings.evolution_api_key.strip()
+    if not evo_base or not evo_key or not instance:
+        log.error("Evolution nao configurado para prompt de lote phone=%s", phone)
+        return
+
+    reply_text = truncate_whatsapp(polish_user_message(message))
+    await pulse_whatsapp_typing()
+    await evo.send_text(
+        base_url=evo_base,
+        api_key=evo_key,
+        instance=instance,
+        number=phone,
+        text=reply_text,
+    )
+    record_exchange(phone, "[arquivo]", reply_text)
+    log.info("Prompt de lote enviado phone=%s chars=%s", phone, len(reply_text))
 
 
 def build_pending_clarification(*, supports_gallery: bool) -> str:

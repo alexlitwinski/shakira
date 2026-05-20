@@ -449,7 +449,7 @@ class UserMemoryStore:
             raise ValueError("aguarde o processamento do lote anterior")
         if batch and batch.stage == "description":
             raise ValueError("descreva o arquivo pendente antes de enviar outro")
-        if batch and batch.stage != "destination":
+        if batch and batch.stage not in ("collecting", "destination"):
             self.clear_pending_file()
             batch = None
         if batch and len(batch.items) >= MAX_PENDING_FILES:
@@ -471,7 +471,7 @@ class UserMemoryStore:
             caption=caption.strip()[:500],
         )
         if batch is None:
-            batch = PendingBatch(stage="destination", items=[])
+            batch = PendingBatch(stage="collecting", items=[])
         batch.items.append(pending)
         self._save_pending_batch(batch)
         log.info(
@@ -533,6 +533,9 @@ class UserMemoryStore:
         return True
 
     def clear_pending_file(self) -> None:
+        from app.pending_media import cancel_media_batch_notification
+
+        cancel_media_batch_notification(self.phone)
         batch = self._load_pending_batch()
         if batch:
             for pending in batch.items:

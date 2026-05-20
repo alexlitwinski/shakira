@@ -76,11 +76,12 @@ from app.user_memory_actions import (
 from app.portao_social_routine import try_handle_portao_social_inbound
 from app.pending_media import (
     build_media_choice_prompt,
-    build_pending_append_notice,
     build_pending_clarification,
+    build_pending_collecting_wait,
     build_pending_processing_wait,
     build_pending_progress_message,
     build_personal_description_prompt,
+    cancel_media_batch_notification,
     classify_explicit_media_intent,
     classify_pending_reply,
     download_inbound_media_bytes,
@@ -90,6 +91,7 @@ from app.pending_media import (
     is_placeholder_user_text,
     media_has_explicit_intent,
     pending_gallery_stats,
+    schedule_media_batch_notification,
 )
 from app.user_friendly import (
     format_action_in_progress,
@@ -1153,11 +1155,15 @@ async def try_handle_pending_media_reply(
     total_count, has_video, gallery_count = pending_gallery_stats(pending_files)
     supports_gallery = gallery_count > 0
 
+    if stage == "collecting":
+        return build_pending_collecting_wait()
+
     if stage == "processing":
         return build_pending_processing_wait()
 
     if stage == "description":
         if any(w in user_text.casefold() for w in ("cancela", "cancelar", "esquece", "descarta", "deixa")):
+            cancel_media_batch_notification(phone)
             store.clear_pending_file()
             return "Ok, descartei os arquivos."
         first = pending_files[0]
@@ -1193,6 +1199,7 @@ async def try_handle_pending_media_reply(
     choice = classify_pending_reply(user_text, supports_gallery=supports_gallery)
 
     if choice == "cancel":
+        cancel_media_batch_notification(phone)
         store.clear_pending_file()
         return "Ok, descartei os arquivos."
 
@@ -1293,6 +1300,7 @@ async def handle_ambiguous_inbound_media(
 ) -> str | None:
     """
     Arquivo sem instrucao: baixa, guarda como pendente e retorna mensagem para o usuario.
+    Fotos/videos sao agrupados (debounce) — retorna "" quando a mensagem sera enviada depois.
     None se nao aplicavel.
     """
     if not inbound.media:
@@ -1309,8 +1317,11 @@ async def handle_ambiguous_inbound_media(
     raw, mimetype, fname = downloaded
     media = inbound.media
     store = get_store(inbound.phone)
+    stage_before = store.get_pending_stage()
+    prompt_already_sent = stage_before == "destination"
+
     try:
-        pending, total = store.append_pending_file(
+        _pending, total = store.append_pending_file(
             raw,
             filename=fname or media.filename,
             mime_type=mimetype or media.mimetype,
@@ -1320,16 +1331,29 @@ async def handle_ambiguous_inbound_media(
     except ValueError as e:
         return f"Nao foi possivel receber o arquivo: {e}"
 
+    if is_gallery_media(media.mediatype, mimetype or media.mimetype):
+        if stage_before in (None, "collecting", "destination"):
+            store.set_pending_stage("collecting")
+        await schedule_media_batch_notification(
+            inbound.phone,
+            prompt_already_sent=prompt_already_sent,
+            settings=settings,
+            evo=evo,
+            instance=instance,
+        )
+        log.info(
+            "Midia em lote phone=%s total=%s prompt_ja_enviado=%s",
+            inbound.phone,
+            total,
+            prompt_already_sent,
+        )
+        return ""
+
     pending_items = store.get_pending_files()
     pending_files = [p for p, _ in pending_items]
     _, has_video, gallery_count = pending_gallery_stats(pending_files)
 
-    if total > 1:
-        return build_pending_append_notice(
-            total_count=total,
-            gallery_count=gallery_count,
-            has_video=has_video,
-        )
+    store.set_pending_stage("destination")
     return build_media_choice_prompt(
         total_count=total,
         gallery_count=gallery_count,
@@ -2411,21 +2435,28 @@ async def handle_evolution_payload(
                         evo=evo,
                         instance=send_instance,
                     )
-                if media_reply:
-                    reply_text = _truncate_whatsapp(polish_user_message(media_reply))
-                    if evo_base and evo_key and send_instance:
-                        await pulse_whatsapp_typing()
-                        await evo.send_text(
-                            base_url=evo_base,
-                            api_key=evo_key,
-                            instance=send_instance,
-                            number=phone_norm,
-                            text=reply_text,
-                        )
-                        record_exchange(
+                if media_reply is not None:
+                    if media_reply:
+                        reply_text = _truncate_whatsapp(polish_user_message(media_reply))
+                        if evo_base and evo_key and send_instance:
+                            await pulse_whatsapp_typing()
+                            await evo.send_text(
+                                base_url=evo_base,
+                                api_key=evo_key,
+                                instance=send_instance,
+                                number=phone_norm,
+                                text=reply_text,
+                            )
+                            record_exchange(
+                                phone_norm,
+                                user_text or "[arquivo]",
+                                reply_text,
+                            )
+                    else:
+                        log.info(
+                            "Midia aguardando lote phone=%s tipo=%s",
                             phone_norm,
-                            user_text or "[arquivo]",
-                            reply_text,
+                            inbound.media.mediatype,
                         )
                 else:
                     log.error(
