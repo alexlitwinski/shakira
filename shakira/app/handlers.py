@@ -69,14 +69,27 @@ from app.whatsapp_phones import (
 
 from app.user_memory_cache import ensure_user_memory_cache, invalidate_user_memory_cache
 from app.user_memory_prompts import USER_MEMORY_ACTIONS_INSTRUCTION
+from app.instagram_links_prompts import INSTAGRAM_LINKS_ACTIONS_INSTRUCTION
 from app.user_memory_actions import (
     handle_delete_from_memory,
     try_memory_delete_override,
     try_personal_registry_list_reply,
 )
+from app.instagram_links_actions import (
+    handle_delete_instagram_link,
+    try_instagram_links_list_reply,
+)
+from app.instagram_links_routine import (
+    is_instagram_link_pending,
+    try_handle_instagram_link_inbound,
+    try_handle_instagram_link_pending,
+)
+from app.instagram_links_store import get_instagram_store
+from app.instagram_profile_fetcher import format_profile_summary
 from app.password_vault_routine import (
     handle_vault_gemini_decision,
     try_handle_password_vault_pending,
+    try_handle_vault_intent_direct,
 )
 from app.password_security import (
     append_security_delete_notice,
@@ -146,6 +159,9 @@ VALID_GEMINI_ACTIONS = frozenset(
         "schedule_response",
         "schedule_action",
         "cancel_scheduled_response",
+        "list_instagram_links",
+        "delete_instagram_link",
+        "send_instagram_link",
     }
 )
 
@@ -160,6 +176,8 @@ _SINGLE_USER_MESSAGE_ACTIONS = frozenset(
         "vault_save",
         "vault_retrieve",
         "vault_list",
+        "list_instagram_links",
+        "delete_instagram_link",
     }
 )
 
@@ -970,7 +988,11 @@ def _build_catalog_fallback_text(
     catalog_fallback = catalog.build_catalog_context()
     if cameras.cameras:
         catalog_fallback = f"{catalog_fallback}\n\n{cameras.build_catalog_context()}"
-    return f"{USER_MEMORY_ACTIONS_INSTRUCTION}\n\n{catalog_fallback}"
+    return (
+        f"{USER_MEMORY_ACTIONS_INSTRUCTION}\n\n"
+        f"{INSTAGRAM_LINKS_ACTIONS_INSTRUCTION}\n\n"
+        f"{catalog_fallback}"
+    )
 
 
 def _decision_is_complete(decision: dict[str, Any]) -> bool:
@@ -999,6 +1021,9 @@ def build_gemini_assistant_for_user(
     """Retorna (assistant, memory_context, memory_in_cache)."""
     model_name = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
     memory_context = store.build_context_text()
+    ig_context = get_instagram_store(store.phone).build_context_text()
+    if ig_context:
+        memory_context = f"{memory_context}\n\n{ig_context}" if memory_context else ig_context
     memory_in_cache = False
     catalog_system = _build_catalog_system_text(catalog, cameras)
 
@@ -1593,6 +1618,99 @@ async def handle_send_user_file(
     return intro or f"Enviei o arquivo {meta.filename}."
 
 
+async def handle_send_instagram_link(
+    decision: dict[str, Any],
+    *,
+    settings: AppSettings,
+    evo: EvolutionClient,
+    phone: str,
+    instance: str,
+    messenger: StepMessenger | None = None,
+) -> str:
+    from app.instagram_links_actions import resolve_entry_for_reference
+
+    link_id = str(decision.get("instagram_link_id") or "").strip()
+    handle = str(decision.get("instagram_handle") or "").strip().lstrip("@")
+    raw_num = decision.get("instagram_list_number")
+    num: int | None = None
+    if isinstance(raw_num, int):
+        num = raw_num
+    elif isinstance(raw_num, str) and raw_num.strip().isdigit():
+        num = int(raw_num.strip())
+
+    ent = resolve_entry_for_reference(phone, link_id=link_id, handle=handle, list_number=num)
+    intro = str(decision.get("response") or "").strip()
+
+    async def say(text: str) -> None:
+        if messenger:
+            await messenger.step(text)
+        else:
+            evo_base = settings.evolution_base_url.strip()
+            evo_key = settings.evolution_api_key.strip()
+            if evo_base and evo_key and instance:
+                await evo.send_text(
+                    base_url=evo_base,
+                    api_key=evo_key,
+                    instance=instance,
+                    number=phone,
+                    text=_truncate_whatsapp(text),
+                )
+
+    if not ent:
+        msg = intro or "Nao encontrei esse perfil Instagram guardado."
+        await say(msg)
+        return msg
+
+    store = get_instagram_store(phone)
+    caption = _truncate_whatsapp(format_profile_summary(ent))
+    evo_base = settings.evolution_base_url.strip()
+    evo_key = settings.evolution_api_key.strip()
+    if not evo_base or not evo_key or not instance:
+        return "Evolution nao configurado para enviar o perfil."
+
+    if intro:
+        await say(intro)
+
+    path = store.avatar_path(ent)
+    await pulse_whatsapp_typing()
+    if path:
+        data = path.read_bytes()
+        mime = "image/jpeg"
+        if path.suffix.lower() == ".png":
+            mime = "image/png"
+        elif path.suffix.lower() == ".webp":
+            mime = "image/webp"
+        ok = await evo.send_image_bytes(
+            base_url=evo_base,
+            api_key=evo_key,
+            instance=instance,
+            number=phone,
+            image_bytes=data,
+            filename=path.name,
+            caption=caption,
+            mimetype=mime,
+        )
+        if ok is None:
+            msg = "Encontrei o perfil mas nao consegui enviar a foto."
+            await say(msg)
+            return msg
+        return intro or f"Enviei o perfil @{ent.handle}."
+    await evo.send_text(
+        base_url=evo_base,
+        api_key=evo_key,
+        instance=instance,
+        number=phone,
+        text=caption,
+    )
+    return intro or f"Enviei o resumo de @{ent.handle}."
+
+
+def handle_list_instagram_links(phone: str) -> str:
+    from app.instagram_links_actions import format_instagram_links_list
+
+    return format_instagram_links_list(phone)
+
+
 def handle_save_memory(decision: dict[str, Any], phone: str) -> str:
     text = str(decision.get("memory_text") or "").strip()
     if not text:
@@ -2161,6 +2279,14 @@ async def execute_decision(
         result = handle_cancel_scheduled_response(decision, phone)
         return await finalize(result)
 
+    if action == "list_instagram_links":
+        result = handle_list_instagram_links(phone)
+        return await finalize(result)
+
+    if action == "delete_instagram_link":
+        result = handle_delete_instagram_link(decision, phone)
+        return await finalize(result)
+
     fallback = reply or "Não entendi o próximo passo."
     if messenger:
         await deliver(fallback)
@@ -2645,6 +2771,19 @@ async def handle_evolution_payload(
                 log.info("Cofre de senhas (pendente) phone=%s", phone_norm)
                 continue
 
+            if await try_handle_vault_intent_direct(
+                phone_norm,
+                user_text or "",
+                settings=settings,
+                record=inbound.record,
+                evo=evo,
+                evo_base=evo_base,
+                evo_key=evo_key,
+                instance=send_instance_early,
+            ):
+                log.info("Cofre de senhas (direto) phone=%s", phone_norm)
+                continue
+
             registry_list_reply = try_personal_registry_list_reply(
                 phone_norm, user_text or ""
             )
@@ -2675,6 +2814,66 @@ async def handle_evolution_payload(
                 message_record=inbound.record,
             ):
                 log.info("Rotina portao social tratou mensagem phone=%s", phone_norm)
+                continue
+
+            if (
+                evo_base
+                and evo_key
+                and send_instance_early
+                and http is not None
+                and await try_handle_instagram_link_pending(
+                    phone_norm,
+                    user_text or "",
+                    settings=settings,
+                    evo=evo,
+                    http=http,
+                    evo_base=evo_base,
+                    evo_key=evo_key,
+                    instance=send_instance_early,
+                )
+            ):
+                log.info("Rotina Instagram (pending) phone=%s", phone_norm)
+                record_exchange(phone_norm, user_text or "", "[fluxo Instagram]")
+                continue
+
+            ig_list_reply = try_instagram_links_list_reply(phone_norm, user_text or "")
+            if ig_list_reply:
+                reply_text = _truncate_whatsapp(ig_list_reply)
+                if evo_base and evo_key and send_instance_early:
+                    await pulse_whatsapp_typing()
+                    await evo.send_text(
+                        base_url=evo_base,
+                        api_key=evo_key,
+                        instance=send_instance_early,
+                        number=phone_norm,
+                        text=reply_text,
+                    )
+                    record_exchange(phone_norm, user_text or "", reply_text)
+                log.info("Listagem Instagram phone=%s", phone_norm)
+                continue
+
+            if (
+                evo_base
+                and evo_key
+                and send_instance_early
+                and http is not None
+                and await try_handle_instagram_link_inbound(
+                    phone_norm,
+                    user_text or "",
+                    settings=settings,
+                    evo=evo,
+                    http=http,
+                    evo_base=evo_base,
+                    evo_key=evo_key,
+                    instance=send_instance_early,
+                )
+            ):
+                log.info("Rotina Instagram (novo link) phone=%s", phone_norm)
+                record_exchange(phone_norm, user_text or "", "[fluxo Instagram]")
+                continue
+
+            if is_instagram_link_pending(phone_norm):
+                log.info("Instagram pending; ignorando Gemini phone=%s", phone_norm)
                 continue
 
             await _process_inbound_message(
@@ -2958,6 +3157,58 @@ async def _process_inbound_message(
                 user_text=user_text or "",
                 messenger=messenger,
                 reply_text=file_reply,
+                evo=evo,
+                evo_base=evo_base,
+                evo_key=evo_key,
+                instance=send_instance,
+            )
+            _log_message_timings(timings, messenger)
+            return
+
+        if action == "send_instagram_link" and send_instance:
+            ig_reply = await handle_send_instagram_link(
+                decision,
+                settings=settings,
+                evo=evo,
+                phone=phone_norm,
+                instance=send_instance,
+                messenger=messenger,
+            )
+            await _finish_whatsapp_exchange(
+                phone=phone_norm,
+                user_text=user_text or "",
+                messenger=messenger,
+                reply_text=ig_reply,
+                evo=evo,
+                evo_base=evo_base,
+                evo_key=evo_key,
+                instance=send_instance,
+            )
+            _log_message_timings(timings, messenger)
+            return
+
+        if action == "list_instagram_links":
+            list_reply = handle_list_instagram_links(phone_norm)
+            await _finish_whatsapp_exchange(
+                phone=phone_norm,
+                user_text=user_text or "",
+                messenger=messenger,
+                reply_text=list_reply,
+                evo=evo,
+                evo_base=evo_base,
+                evo_key=evo_key,
+                instance=send_instance,
+            )
+            _log_message_timings(timings, messenger)
+            return
+
+        if action == "delete_instagram_link":
+            del_ig = handle_delete_instagram_link(decision, phone_norm)
+            await _finish_whatsapp_exchange(
+                phone=phone_norm,
+                user_text=user_text or "",
+                messenger=messenger,
+                reply_text=del_ig,
                 evo=evo,
                 evo_base=evo_base,
                 evo_key=evo_key,

@@ -63,6 +63,8 @@ def is_list_personal_registry_intent(text: str) -> bool:
     t = (text or "").strip()
     if not t or is_delete_memory_intent(t):
         return False
+    if re.search(r"\b(?:senhas?|credenciais?|cofre)\b", t, re.I):
+        return False
     if re.search(
         r"\b(?:manda|envia|reenvia|mande|envie|recupera|recupere|busca|busque|pega|pegue)\b",
         t,

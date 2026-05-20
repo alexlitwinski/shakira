@@ -22,6 +22,42 @@ SECRET_REVEAL_DELETE_SEC = 10.0
 
 _CANCEL_RE = re.compile(r"^\s*(cancelar|cancela|nao|não|desistir)\s*[.!?]?\s*$", re.I)
 
+_VAULT_LIST_RE = re.compile(
+    r"(?:"
+    r"\b(?:quais|listar?|mostrar?|mostre|ver)\b.*\b(?:senhas?|credenciais?)\b.*(?:"
+    r"gravad\w*|guardad\w*|cofre"
+    r")"
+    r"|"
+    r"\b(?:senhas?|credenciais?)\b.*(?:gravad\w*|guardad\w*|cofre)"
+    r"|"
+    r"\b(?:o\s+que\s+tenho|itens)\b.*\b(?:no\s+)?cofre\b"
+    r"|"
+    r"\bcofre\s+de\s+senhas?\b"
+    r")",
+    re.I,
+)
+
+_VAULT_RETRIEVE_RE = re.compile(
+    r"(?:"
+    r"(?:mostr(?:e|a)|qual(?:\s+é|\s+e)?|recuper(?:e|a)|busc(?:e|a)|"
+    r"me\s+(?:d[ae]|manda|envia)|envi(?:e|a)|preciso\s+da?)\s+"
+    r"(?:a\s+)?senha\s+(?:d[aoe]\s+|de\s+)?(?P<label_retrieve>.+?)\s*[.!?]?\s*$"
+    r"|"
+    r"senha\s+(?:d[aoe]\s+|de\s+)(?P<label_alt>.+?)\s*[.!?]?\s*$"
+    r")",
+    re.I,
+)
+
+_VAULT_SAVE_RE = re.compile(
+    r"\b(?:guardar?|grava(?:r)?|salva(?:r)?|anotar?)\b.*\b(?:senha|credencial)\b",
+    re.I,
+)
+
+_HA_LOCK_PASSWORD_RE = re.compile(
+    r"\b(?:destranc|tranc|abre|fecha|porta|portão|portao|fechadura|lock)\b",
+    re.I,
+)
+
 _NOT_CONFIGURED_MSG = (
     "O cofre de senhas ainda não está configurado neste servidor. "
     "Defina a chave mestra nas opções do add-on (vault_master_key)."
@@ -57,6 +93,44 @@ def _vault_fields(decision: dict[str, Any]) -> tuple[str, str]:
     return label[:120], secret
 
 
+def classify_vault_intent(user_text: str) -> tuple[str, str]:
+    """
+    Detecta pedido direto ao cofre (sem Gemini).
+    Retorna (acao, rotulo): acao em vault_list|vault_retrieve|vault_save|''.
+    """
+    text = (user_text or "").strip()
+    if not text or _CANCEL_RE.match(text):
+        return "", ""
+    if _HA_LOCK_PASSWORD_RE.search(text) and not re.search(
+        r"\b(?:cofre|wifi|conta|site|servi[cç]o|email|e-mail)\b", text, re.I
+    ):
+        return "", ""
+
+    if _VAULT_LIST_RE.search(text):
+        return "vault_list", ""
+
+    m = _VAULT_SAVE_RE.search(text)
+    if m:
+        return "vault_save", ""
+
+    m = _VAULT_RETRIEVE_RE.search(text)
+    if m:
+        label = (m.group("label_retrieve") or m.group("label_alt") or "").strip()
+        label = re.sub(r"^(?:da|do|de|a|o)\s+", "", label, flags=re.I).strip(" .!?")
+        if label and len(label) >= 2:
+            return "vault_retrieve", label[:120]
+        return "vault_retrieve", ""
+
+    if re.search(
+        r"\b(?:qual|mostre|mostra)\b.*\bsenha\b",
+        text,
+        re.I,
+    ) and re.search(r"\b(?:cofre|gravad|guardad)\b", text, re.I):
+        return "vault_retrieve", ""
+
+    return "", ""
+
+
 async def _send_text_and_key(
     *,
     phone: str,
@@ -66,10 +140,29 @@ async def _send_text_and_key(
     evo_key: str,
     instance: str,
     messenger: StepMessenger | None = None,
+    schedule_secret_cleanup: bool = False,
 ) -> dict[str, Any] | None:
     body = truncate_whatsapp(polish_user_message(text))
     if messenger:
         await messenger.step(body)
+        if schedule_secret_cleanup:
+            key = messenger.last_message_key()
+            if key:
+                _schedule_secret_cleanup(
+                    _SentSecretCleanup(
+                        phone=phone,
+                        message_key=key,
+                        evo=evo,
+                        evo_base=evo_base,
+                        evo_key=evo_key,
+                        instance=instance,
+                    )
+                )
+            else:
+                log.warning(
+                    "Cofre: sem message key para apagar senha revelada phone=%s",
+                    phone,
+                )
         return None
     if not evo_base or not evo_key or not instance:
         return None
@@ -201,19 +294,26 @@ async def _reply_with_secret(
         evo_key=evo_key,
         instance=instance,
         messenger=messenger,
+        schedule_secret_cleanup=True,
     )
-    key = parse_message_key(response, phone=phone)
-    if key:
-        _schedule_secret_cleanup(
-            _SentSecretCleanup(
-                phone=phone,
-                message_key=key,
-                evo=evo,
-                evo_base=evo_base,
-                evo_key=evo_key,
-                instance=instance,
+    if not messenger:
+        key = parse_message_key(response, phone=phone)
+        if key:
+            _schedule_secret_cleanup(
+                _SentSecretCleanup(
+                    phone=phone,
+                    message_key=key,
+                    evo=evo,
+                    evo_base=evo_base,
+                    evo_key=evo_key,
+                    instance=instance,
+                )
             )
-        )
+        else:
+            log.warning(
+                "Cofre: sem message key para apagar senha revelada phone=%s",
+                phone,
+            )
     return reply
 
 
@@ -418,7 +518,12 @@ async def _handle_vault_retrieve(
         matches = store.find_entries(label_query)
 
     if not matches:
-        return f"Não encontrei senha para *{label_query}*.", False
+        hint = (
+            f"Não encontrei senha para *{label_query}* no cofre encriptado.\n\n"
+            "Se ainda não guardou aqui, diga por exemplo: "
+            f"*guardar senha de {label_query}* e envie a senha quando eu pedir."
+        )
+        return hint, False
 
     if len(matches) > 1:
         pending = VaultPending(
@@ -521,6 +626,79 @@ async def handle_vault_gemini_decision(
         return gemini_reply or "Senha enviada.", False, True
 
     return "Não entendi o pedido sobre o cofre de senhas.", False, False
+
+
+async def try_handle_vault_intent_direct(
+    phone: str,
+    user_text: str,
+    *,
+    settings: Any,
+    record: dict[str, Any] | None,
+    evo: EvolutionClient,
+    evo_base: str,
+    evo_key: str,
+    instance: str,
+) -> bool:
+    """
+    Trata pedidos explícitos ao cofre (listar/recuperar/guardar) sem passar pelo Gemini.
+    Evita que senhas na memória pessoal sejam devolvidas via action=reply.
+    """
+    action, label = classify_vault_intent(user_text)
+    if not action:
+        return False
+
+    if not evo_base or not evo_key or not instance:
+        log.error("Cofre senhas direto sem Evolution phone=%s", phone)
+        return True
+
+    messenger = StepMessenger(
+        evo=evo,
+        evo_base=evo_base,
+        evo_key=evo_key,
+        instance=instance,
+        phone=phone,
+    )
+    decision: dict[str, Any] = {"action": action}
+    if label:
+        decision["vault_label"] = label
+
+    redact_user = False
+    redact_assistant = False
+    reply = ""
+
+    async with TypingSession(
+        evo, evo_base=evo_base, evo_key=evo_key, instance=instance, phone=phone
+    ):
+        settings_key = getattr(settings, "vault_master_key", "")
+        reply, redact_user, redact_assistant = await handle_vault_gemini_decision(
+            decision,
+            phone=phone,
+            user_text=user_text,
+            settings_key=settings_key,
+            message_record=record,
+            evo=evo,
+            evo_base=evo_base,
+            evo_key=evo_key,
+            instance=instance,
+            messenger=messenger,
+        )
+        if reply and not messenger.sent_any:
+            await messenger.step(reply, final=True)
+
+    await _finish_exchange(
+        phone=phone,
+        user_text=user_text,
+        messenger=messenger,
+        reply_text=reply,
+        evo=evo,
+        evo_base=evo_base,
+        evo_key=evo_key,
+        instance=instance,
+        redact_user=redact_user,
+        redact_assistant=redact_assistant,
+    )
+    log.info("Cofre senhas (direto) phone=%s action=%s", phone, action)
+    return True
 
 
 async def try_handle_password_vault_pending(

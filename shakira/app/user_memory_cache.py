@@ -17,7 +17,8 @@ log = logging.getLogger(__name__)
 USER_MEMORY_CACHE_INSTRUCTION = """Você tem acesso a MEMÓRIA PERSISTENTE deste usuário WhatsApp.
 Use essas informações para responder perguntas sobre o que ele pediu para guardar ou lembrar.
 Não invente fatos que não estejam na memória ou no contexto da conversa atual.
-Para guardar nova informação use action=save_memory.
+NUNCA revele senhas, PINs de sites/contas ou Wi-Fi a partir da memória — use vault_retrieve/vault_list.
+Para guardar nova informação use action=save_memory (exceto credenciais; essas vão para vault_save).
 Para reenviar um arquivo guardado use action=send_user_file com file_id ou file_name.
 Para apagar anotação ou arquivo use action=delete_from_memory — nunca send_user_file.
 """

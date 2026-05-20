@@ -47,6 +47,25 @@ def _opts_int(
     return default
 
 
+def _opts_bool(opts: dict, key: str, default: bool = True, *, env_fallback: str | None = None) -> bool:
+    v = opts.get(key)
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, str):
+        low = v.strip().lower()
+        if low in ("true", "1", "yes", "sim"):
+            return True
+        if low in ("false", "0", "no", "nao", "não"):
+            return False
+    env_name = env_fallback or key.upper()
+    env = os.environ.get(env_name, "").strip().lower()
+    if env in ("true", "1", "yes", "sim"):
+        return True
+    if env in ("false", "0", "no", "nao", "não"):
+        return False
+    return default
+
+
 def _opts_log_level(opts: dict) -> str:
     v = opts.get("log_level")
     if isinstance(v, str) and v.strip():
@@ -79,6 +98,9 @@ class AppSettings:
     alerts_config_path: str
     shakira_api_token: str
     vault_master_key: str
+    apify_api_token: str
+    apify_instagram_actor: str
+    instagram_links_fetch_enabled: bool
     log_level: str
 
     @classmethod
@@ -136,6 +158,12 @@ class AppSettings:
             alerts_config_path=alerts_path,
             shakira_api_token=_opts_str(opts, "shakira_api_token", "SHAKIRA_API_TOKEN"),
             vault_master_key=_opts_str(opts, "vault_master_key", "SHAKIRA_VAULT_MASTER_KEY"),
+            apify_api_token=_opts_str(opts, "apify_api_token", "APIFY_API_TOKEN"),
+            apify_instagram_actor=_opts_str(opts, "apify_instagram_actor", "APIFY_INSTAGRAM_ACTOR")
+            or "apify/instagram-profile-scraper",
+            instagram_links_fetch_enabled=_opts_bool(
+                opts, "instagram_links_fetch_enabled", True, env_fallback="INSTAGRAM_LINKS_FETCH_ENABLED"
+            ),
             log_level=_opts_log_level(opts),
         )
 

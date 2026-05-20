@@ -22,14 +22,48 @@ def parse_message_key(payload: dict[str, Any] | None, *, phone: str) -> dict[str
         return None
 
     candidates: list[dict[str, Any]] = []
-    key = payload.get("key")
-    if isinstance(key, dict):
-        candidates.append(key)
-    message = payload.get("message")
-    if isinstance(message, dict):
-        inner = message.get("key")
-        if isinstance(inner, dict):
-            candidates.append(inner)
+    to_visit: list[dict[str, Any]] = [payload]
+    seen: set[int] = set()
+
+    while to_visit:
+        node = to_visit.pop(0)
+        nid = id(node)
+        if nid in seen:
+            continue
+        seen.add(nid)
+
+        key = node.get("key")
+        if isinstance(key, dict):
+            candidates.append(key)
+
+        message = node.get("message")
+        if isinstance(message, dict):
+            inner = message.get("key")
+            if isinstance(inner, dict):
+                candidates.append(inner)
+
+        msg_id = node.get("messageId") or node.get("message_id")
+        if msg_id and not any(c.get("id") == msg_id for c in candidates):
+            node_key = node.get("key")
+            remote = node.get("remoteJid") or node.get("remote_jid")
+            if not remote and isinstance(node_key, dict):
+                remote = node_key.get("remoteJid")
+            candidates.append(
+                {
+                    "id": str(msg_id),
+                    "remoteJid": str(remote or remote_jid_for_number(phone)),
+                    "fromMe": bool(node.get("fromMe", True)),
+                }
+            )
+
+        for nested_key in ("data", "result", "response"):
+            nested = node.get(nested_key)
+            if isinstance(nested, dict):
+                to_visit.append(nested)
+            elif isinstance(nested, list):
+                for item in nested:
+                    if isinstance(item, dict):
+                        to_visit.append(item)
 
     for candidate in candidates:
         msg_id = candidate.get("id")

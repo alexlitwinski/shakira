@@ -8,7 +8,9 @@ import logging
 import os
 from dataclasses import dataclass, field
 
-from app.evolution import EvolutionClient
+from typing import Any
+
+from app.evolution import EvolutionClient, parse_message_key
 from app.user_friendly import polish_user_message
 
 log = logging.getLogger(__name__)
@@ -32,10 +34,15 @@ class StepMessenger:
     instance: str
     phone: str
     _parts: list[str] = field(default_factory=list)
+    _last_send_response: dict[str, Any] | None = field(default=None, repr=False)
 
     @property
     def sent_any(self) -> bool:
         return bool(self._parts)
+
+    def last_message_key(self) -> dict[str, Any] | None:
+        """Chave da ultima mensagem enviada (para apagar senha revelada no chat)."""
+        return parse_message_key(self._last_send_response, phone=self.phone)
 
     def combined(self) -> str:
         return "\n\n".join(self._parts)
@@ -60,6 +67,7 @@ class StepMessenger:
             number=self.phone,
             text=msg,
         )
+        self._last_send_response = result if isinstance(result, dict) else None
         if result is None:
             log.warning("StepMessenger: falha ao enviar passo (%s chars)", len(msg))
         else:
