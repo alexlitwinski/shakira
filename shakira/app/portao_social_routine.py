@@ -13,6 +13,11 @@ import httpx
 
 from app.devices_catalog import DevicesCatalog
 from app.homeassistant import HomeAssistantClient
+from app.password_security import (
+    SECURITY_DELETE_NOTICE,
+    append_security_delete_notice,
+    try_delete_inbound_password_message,
+)
 from app.user_friendly import polish_user_message
 from app.whatsapp_steps import StepMessenger, TypingSession
 
@@ -409,6 +414,11 @@ def clear_pending(phone: str) -> None:
     _pending.pop(phone, None)
 
 
+def is_password_stage_pending(phone: str) -> bool:
+    pending = _pending.get(phone)
+    return pending is not None and pending.stage == "password"
+
+
 async def _finish_exchange(
     *,
     phone: str,
@@ -444,6 +454,26 @@ async def _finish_exchange(
     record_exchange(phone, user_text, text)
 
 
+async def _delete_password_message_if_needed(
+    *,
+    user_text: str,
+    message_record: dict[str, Any] | None,
+    evo: Any,
+    evo_base: str,
+    evo_key: str,
+    instance: str,
+) -> bool:
+    return await try_delete_inbound_password_message(
+        record=message_record,
+        user_text=user_text,
+        should_treat_as_password=True,
+        evo=evo,
+        evo_base=evo_base,
+        evo_key=evo_key,
+        instance=instance,
+    )
+
+
 async def try_handle_portao_social_inbound(
     phone: str,
     user_text: str,
@@ -454,6 +484,7 @@ async def try_handle_portao_social_inbound(
     evo_base: str,
     evo_key: str,
     instance: str,
+    message_record: dict[str, Any] | None = None,
 ) -> bool:
     """
     Trata pedidos de abrir portao social / entrar em casa.
@@ -657,9 +688,21 @@ async def try_handle_portao_social_inbound(
                 )
             return True
 
+        pwd_deleted = await _delete_password_message_if_needed(
+            user_text=text,
+            message_record=message_record,
+            evo=evo,
+            evo_base=evo_base,
+            evo_key=evo_key,
+            instance=instance,
+        )
+
         candidate = text if re.fullmatch(r"\d{4,8}", text) else None
         if not candidate or candidate != PORTAO_SOCIAL_PASSWORD:
-            reply = "Codigo incorreto. Tente novamente ou envie *cancelar*."
+            reply = append_security_delete_notice(
+                "Codigo incorreto. Tente novamente ou envie *cancelar*.",
+                deleted=pwd_deleted,
+            )
             if evo_base and evo_key and instance:
                 messenger = StepMessenger(
                     evo=evo,
@@ -692,6 +735,8 @@ async def try_handle_portao_social_inbound(
             instance=instance,
             phone=phone,
         )
+        if pwd_deleted:
+            await messenger.step(SECURITY_DELETE_NOTICE)
         async with TypingSession(
             evo, evo_base=evo_base, evo_key=evo_key, instance=instance, phone=phone
         ):
@@ -721,6 +766,15 @@ async def try_handle_portao_social_inbound(
             log.error("Portao social intent+senha sem Evolution phone=%s", phone)
             return True
 
+        pwd_deleted = await _delete_password_message_if_needed(
+            user_text=text,
+            message_record=message_record,
+            evo=evo,
+            evo_base=evo_base,
+            evo_key=evo_key,
+            instance=instance,
+        )
+
         messenger = StepMessenger(
             evo=evo,
             evo_base=evo_base,
@@ -728,6 +782,8 @@ async def try_handle_portao_social_inbound(
             instance=instance,
             phone=phone,
         )
+        if pwd_deleted:
+            await messenger.step(SECURITY_DELETE_NOTICE)
         async with TypingSession(
             evo, evo_base=evo_base, evo_key=evo_key, instance=instance, phone=phone
         ):

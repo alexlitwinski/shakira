@@ -78,6 +78,7 @@ class AppSettings:
     frigate_cameras_config_path: str
     alerts_config_path: str
     shakira_api_token: str
+    vault_master_key: str
     log_level: str
 
     @classmethod
@@ -134,6 +135,7 @@ class AppSettings:
             frigate_cameras_config_path=cameras_path,
             alerts_config_path=alerts_path,
             shakira_api_token=_opts_str(opts, "shakira_api_token", "SHAKIRA_API_TOKEN"),
+            vault_master_key=_opts_str(opts, "vault_master_key", "SHAKIRA_VAULT_MASTER_KEY"),
             log_level=_opts_log_level(opts),
         )
 

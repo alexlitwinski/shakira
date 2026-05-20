@@ -73,7 +73,15 @@ from app.user_memory_actions import (
     handle_delete_from_memory,
     try_memory_delete_override,
 )
-from app.portao_social_routine import try_handle_portao_social_inbound
+from app.password_vault_routine import try_handle_password_vault_inbound
+from app.password_security import (
+    append_security_delete_notice,
+    try_delete_inbound_password_message,
+)
+from app.portao_social_routine import (
+    is_password_stage_pending,
+    try_handle_portao_social_inbound,
+)
 from app.pending_media import (
     build_media_choice_prompt,
     build_pending_clarification,
@@ -798,6 +806,37 @@ def _extract_password_from_message(user_text: str, decision: dict[str, Any]) -> 
     return None
 
 
+def _has_password_pending(phone: str) -> bool:
+    return phone in _pending_unlock or is_password_stage_pending(phone)
+
+
+def _should_delete_password_inbound(phone: str, user_text: str) -> bool:
+    if _has_password_pending(phone):
+        return True
+    return bool(_extract_password_from_message(user_text, {}))
+
+
+async def _secure_delete_password_message(
+    *,
+    phone: str,
+    user_text: str,
+    record: dict[str, Any] | None,
+    evo: EvolutionClient,
+    evo_base: str,
+    evo_key: str,
+    instance: str,
+) -> bool:
+    return await try_delete_inbound_password_message(
+        record=record,
+        user_text=user_text,
+        should_treat_as_password=_should_delete_password_inbound(phone, user_text),
+        evo=evo,
+        evo_base=evo_base,
+        evo_key=evo_key,
+        instance=instance,
+    )
+
+
 async def _execute_unlock_pending(
     phone: str,
     pending: PendingUnlock,
@@ -834,6 +873,11 @@ async def try_handle_pending_password(
     *,
     ha: HomeAssistantClient,
     catalog: DevicesCatalog,
+    message_record: dict[str, Any] | None = None,
+    evo: EvolutionClient | None = None,
+    evo_base: str = "",
+    evo_key: str = "",
+    instance: str = "",
 ) -> str | None:
     """Se ha destrancar pendente, tenta validar senha. Retorna resposta ou None."""
     pending = _pending_unlock.get(phone)
@@ -847,13 +891,28 @@ async def try_handle_pending_password(
         pending.domain,
         pending.service,
     )
+    deleted = False
+    if evo and message_record is not None:
+        deleted = await _secure_delete_password_message(
+            phone=phone,
+            user_text=user_text,
+            record=message_record,
+            evo=evo,
+            evo_base=evo_base,
+            evo_key=evo_key,
+            instance=instance,
+        )
     candidate = user_text.strip()
     if not catalog.verify_password(pending.entity_id, candidate):
         log.info("Senha incorreta phone=%s entity=%s (len=%s)", phone, pending.entity_id, len(candidate))
-        return "Senha incorreta. Tente novamente ou cancele enviando outro comando."
+        return append_security_delete_notice(
+            "Senha incorreta. Tente novamente ou cancele enviando outro comando.",
+            deleted=deleted,
+        )
 
     log.info("Senha OK phone=%s entity=%s, executando unlock", phone, pending.entity_id)
-    return await _execute_unlock_pending(phone, pending, ha=ha)
+    reply = await _execute_unlock_pending(phone, pending, ha=ha)
+    return append_security_delete_notice(reply, deleted=deleted)
 
 
 def build_gemini_assistant(
@@ -1819,6 +1878,11 @@ async def execute_decision(
     user_text: str,
     entities_context_used: bool,
     messenger: StepMessenger | None = None,
+    message_record: dict[str, Any] | None = None,
+    evo: EvolutionClient | None = None,
+    evo_base: str = "",
+    evo_key: str = "",
+    instance: str = "",
 ) -> str:
     action = _normalize_action_name(decision.get("action"))
     if action not in VALID_GEMINI_ACTIONS:
@@ -1930,6 +1994,8 @@ async def execute_decision(
                 "So posso controlar o que esta na lista de dispositivos do assistente."
             )
 
+        pwd_deleted = False
+        pwd_notice_needed = False
         if catalog.service_requires_password(target, service):
             password = _extract_password_from_message(user_text, decision)
             has_pwd = bool(password)
@@ -1942,6 +2008,18 @@ async def execute_decision(
                 pwd_ok,
                 bool(decision.get("provided_password")),
             )
+            if has_pwd:
+                pwd_notice_needed = True
+            if has_pwd and evo and message_record is not None:
+                pwd_deleted = await _secure_delete_password_message(
+                    phone=phone,
+                    user_text=user_text,
+                    record=message_record,
+                    evo=evo,
+                    evo_base=evo_base,
+                    evo_key=evo_key,
+                    instance=instance,
+                )
             if not password or not pwd_ok:
                 _pending_unlock[phone] = PendingUnlock(
                     entity_id=target,
@@ -1952,6 +2030,8 @@ async def execute_decision(
                 log.info("Unlock pendente registrado phone=%s entity=%s", phone, target)
                 prompt = catalog.password_prompt_for(target)
                 msg = _password_prompt_message(reply, prompt)
+                if has_pwd:
+                    msg = append_security_delete_notice(msg, deleted=pwd_deleted)
                 if messenger:
                     await messenger.step(msg)
                     return ""
@@ -1989,6 +2069,8 @@ async def execute_decision(
             )
             if notify_extra:
                 done = f"{done}\n\n{notify_extra}"
+            if pwd_notice_needed:
+                done = append_security_delete_notice(done, deleted=pwd_deleted)
             if messenger:
                 await deliver(done, final=True)
                 return ""
@@ -2484,6 +2566,11 @@ async def handle_evolution_payload(
                 user_text or "",
                 ha=ha,
                 catalog=catalog,
+                message_record=inbound.record,
+                evo=evo,
+                evo_base=evo_base,
+                evo_key=evo_key,
+                instance=send_instance,
             )
             if pending_reply is not None:
                 log.info(
@@ -2507,6 +2594,19 @@ async def handle_evolution_payload(
             send_instance_early = _resolve_evolution_instance(
                 _inst_hint, webhook_instance, default_inst, settings
             )
+            if await try_handle_password_vault_inbound(
+                phone_norm,
+                user_text or "",
+                record=inbound.record,
+                settings=settings,
+                evo=evo,
+                evo_base=evo_base,
+                evo_key=evo_key,
+                instance=send_instance_early,
+            ):
+                log.info("Cofre de senhas tratou mensagem phone=%s", phone_norm)
+                continue
+
             if await try_handle_portao_social_inbound(
                 phone_norm,
                 user_text or "",
@@ -2516,6 +2616,7 @@ async def handle_evolution_payload(
                 evo_base=evo_base or "",
                 evo_key=evo_key or "",
                 instance=send_instance_early or "",
+                message_record=inbound.record,
             ):
                 log.info("Rotina portao social tratou mensagem phone=%s", phone_norm)
                 continue
@@ -2817,6 +2918,11 @@ async def _process_inbound_message(
             user_text=user_text or "",
             entities_context_used=True,
             messenger=messenger,
+            message_record=inbound.record,
+            evo=evo,
+            evo_base=evo_base,
+            evo_key=evo_key,
+            instance=send_instance,
         )
 
         if not phone_norm:

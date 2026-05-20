@@ -11,6 +11,45 @@ import httpx
 log = logging.getLogger(__name__)
 
 
+def remote_jid_for_number(number: str) -> str:
+    digits = "".join(c for c in number if c.isdigit())
+    return f"{digits}@s.whatsapp.net"
+
+
+def parse_message_key(payload: dict[str, Any] | None, *, phone: str) -> dict[str, Any] | None:
+    """Extrai key.id/remoteJid/fromMe de resposta Evolution ou record inbound."""
+    if not isinstance(payload, dict):
+        return None
+
+    candidates: list[dict[str, Any]] = []
+    key = payload.get("key")
+    if isinstance(key, dict):
+        candidates.append(key)
+    message = payload.get("message")
+    if isinstance(message, dict):
+        inner = message.get("key")
+        if isinstance(inner, dict):
+            candidates.append(inner)
+
+    for candidate in candidates:
+        msg_id = candidate.get("id")
+        if not msg_id:
+            continue
+        remote = candidate.get("remoteJid") or payload.get("remoteJid")
+        if not remote:
+            remote = remote_jid_for_number(phone)
+        out: dict[str, Any] = {
+            "id": str(msg_id),
+            "remoteJid": str(remote),
+            "fromMe": bool(candidate.get("fromMe", payload.get("fromMe", True))),
+        }
+        participant = candidate.get("participant") or payload.get("participant")
+        if participant:
+            out["participant"] = str(participant)
+        return out
+    return None
+
+
 class EvolutionClient:
     def __init__(self, client: httpx.AsyncClient) -> None:
         self._client = client
@@ -257,6 +296,47 @@ class EvolutionClient:
             filename=filename,
             caption=caption,
         )
+
+    async def delete_message_for_everyone(
+        self,
+        *,
+        base_url: str,
+        api_key: str,
+        instance: str,
+        message_id: str,
+        remote_jid: str,
+        from_me: bool = False,
+        participant: str | None = None,
+    ) -> bool:
+        """Apaga mensagem para todos no chat (ex.: senha enviada pelo utilizador)."""
+        base = base_url.rstrip("/")
+        url = f"{base}/chat/deleteMessageForEveryone/{instance}"
+        body: dict[str, Any] = {
+            "id": message_id,
+            "remoteJid": remote_jid,
+            "fromMe": from_me,
+        }
+        if participant:
+            body["participant"] = participant
+        try:
+            r = await self._client.request(
+                "DELETE",
+                url,
+                headers=self._auth_headers(api_key),
+                json=body,
+                timeout=30.0,
+            )
+        except httpx.RequestError as e:
+            log.warning("Evolution deleteMessageForEveryone failed: %s", e)
+            return False
+        if r.status_code not in (200, 201):
+            log.warning(
+                "Evolution deleteMessageForEveryone %s: %s",
+                r.status_code,
+                r.text[:400],
+            )
+            return False
+        return True
 
     async def send_document_bytes(
         self,
