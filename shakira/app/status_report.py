@@ -22,7 +22,7 @@ from app.message_timing import recent_averages
 
 log = logging.getLogger(__name__)
 
-VERSION = "1.7.9"
+VERSION = "1.7.10"
 
 
 def _mask_secret(value: str, visible: int = 4) -> str:

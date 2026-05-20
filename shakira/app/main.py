@@ -35,6 +35,7 @@ from app.cameras_yaml_io import (
 )
 from app.devices_yaml_io import read_yaml_file, validate_yaml_content, write_yaml_file
 from app.entities_browser import build_entities_payload
+from app.evolution import EvolutionClient
 from app.gemini_cache import ensure_catalog_cache
 from app.handlers import handle_evolution_payload
 from app.homeassistant import HomeAssistantClient
