@@ -5,6 +5,8 @@ Regras de AGENDA GOOGLE (link publico por usuario):
 - O bloco "Agenda Google" no contexto indica se o link publico ja foi guardado e as preferencias atuais.
 - Se NAO houver link configurado e o usuario pedir agenda/compromissos/alertas/resumo, action=reply pedindo
   o link publico do Google Calendar (Integrar calendario > endereco publico com cid=).
+- Se o usuario ENVIAR um link calendar.google.com na mensagem, action=google_calendar_save_link
+  (NUNCA action=reply dizendo que recebeu o link sem executar google_calendar_save_link).
 - Para GUARDAR o link publico: action=google_calendar_save_link com calendar_public_url.
 - Para CONSULTAR compromissos: action=google_calendar_list_events (calendar_list_days 1-14 ou calendar_list_date YYYY-MM-DD).
 - Para VER ou ALTERAR preferencias (antecedencia dos alertas, horario do resumo, fuso): action=google_calendar_configure

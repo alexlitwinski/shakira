@@ -12,7 +12,6 @@ import httpx
 from app.google_calendar_parser import (
     fetch_calendar_events,
     format_events_list,
-    parse_google_calendar_public_url,
 )
 from app.google_calendar_store import (
     GoogleCalendarConfig,
@@ -94,27 +93,15 @@ def handle_google_calendar_save_link(
             str(decision.get("response") or "").strip()
             or "Envie o link publico do Google Calendar (com cid= ou src=)."
         )
-    try:
-        cal_id, ics_url, normalized = parse_google_calendar_public_url(url)
-    except ValueError as e:
-        return f"Nao consegui usar esse link: {e}"
+    from app.google_calendar_routine import save_google_calendar_link
 
-    store = get_google_calendar_store(phone)
-    cfg = store.load()
-    cfg.public_url = normalized
-    cfg.calendar_id = cal_id
-    cfg.ics_url = ics_url
-    store.save(cfg)
-
+    base_reply, ok = save_google_calendar_link(phone, url)
+    if not ok:
+        return base_reply
     confirm = str(decision.get("response") or "").strip()
-    if confirm:
+    if confirm and "http" not in confirm.lower():
         return confirm
-    return (
-        f"Link da agenda guardado ({cal_id}).\n\n"
-        f"Alertas: {cfg.alert_advance_minutes} min antes.\n"
-        f"Resumo diario: {cfg.daily_summary_time} ({cfg.timezone}).\n\n"
-        "Pode pedir para mudar a antecedencia ou o horario do resumo."
-    )
+    return base_reply
 
 
 def handle_google_calendar_configure(

@@ -14,5 +14,6 @@ Regras de VERIFICACAO DE NOTICIAS / FACT-CHECK (fact_check_claim):
 - Se faltar contexto (alegacao vaga), action=reply pedindo o trecho ou link da noticia.
 - Nao use fact_check_claim para consultar sensores/dispositivos da casa, senhas, fotos ou Instagram.
 - Nao confunda com reply generico: se o pedido e checar veracidade de informacao externa, e fact_check_claim.
+- PROIBIDO recusar por ser "automacao residencial" ou "sem conhecimento medico/juridico" — use fact_check_claim.
 - Campos JSON: fact_check_query (obrigatorio), fact_check_language (opcional).
 """

@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from app.birthday_actions import format_birthday_line
+from app.birthday_actions import format_birthday_entry_line
 from app.birthday_store import BirthdayConfig, BirthdayStore, iter_stores_with_birthdays
 from app.config import AppSettings
 from app.conversation_history import append as history_append
@@ -129,8 +129,16 @@ class BirthdayRunner:
             "Aniversarios desta semana:",
             "",
         ]
-        for entry, _, _ in upcoming:
-            lines.append(format_birthday_line(entry, ref=today, include_weekday=True))
+        for entry, when, _ in upcoming:
+            lines.append(
+                format_birthday_entry_line(
+                    entry,
+                    when=when,
+                    ref=today,
+                    include_weekday=True,
+                    include_relative=True,
+                )
+            )
 
         await self._send(phone, "\n".join(lines))
         cfg.last_weekly_summary_date = today_iso

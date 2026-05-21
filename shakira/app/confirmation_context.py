@@ -42,6 +42,19 @@ _BOILER_HINTS = (
     "temperatura da água",
 )
 
+_CONFIRMATION_QUESTION_RE = re.compile(
+    r"(?:quer que eu|posso (?:fazer|ajustar|diminuir|aumentar|ligar|desligar|acender|apagar)|"
+    r"devo (?:fazer|ajustar|diminuir|aumentar|ligar|desligar|acender|apagar)|"
+    r"confirma|faço isso|fazer isso|executo|prossiga)",
+    re.IGNORECASE,
+)
+
+_ACTION_PROMISE_RE = re.compile(
+    r"\b(?:vou|irei)\s+(?:diminuir|aumentar|ligar|desligar|acender|apagar|ajustar|destrancar|"
+    r"trancar|executar|fazer|reduzir|alterar|mudar|ativar|desativar)\b",
+    re.IGNORECASE,
+)
+
 
 def is_affirmative_short(user_text: str) -> bool:
     return bool(AFFIRMATIVE_SHORT_RE.match((user_text or "").strip()))
@@ -52,6 +65,44 @@ def last_assistant_text(entries: list[HistoryEntry]) -> str:
         if entry.role == "assistant":
             return entry.text
     return ""
+
+
+def assistant_asked_confirmation(last_assistant: str) -> bool:
+    return bool(_CONFIRMATION_QUESTION_RE.search(last_assistant or ""))
+
+
+def reply_promises_action(decision: dict[str, Any]) -> bool:
+    reply = str(decision.get("response") or "").strip()
+    if not reply:
+        return False
+    return bool(_ACTION_PROMISE_RE.search(reply))
+
+
+def needs_confirmation_execution_retry(
+    user_text: str,
+    history_entries: list[HistoryEntry],
+    decision: dict[str, Any],
+) -> bool:
+    """Gemini respondeu com reply prometendo agir, mas o usuario ja confirmou."""
+    if not is_affirmative_short(user_text):
+        return False
+    if not assistant_asked_confirmation(last_assistant_text(history_entries)):
+        return False
+    action = str(decision.get("action") or "reply").strip().lower()
+    if action != "reply":
+        return False
+    return reply_promises_action(decision)
+
+
+def confirmation_execution_retry_message(last_assistant: str) -> str:
+    return (
+        "[Confirmação do usuário] Sim — EXECUTE AGORA com action=call_service (ou a action "
+        "correta) exatamente o que você ofereceu na mensagem imediatamente anterior:\n"
+        f"«{last_assistant.strip()}»\n"
+        "NÃO use action=reply apenas prometendo fazer depois. Se forem várias luzes ou "
+        "dispositivos, inclua todos em service_data.entity_id (lista) ou execute a ação "
+        "completa descrita na sua pergunta."
+    )
 
 
 def classify_last_assistant_topic(last_assistant: str) -> str | None:
@@ -74,6 +125,13 @@ def augment_user_message_for_affirmative(
         return base
 
     last = last_assistant_text(history_entries)
+    if assistant_asked_confirmation(last):
+        return (
+            f"{base}\n\n"
+            "[Confirmação do usuário] Sim — EXECUTE AGORA com action=call_service (ou a action "
+            "correta) o que você ofereceu na mensagem imediatamente anterior. "
+            "NÃO responda só com action=reply prometendo fazer depois."
+        )
     topic = classify_last_assistant_topic(last)
     if topic == "door":
         return (

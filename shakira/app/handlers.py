@@ -20,7 +20,10 @@ from app.cameras_catalog import CamerasCatalog
 from app.config import AppSettings
 from app.confirmation_context import (
     augment_user_message_for_affirmative,
+    confirmation_execution_retry_message,
     correct_affirmative_misroute,
+    last_assistant_text,
+    needs_confirmation_execution_retry,
 )
 from app.conversation_history import format_for_prompt, get_recent, record_exchange
 from app.devices_catalog import DevicesCatalog
@@ -72,6 +75,7 @@ from app.user_memory_prompts import USER_MEMORY_ACTIONS_INSTRUCTION
 from app.instagram_links_prompts import INSTAGRAM_LINKS_ACTIONS_INSTRUCTION
 from app.fact_check_prompts import FACT_CHECK_ACTIONS_INSTRUCTION
 from app.fact_check_actions import handle_fact_check_claim
+from app.fact_check_overrides import try_fact_check_decision_override
 from app.google_calendar_prompts import GOOGLE_CALENDAR_ACTIONS_INSTRUCTION
 from app.google_calendar_actions import (
     handle_google_calendar_configure,
@@ -81,6 +85,8 @@ from app.google_calendar_actions import (
 )
 from app.google_calendar_store import get_google_calendar_store
 from app.google_calendar_runner import ensure_google_calendar_runner_running
+from app.google_calendar_routine import try_handle_google_calendar_link_inbound
+from app.google_calendar_overrides import try_google_calendar_decision_override
 from app.birthday_prompts import BIRTHDAY_ACTIONS_INSTRUCTION
 from app.birthday_actions import (
     handle_birthday_delete,
@@ -680,22 +686,32 @@ def _resolve_evolution_instance(
     return (hint or str(webhook_instance) or default_inst or settings.evolution_instance).strip()
 
 
+def extract_target_entity_ids(
+    domain: str,
+    service: str,
+    service_data: dict[str, Any] | None,
+    decision_entity_id: Any = None,
+) -> list[str]:
+    if isinstance(decision_entity_id, str) and decision_entity_id.strip():
+        return [decision_entity_id.strip()]
+    if not service_data:
+        return []
+    eid = service_data.get("entity_id")
+    if isinstance(eid, str) and eid.strip():
+        return [eid.strip()]
+    if isinstance(eid, list):
+        return [str(x).strip() for x in eid if str(x).strip()]
+    return []
+
+
 def extract_target_entity_id(
     domain: str,
     service: str,
     service_data: dict[str, Any] | None,
     decision_entity_id: Any = None,
 ) -> str | None:
-    if isinstance(decision_entity_id, str) and decision_entity_id.strip():
-        return decision_entity_id.strip()
-    if not service_data:
-        return None
-    eid = service_data.get("entity_id")
-    if isinstance(eid, str) and eid.strip():
-        return eid.strip()
-    if isinstance(eid, list) and eid:
-        return str(eid[0]).strip()
-    return None
+    ids = extract_target_entity_ids(domain, service, service_data, decision_entity_id)
+    return ids[0] if ids else None
 
 
 def _log_service_payload(label: str, payload: dict[str, Any]) -> None:
@@ -837,9 +853,14 @@ def build_ha_service_data(
     raw: dict[str, Any] | None,
 ) -> dict[str, Any]:
     """Monta payload aceito pela API REST do HA (evita campos extras do JSON do Gemini)."""
-    data: dict[str, Any] = {"entity_id": entity_id}
-    if not raw:
-        return data
+    raw = raw or {}
+    raw_eid = raw.get("entity_id")
+    if isinstance(raw_eid, list) and raw_eid:
+        data: dict[str, Any] = {
+            "entity_id": [str(x).strip() for x in raw_eid if str(x).strip()]
+        }
+    else:
+        data = {"entity_id": entity_id}
     # PIN da integracao lock no HA (diferente da senha Shakira no catalogo)
     if domain == "lock" and service in ("unlock", "lock", "open"):
         code = raw.get("code")
@@ -853,6 +874,10 @@ def build_ha_service_data(
         code = raw.get("code")
         if isinstance(code, str) and code.strip():
             data["code"] = code.strip()
+    if domain == "light":
+        for key in ("brightness", "brightness_pct", "color_temp", "kelvin", "rgb_color", "xy_color"):
+            if key in raw and raw[key] is not None:
+                data[key] = raw[key]
     return data
 
 
@@ -2158,6 +2183,7 @@ async def execute_decision(
         raw_svc_data = dict(svc_data) if isinstance(svc_data, dict) else {}
 
         target = extract_target_entity_id(domain, service, raw_svc_data, decision.get("entity_id"))
+        targets = extract_target_entity_ids(domain, service, raw_svc_data, decision.get("entity_id"))
         if not target:
             return await finalize("Informe entity_id no comando.")
 
@@ -2176,7 +2202,8 @@ async def execute_decision(
             return await finalize(
                 "Ainda não tenho nenhum aparelho autorizado para controlar por aqui."
             )
-        if target not in allowed:
+        disallowed = [t for t in targets if t not in allowed]
+        if disallowed:
             return await finalize(
                 "Não tenho permissão para alterar esse aparelho. "
                 "Só posso controlar o que está na lista de dispositivos do assistente."
@@ -2950,6 +2977,24 @@ async def handle_evolution_payload(
                 and evo_key
                 and send_instance_early
                 and http is not None
+                and await try_handle_google_calendar_link_inbound(
+                    phone_norm,
+                    user_text or "",
+                    http=http,
+                    evo=evo,
+                    evo_base=evo_base,
+                    evo_key=evo_key,
+                    instance=send_instance_early,
+                )
+            ):
+                log.info("Google Calendar link guardado phone=%s", phone_norm)
+                continue
+
+            if (
+                evo_base
+                and evo_key
+                and send_instance_early
+                and http is not None
                 and await try_handle_instagram_link_pending(
                     phone_norm,
                     user_text or "",
@@ -3164,6 +3209,32 @@ async def _process_inbound_message(
         active_scenario_id = retry_scenario_id
         retries_used = 0
 
+        if needs_confirmation_execution_retry(
+            user_text or "", history_entries, decision
+        ) and retries_used < _GEMINI_MAX_RETRIES:
+            retry_msg = (
+                f"{gemini_user_message}\n\n"
+                f"{confirmation_execution_retry_message(last_assistant_text(history_entries))}"
+            )
+            log.info("Retry Gemini: confirmacao sem call_service phone=%s", phone_norm)
+            retries_used += 1
+            decision = await _gemini_decide(
+                user_message=retry_msg,
+                entities_context=ctx,
+                conversation_history=history_text,
+                user_memory_context=memory_context,
+                memory_in_cache=memory_in_cache,
+            )
+            decision = correct_affirmative_misroute(
+                decision,
+                user_text=user_text or "",
+                history_entries=history_entries,
+                catalog=catalog,
+            )
+            decision, retry_scenario_id = normalize_gemini_action(decision, catalog)
+            if retry_scenario_id:
+                active_scenario_id = retry_scenario_id
+
         if retry_scenario_id and retries_used < _GEMINI_MAX_RETRIES:
             ctx_retry = await _apply_scenario_context_for_retry(
                 ha, catalog, ctx, retry_scenario_id, states_map=states_map
@@ -3197,6 +3268,16 @@ async def _process_inbound_message(
             user_text=user_text or "",
             history_text=history_text,
             history_entries=history_entries,
+        )
+        decision = try_google_calendar_decision_override(
+            decision,
+            phone=phone_norm,
+            user_text=user_text or "",
+        )
+        decision = try_fact_check_decision_override(
+            decision,
+            user_text=user_text or "",
+            settings=settings,
         )
 
         if not _decision_is_complete(decision):

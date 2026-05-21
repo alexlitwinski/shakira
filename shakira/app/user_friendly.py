@@ -174,6 +174,12 @@ def format_action_in_progress(
         return f"Vou desligar {label}..."
 
     if domain == "light" and service == "turn_on":
+        pct = data.get("brightness_pct")
+        bri = data.get("brightness")
+        if pct is not None:
+            return f"Vou ajustar {label} para {pct}%..."
+        if bri is not None:
+            return f"Vou ajustar a intensidade de {label}..."
         return f"Vou acender {label}..."
     if domain == "light" and service == "turn_off":
         return f"Vou apagar {label}..."
@@ -228,6 +234,11 @@ def format_action_success(
         return f"Pronto! {label} desligado(a)."
 
     if domain == "light" and service == "turn_on":
+        pct = data.get("brightness_pct")
+        if pct is not None:
+            return f"Pronto! {label} ajustado(a) para {pct}%."
+        if data.get("brightness") is not None:
+            return f"Pronto! Intensidade de {label} ajustada."
         return f"Pronto! {label} aceso(a)."
     if domain == "light" and service == "turn_off":
         return f"Pronto! {label} apagado(a)."

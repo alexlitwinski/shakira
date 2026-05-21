@@ -105,59 +105,85 @@ def parse_birthday_date_text(text: str) -> tuple[int, int, int | None] | str:
     return f"Nao reconheci a data: {text}"
 
 
-def format_birthday_line(entry: BirthdayEntry, *, ref: date, include_weekday: bool = False) -> str:
-    when = entry.next_occurrence(ref)
-    weekday = ""
+def format_birthday_entry_line(
+    entry: BirthdayEntry,
+    *,
+    when: date,
+    ref: date | None = None,
+    include_weekday: bool = False,
+    include_relative: bool = False,
+) -> str:
+    date_str = when.strftime("%d/%m")
     if include_weekday:
-        weekday = f" ({_WEEKDAY_NAMES[when.weekday()]})"
+        date_str += f" ({_WEEKDAY_NAMES[when.weekday()]})"
+
+    extras: list[str] = []
+    if include_relative and ref is not None:
+        days = (when - ref).days
+        if days == 0:
+            extras.append("hoje")
+        elif days == 1:
+            extras.append("amanha")
+
     age = entry.age_on(when)
-    age_bit = f" — {age} anos" if age is not None else ""
-    note = f" — {entry.note}" if entry.note else ""
-    days = entry.days_until(ref)
-    if days == 0:
-        when_bit = "hoje"
-    elif days == 1:
-        when_bit = "amanha"
-    else:
-        when_bit = f"em {days} dias ({when.strftime('%d/%m')}{weekday})"
-    return f"• {entry.name} — {when_bit}{age_bit}{note}"
+    if age is not None:
+        extras.append(f"{age} anos")
+    if entry.note:
+        extras.append(entry.note)
+
+    line = f"{date_str} — {entry.name}"
+    if extras:
+        line += f" — {' — '.join(extras)}"
+    return line
+
+
+def format_birthday_line(
+    entry: BirthdayEntry,
+    *,
+    ref: date,
+    include_weekday: bool = False,
+) -> str:
+    when = entry.next_occurrence(ref)
+    return format_birthday_entry_line(
+        entry,
+        when=when,
+        ref=ref,
+        include_weekday=include_weekday,
+        include_relative=True,
+    )
 
 
 def format_birthdays_list(phone: str) -> str:
-    entries = get_birthday_store(phone).list_all()
-    if not entries:
+    store = get_birthday_store(phone)
+    items = store.entries_by_proximity()
+    if not items:
         return "Voce ainda nao tem aniversarios guardados."
-    sorted_entries = sorted(entries, key=lambda e: (e.month, e.day, e.name.casefold()))
-    lines = ["Aniversarios guardados:"]
-    for i, e in enumerate(sorted_entries, start=1):
-        yr = f" ({e.year})" if e.year else ""
-        note = f" — {e.note}" if e.note else ""
-        lines.append(f"{i}. {e.name} — {e.display_date()}{yr}{note}")
+    lines = ["Aniversarios guardados:", ""]
+    for entry, when, _ in items:
+        lines.append(format_birthday_entry_line(entry, when=when))
     return "\n".join(lines)
 
 
 def format_upcoming_birthdays(phone: str, days: int = 7) -> str:
     store = get_birthday_store(phone)
-    cfg = store.load()
-    tz_ref = date.today()
-    try:
-        from zoneinfo import ZoneInfo
-        from datetime import datetime
-
-        tz_ref = datetime.now(ZoneInfo(cfg.timezone)).date()
-    except Exception:
-        pass
-
-    upcoming = store.upcoming(days, ref=tz_ref)
+    ref = store.reference_date()
+    upcoming = store.upcoming(days, ref=ref)
     if not upcoming:
         if days == 7:
             return "Nenhum aniversario nos proximos 7 dias."
         return f"Nenhum aniversario nos proximos {days} dias."
 
-    title = f"Aniversarios nos proximos {days} dias:"
-    lines = [title, ""]
-    for entry, _, _ in upcoming:
-        lines.append(format_birthday_line(entry, ref=tz_ref, include_weekday=True))
+    lines = [f"Aniversarios nos proximos {days} dias:", ""]
+    for entry, when, _ in upcoming:
+        lines.append(
+            format_birthday_entry_line(
+                entry,
+                when=when,
+                ref=ref,
+                include_weekday=True,
+                include_relative=True,
+            )
+        )
     return "\n".join(lines)
 
 

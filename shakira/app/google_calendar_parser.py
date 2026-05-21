@@ -17,6 +17,10 @@ log = logging.getLogger(__name__)
 
 _ICS_TIMEOUT = httpx.Timeout(connect=10.0, read=30.0, write=10.0, pool=5.0)
 _GOOGLE_CAL_HOSTS = frozenset({"calendar.google.com", "www.google.com"})
+_CALENDAR_URL_RE = re.compile(
+    r"https?://(?:www\.)?calendar\.google\.com/[^\s<>\"']+",
+    re.IGNORECASE,
+)
 
 
 @dataclass
@@ -93,6 +97,26 @@ def parse_google_calendar_public_url(url: str) -> tuple[str, str, str]:
         "Nao reconheci o link. Envie o link publico do Google Calendar "
         "(com cid= ou src=) ou o endereco ical .../public/basic.ics."
     )
+
+
+def extract_google_calendar_urls(text: str) -> list[str]:
+    found = _CALENDAR_URL_RE.findall(text or "")
+    out: list[str] = []
+    for url in found:
+        try:
+            parse_google_calendar_public_url(url)
+            out.append(url)
+        except ValueError:
+            continue
+    return list(dict.fromkeys(out))
+
+
+def is_google_calendar_url(url: str) -> bool:
+    try:
+        parse_google_calendar_public_url(url)
+        return True
+    except ValueError:
+        return False
 
 
 def _unfold_ics_lines(text: str) -> list[str]:

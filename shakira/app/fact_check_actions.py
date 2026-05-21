@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import httpx
 
@@ -47,6 +48,14 @@ def fact_check_configured(settings: AppSettings) -> bool:
     if not settings.fact_check_enabled:
         return False
     return bool(fact_check_api_key(settings))
+
+
+def format_fact_check_api_footer(*, when: datetime | None = None) -> str:
+    """Rodape fixo para confirmar no WhatsApp que a API foi consultada."""
+    tz = ZoneInfo("America/Sao_Paulo")
+    dt = (when or datetime.now(timezone.utc)).astimezone(tz)
+    stamp = dt.strftime("%H:%M")
+    return f"✓ Consulta à API Google Fact Check concluída às {stamp} (horário de Brasília)."
 
 
 def extract_fact_check_query(decision: dict[str, Any]) -> str:
@@ -204,6 +213,7 @@ async def handle_fact_check_claim(
         return "Não consegui consultar o fact-check agora. Tente de novo em instantes."
 
     result = format_fact_check_response(query, claims, language_note=lang_used)
+    result = f"{result}\n\n{format_fact_check_api_footer()}"
     log.info(
         "Fact-check phone query=%r claims=%s reviews_shown=%s",
         query[:60],

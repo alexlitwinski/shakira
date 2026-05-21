@@ -81,6 +81,31 @@ def test_delete_by_name(monkeypatch, tmp_path):
     assert handle_birthday_list(phone) == "Voce ainda nao tem aniversarios guardados."
 
 
+def test_list_sorted_by_proximity(monkeypatch, tmp_path):
+    monkeypatch.setenv("SHAKIRA_USER_DATA_ROOT", str(tmp_path))
+    phone = "5511444444444"
+    store = get_birthday_store(phone)
+    store.add("Maria", 15, 3)
+    store.add("Joao", 25, 12)
+    store.add("Ana", 22, 5)
+
+    ref = date(2026, 5, 21)
+    items = store.entries_by_proximity(ref)
+    assert [e.name for e, _, _ in items] == ["Ana", "Joao", "Maria"]
+
+    from app.birthday_actions import format_birthday_entry_line
+
+    lines = [
+        format_birthday_entry_line(entry, when=when)
+        for entry, when, _ in items
+    ]
+    assert lines == [
+        "22/05 — Ana",
+        "25/12 — Joao",
+        "15/03 — Maria",
+    ]
+
+
 def test_today_birthdays(monkeypatch, tmp_path):
     monkeypatch.setenv("SHAKIRA_USER_DATA_ROOT", str(tmp_path))
     phone = "5511555555555"

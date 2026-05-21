@@ -224,28 +224,55 @@ class BirthdayStore:
         self.save(cfg)
         return entry
 
+    def reference_date(self) -> date:
+        cfg = self.load()
+        try:
+            return datetime.now(ZoneInfo(cfg.timezone)).date()
+        except Exception:
+            return date.today()
+
+    def entries_by_proximity(
+        self, ref: date | None = None
+    ) -> list[tuple[BirthdayEntry, date, int]]:
+        if ref is None:
+            ref = self.reference_date()
+        out: list[tuple[BirthdayEntry, date, int]] = []
+        for entry in self.load().entries:
+            days = entry.days_until(ref)
+            out.append((entry, entry.next_occurrence(ref), days))
+        out.sort(key=lambda x: (x[2], x[0].name.casefold()))
+        return out
+
     def delete(self, *, entry_id: str = "", name: str = "", list_number: int = 0) -> str:
         cfg = self.load()
         if not cfg.entries:
             return "Nenhum aniversario guardado."
 
+        sorted_entries = [e for e, _, _ in self.entries_by_proximity()]
         target: BirthdayEntry | None = None
         if entry_id:
             target = next((e for e in cfg.entries if e.id == entry_id), None)
         elif list_number >= 1:
             idx = list_number - 1
-            if 0 <= idx < len(cfg.entries):
-                target = cfg.entries[idx]
+            if 0 <= idx < len(sorted_entries):
+                target = sorted_entries[idx]
         elif name:
             key = name.strip().casefold()
             matches = [e for e in cfg.entries if key in e.name.casefold()]
             if len(matches) == 1:
                 target = matches[0]
             elif len(matches) > 1:
+                ref = self.reference_date()
+                match_ids = {e.id for e in matches}
                 lines = [f"Encontrei {len(matches)} aniversarios com esse nome:"]
-                for i, e in enumerate(cfg.entries, start=1):
-                    if key in e.name.casefold():
-                        lines.append(f"{i}. {e.name} — {e.display_date()}")
+                num = 1
+                for entry, when, _ in self.entries_by_proximity(ref):
+                    if entry.id not in match_ids:
+                        continue
+                    lines.append(
+                        f"{num}. {when.strftime('%d/%m')} — {entry.name}"
+                    )
+                    num += 1
                 lines.append("Diga o numero da lista para apagar.")
                 return "\n".join(lines)
 
@@ -258,31 +285,23 @@ class BirthdayStore:
         return f"Apaguei o aniversario de {target.name} ({target.display_date()})."
 
     def upcoming(self, days: int = 7, *, ref: date | None = None) -> list[tuple[BirthdayEntry, date, int]]:
-        cfg = self.load()
         if ref is None:
-            tz = ZoneInfo(cfg.timezone)
-            ref = datetime.now(tz).date()
-        out: list[tuple[BirthdayEntry, date, int]] = []
-        for entry in cfg.entries:
-            d = entry.days_until(ref)
-            if 0 <= d <= days:
-                out.append((entry, entry.next_occurrence(ref), d))
-        out.sort(key=lambda x: (x[2], x[0].name.casefold()))
-        return out
+            ref = self.reference_date()
+        return [(e, when, d) for e, when, d in self.entries_by_proximity(ref) if 0 <= d <= days]
 
     def today_birthdays(self, ref: date) -> list[BirthdayEntry]:
         return [e for e in self.load().entries if e.month == ref.month and e.day == ref.day]
 
     def build_context_text(self) -> str:
-        entries = self.list_all()
-        if not entries:
+        items = self.entries_by_proximity()
+        if not items:
             return ""
-        parts = ["ANIVERSARIOS GUARDADOS:"]
-        for i, e in enumerate(entries, start=1):
+        parts = ["ANIVERSARIOS GUARDADOS (do mais proximo ao mais distante):"]
+        for i, (e, when, _) in enumerate(items, start=1):
             yr = f" nasc={e.year}" if e.year else ""
             note = f' nota="{e.note}"' if e.note else ""
             parts.append(
-                f"  {i}. (id={e.id}) {e.name} — {e.display_date()}{yr}{note}"
+                f"  {i}. (id={e.id}) {when.strftime('%d/%m')} — {e.name}{yr}{note}"
             )
         parts.append(
             f"Lembretes: resumo semanal (segunda) e aviso no dia, as {self.load().notify_time}."
