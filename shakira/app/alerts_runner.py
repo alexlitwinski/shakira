@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
 from dataclasses import dataclass, field
 from typing import Any
@@ -12,6 +13,15 @@ import httpx
 
 from app.alerts_catalog import AlertConfig, AlertsCatalog
 from app.camera_snapshots import send_camera_snapshots
+from app.camera_vision import (
+    CameraPanelInfo,
+    DEFAULT_MAX_VISION_RETRIES,
+    DEFAULT_RETRY_DELAY_SECONDS,
+    analyze_camera_mosaic,
+    build_retry_notice,
+    format_analysis_message,
+    should_retry_for_missing_person,
+)
 from app.cameras_catalog import CamerasCatalog
 from app.config import AppSettings
 from app.evolution import EvolutionClient
@@ -187,7 +197,7 @@ class AlertsRunner:
         return ids
 
     async def _send_alert_camera_snapshots(
-        self, alert: AlertConfig, phone: str, camera_ids: list[str]
+        self, alert: AlertConfig, phone: str, camera_ids: list[str], *, context: str = ""
     ) -> None:
         if not camera_ids or not self.http:
             return
@@ -213,8 +223,165 @@ class AlertsRunner:
                 result.sent,
                 result.failed,
             )
+            if alert.describe_cameras and result.image_bytes and result.sent > 0:
+                await self._send_camera_description(
+                    alert=alert,
+                    phone=phone,
+                    camera_ids=camera_ids,
+                    image_bytes=result.image_bytes,
+                    camera_panels=result.image_panels,
+                    context=context,
+                )
         except Exception:
             log.exception("Alerta %s: falha ao enviar cameras phone=%s", alert.id, phone)
+
+    async def _send_camera_description(
+        self,
+        *,
+        alert: AlertConfig,
+        phone: str,
+        camera_ids: list[str],
+        image_bytes: bytes,
+        camera_panels: list[CameraPanelInfo],
+        context: str,
+    ) -> None:
+        api_key = self.settings.gemini_api_key.strip()
+        if not api_key:
+            log.warning(
+                "Alerta %s: describe_cameras ativo mas gemini_api_key ausente",
+                alert.id,
+            )
+            return
+
+        watch_names = alert.describe_cameras_watch or None
+        model = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
+        instance = (self.settings.evolution_instance or "").strip()
+        max_retries = DEFAULT_MAX_VISION_RETRIES
+
+        current_bytes = image_bytes
+        current_panels = camera_panels
+
+        for attempt in range(max_retries + 1):
+            try:
+                analysis = await asyncio.to_thread(
+                    analyze_camera_mosaic,
+                    api_key=api_key,
+                    image_bytes=current_bytes,
+                    camera_panels=current_panels,
+                    context=context,
+                    model=model,
+                )
+            except Exception:
+                log.exception("Alerta %s: falha Gemini vision phone=%s", alert.id, phone)
+                return
+
+            if analysis is None:
+                log.warning("Alerta %s: Gemini vision retornou vazio phone=%s", alert.id, phone)
+                return
+
+            needs_retry = (
+                attempt < max_retries
+                and should_retry_for_missing_person(
+                    analysis,
+                    current_panels,
+                    watch_names,
+                )
+            )
+            if needs_retry:
+                log.info(
+                    "Alerta %s: sem pessoa nas cameras monitoradas; retry %s/%s phone=%s",
+                    alert.id,
+                    attempt + 1,
+                    max_retries,
+                    phone,
+                )
+                try:
+                    await send_whatsapp_text(
+                        settings=self.settings,
+                        evo=self.evo,
+                        number=phone,
+                        message=build_retry_notice(watch_names),
+                    )
+                except WhatsAppSendError as e:
+                    log.warning(
+                        "Alerta %s: falha WhatsApp aviso retry phone=%s: %s",
+                        alert.id,
+                        phone,
+                        e,
+                    )
+
+                await asyncio.sleep(DEFAULT_RETRY_DELAY_SECONDS)
+
+                if not self.http or not instance:
+                    log.warning(
+                        "Alerta %s: retry abortado (http ou evolution ausente)",
+                        alert.id,
+                    )
+                    return
+
+                try:
+                    retry_result = await send_camera_snapshots(
+                        settings=self.settings,
+                        cameras=self.cameras,
+                        evo=self.evo,
+                        http=self.http,
+                        phone=phone,
+                        instance=instance,
+                        camera_ids=camera_ids,
+                        send_progress=False,
+                        send_summary=False,
+                    )
+                except Exception:
+                    log.exception(
+                        "Alerta %s: falha ao recapturar cameras phone=%s",
+                        alert.id,
+                        phone,
+                    )
+                    return
+
+                if not retry_result.image_bytes or retry_result.sent <= 0:
+                    log.warning(
+                        "Alerta %s: retry sem imagem valida phone=%s",
+                        alert.id,
+                        phone,
+                    )
+                    return
+
+                current_bytes = retry_result.image_bytes
+                current_panels = retry_result.image_panels
+                continue
+
+            description = format_analysis_message(analysis)
+            if not description:
+                log.warning(
+                    "Alerta %s: analise Gemini sem texto phone=%s",
+                    alert.id,
+                    phone,
+                )
+                return
+
+            try:
+                await send_whatsapp_text(
+                    settings=self.settings,
+                    evo=self.evo,
+                    number=phone,
+                    message=description,
+                )
+                log.info(
+                    "Alerta %s: descricao Gemini enviada phone=%s chars=%s attempt=%s",
+                    alert.id,
+                    phone,
+                    len(description),
+                    attempt + 1,
+                )
+            except WhatsAppSendError as e:
+                log.warning(
+                    "Alerta %s: falha WhatsApp descricao cameras phone=%s: %s",
+                    alert.id,
+                    phone,
+                    e,
+                )
+            return
 
     async def _run_due_checks(self) -> None:
         now = time.monotonic()
@@ -323,7 +490,9 @@ class AlertsRunner:
                 )
                 sent += 1
                 if camera_ids:
-                    await self._send_alert_camera_snapshots(alert, phone, camera_ids)
+                    await self._send_alert_camera_snapshots(
+                        alert, phone, camera_ids, context=text
+                    )
             except WhatsAppSendError as e:
                 log.warning("Alerta %s: falha WhatsApp para %s: %s", alert.id, phone, e)
 
@@ -402,6 +571,8 @@ class AlertsRunner:
                     "check_interval_seconds": None if alert.live else alert.check_interval_seconds,
                     "cooldown_seconds": alert.cooldown_seconds,
                     "camera_group": alert.camera_group or None,
+                    "describe_cameras": alert.describe_cameras,
+                    "describe_cameras_watch": alert.describe_cameras_watch or None,
                     "last_check_ago_s": round(now - rt.last_check_at, 1) if rt and rt.last_check_at else None,
                     "last_notified_ago_s": round(now - rt.last_notified_at, 1)
                     if rt and rt.last_notified_at

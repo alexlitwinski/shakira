@@ -21,6 +21,7 @@ from app.cameras_catalog import CamerasCatalog, CamerasCatalogValidationError
 from app.devices_catalog import CatalogValidationError, DevicesCatalog
 from app.alerts_catalog import AlertsCatalog, AlertsCatalogValidationError
 from app.alerts_runner import AlertsRunner
+from app.alarm_dispatch_runner import AlarmDispatchRunner
 from app.scheduled_responses import count_all_pending_globally
 from app.scheduled_responses_runner import ScheduledResponsesRunner, set_scheduled_runner
 from app.google_calendar_runner import GoogleCalendarRunner, set_google_calendar_runner
@@ -115,6 +116,21 @@ async def lifespan(app: FastAPI):
         )
     app.state.alerts_runner = alerts_runner
 
+    alarm_runner = AlarmDispatchRunner(
+        settings=settings,
+        ha=app.state.ha,
+        evo=app.state.evo,
+        cameras=cameras,
+        config=alerts.alarm_dispatch,
+        devices=catalog,
+        http=client,
+    )
+    if alerts.alarm_dispatch.enabled:
+        alarm_runner.start()
+    else:
+        log.info("Rotina de disparo do alarme desativada em %s", settings.alerts_config_path)
+    app.state.alarm_runner = alarm_runner
+
     scheduled_runner = ScheduledResponsesRunner(
         settings=settings,
         ha=app.state.ha,
@@ -158,6 +174,7 @@ async def lifespan(app: FastAPI):
     await birthday_runner.stop()
     await calendar_runner.stop()
     await scheduled_runner.stop()
+    await alarm_runner.stop()
     await alerts_runner.stop()
     await client.aclose()
 
@@ -329,6 +346,9 @@ async def put_cameras_yaml(request: Request, body: CamerasYamlBody) -> dict[str,
     runner: AlertsRunner | None = getattr(request.app.state, "alerts_runner", None)
     if runner is not None:
         runner.cameras = request.app.state.cameras
+    alarm_runner: AlarmDispatchRunner | None = getattr(request.app.state, "alarm_runner", None)
+    if alarm_runner is not None:
+        alarm_runner.reload(alarm_runner.config, cameras=request.app.state.cameras)
     result["message"] = (
         "Arquivo salvo. Catalogo de cameras recarregado; cache Gemini atualizado."
     )
@@ -368,8 +388,15 @@ async def put_alerts_yaml(request: Request, body: AlertsYamlBody) -> dict[str, A
     runner: AlertsRunner = request.app.state.alerts_runner
     runner.reload(catalog)
     await runner.ensure_running()
+    alarm_runner: AlarmDispatchRunner = request.app.state.alarm_runner
+    alarm_runner.reload(
+        catalog.alarm_dispatch,
+        cameras=request.app.state.cameras,
+        devices=request.app.state.catalog,
+    )
+    await alarm_runner.ensure_running()
     result["message"] = (
-        "Arquivo salvo. Alertas periodicos e live recarregados."
+        "Arquivo salvo. Alertas periodicos, live e rotina de alarme recarregados."
     )
     return result
 
@@ -378,7 +405,11 @@ async def put_alerts_yaml(request: Request, body: AlertsYamlBody) -> dict[str, A
 async def get_alerts_status(request: Request) -> dict[str, Any]:
     """Estado do executor de alertas (painel / diagnostico)."""
     runner: AlertsRunner = request.app.state.alerts_runner
-    return runner.status_snapshot()
+    alarm_runner: AlarmDispatchRunner | None = getattr(request.app.state, "alarm_runner", None)
+    payload = runner.status_snapshot()
+    if alarm_runner is not None:
+        payload["alarm_dispatch"] = alarm_runner.status_snapshot()
+    return payload
 
 
 @app.get("/api/scheduled-responses/status")

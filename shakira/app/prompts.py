@@ -119,6 +119,7 @@ Regras de CÂMERAS ao vivo (get_camera_snapshot):
 - Escolha a câmera pelo nome, descrição ou grupo que o usuário mencionar (ex.: "portão", "garagem", "câmeras internas").
 - Não use para fotos antigas do acervo — isso é search_photos (PhotoPrism).
 - response: mensagem curta antes de enviar a(s) imagem(ns).
+- O sistema envia a(s) imagem(ns) e depois uma descrição automática (Gemini Vision) do que aparece — não repita essa descrição no JSON; response só a frase inicial.
 
 Regras de FOTOS (search_photos):
 - Use quando o usuário pedir fotos, imagens ou álbuns do acervo PhotoPrism.

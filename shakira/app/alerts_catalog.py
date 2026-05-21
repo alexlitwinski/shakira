@@ -20,7 +20,7 @@ FALLBACK_ALERTS_PATHS = (
     "/config/shakira_alerts.yaml",
 )
 
-ALLOWED_ROOT_KEYS = frozenset({"alerts"})
+ALLOWED_ROOT_KEYS = frozenset({"alerts", "alarm_dispatch"})
 ALERT_ID_RE = re.compile(r"^[a-z][a-z0-9_]+$", re.IGNORECASE)
 ENTITY_ID_RE = re.compile(r"^[a-z][a-z0-9_]+\.[a-z0-9_]+$", re.IGNORECASE)
 INTERVAL_RE = re.compile(r"^(\d+)\s*([smhd])?$", re.IGNORECASE)
@@ -114,9 +114,28 @@ def clamp_interval(seconds: int) -> int:
     return max(MIN_CHECK_INTERVAL_SECONDS, min(seconds, MAX_CHECK_INTERVAL_SECONDS))
 
 
+def _parse_watch_names(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item).strip() for item in value if isinstance(item, str) and str(item).strip()]
+
+
 @dataclass
 class AlertNotifyConfig:
     phones: list[str] = field(default_factory=list)
+
+
+DEFAULT_ALARM_COOLDOWN_SECONDS = 300
+DEFAULT_ALARM_DEBOUNCE_SECONDS = 2.0
+
+
+@dataclass
+class AlarmDispatchConfig:
+    enabled: bool = False
+    cooldown_seconds: int = DEFAULT_ALARM_COOLDOWN_SECONDS
+    debounce_seconds: float = DEFAULT_ALARM_DEBOUNCE_SECONDS
+    describe_cameras: bool = True
+    notify: AlertNotifyConfig = field(default_factory=AlertNotifyConfig)
 
 
 @dataclass
@@ -134,11 +153,14 @@ class AlertConfig:
     recovery_context: str = ""
     recovery_label: str = ""
     camera_group: str = ""
+    describe_cameras: bool = False
+    describe_cameras_watch: list[str] = field(default_factory=list)
 
 
 @dataclass
 class AlertsCatalog:
     alerts: list[AlertConfig] = field(default_factory=list)
+    alarm_dispatch: AlarmDispatchConfig = field(default_factory=AlarmDispatchConfig)
     source_path: Path | None = None
     content_hash: str = ""
 
@@ -175,15 +197,22 @@ class AlertsCatalog:
         h = content_hash or hashlib.sha256(text.encode("utf-8")).hexdigest()
         data = yaml.safe_load(text)
         alerts = cls._parse_data(data)
+        alarm_dispatch = cls._parse_alarm_dispatch(data)
         enabled = sum(1 for a in alerts if a.enabled)
         if source_path:
             log.info(
-                "Alertas carregados: %s (%s regra(s), %s ativa(s))",
+                "Alertas carregados: %s (%s regra(s), %s ativa(s), alarm_dispatch=%s)",
                 source_path,
                 len(alerts),
                 enabled,
+                alarm_dispatch.enabled,
             )
-        return cls(alerts=alerts, source_path=source_path, content_hash=h)
+        return cls(
+            alerts=alerts,
+            alarm_dispatch=alarm_dispatch,
+            source_path=source_path,
+            content_hash=h,
+        )
 
     @staticmethod
     def _parse_row(row: dict[str, Any]) -> AlertConfig | None:
@@ -217,16 +246,7 @@ class AlertsCatalog:
             cooldown = DEFAULT_COOLDOWN_SECONDS
         cooldown = max(MIN_CHECK_INTERVAL_SECONDS, min(cooldown, MAX_CHECK_INTERVAL_SECONDS * 7))
 
-        phones: list[str] = []
-        notify = row.get("notify")
-        if isinstance(notify, dict):
-            raw_phones = notify.get("phones")
-            if isinstance(raw_phones, list):
-                for p in raw_phones:
-                    if isinstance(p, (str, int)):
-                        s = str(p).strip()
-                        if s:
-                            phones.append(s)
+        phones = cls._parse_notify_phones(row.get("notify"))
 
         return AlertConfig(
             id=aid,
@@ -242,6 +262,50 @@ class AlertsCatalog:
             recovery_context=str(row.get("recovery_context") or "").strip(),
             recovery_label=str(row.get("recovery_label") or "").strip(),
             camera_group=str(row.get("camera_group") or "").strip(),
+            describe_cameras=bool(row.get("describe_cameras", False)),
+            describe_cameras_watch=_parse_watch_names(row.get("describe_cameras_watch")),
+        )
+
+    @staticmethod
+    def _parse_notify_phones(notify: Any) -> list[str]:
+        phones: list[str] = []
+        if isinstance(notify, dict):
+            raw_phones = notify.get("phones")
+            if isinstance(raw_phones, list):
+                for p in raw_phones:
+                    if isinstance(p, (str, int)):
+                        s = str(p).strip()
+                        if s:
+                            phones.append(s)
+        return phones
+
+    @classmethod
+    def _parse_alarm_dispatch(cls, data: Any) -> AlarmDispatchConfig:
+        if not isinstance(data, dict):
+            return AlarmDispatchConfig()
+        block = data.get("alarm_dispatch")
+        if not isinstance(block, dict):
+            return AlarmDispatchConfig()
+
+        cooldown_raw = block.get("cooldown_seconds")
+        if cooldown_raw is None:
+            cooldown_raw = block.get("cooldown")
+        cooldown = parse_interval_seconds(cooldown_raw)
+        if cooldown is None:
+            cooldown = DEFAULT_ALARM_COOLDOWN_SECONDS
+        cooldown = max(MIN_CHECK_INTERVAL_SECONDS, min(cooldown, MAX_CHECK_INTERVAL_SECONDS * 7))
+
+        debounce_raw = block.get("debounce_seconds")
+        debounce = DEFAULT_ALARM_DEBOUNCE_SECONDS
+        if isinstance(debounce_raw, (int, float)) and not isinstance(debounce_raw, bool):
+            debounce = max(0.5, min(float(debounce_raw), 30.0))
+
+        return AlarmDispatchConfig(
+            enabled=bool(block.get("enabled", False)),
+            cooldown_seconds=cooldown,
+            debounce_seconds=debounce,
+            describe_cameras=bool(block.get("describe_cameras", True)),
+            notify=AlertNotifyConfig(phones=cls._parse_notify_phones(block.get("notify"))),
         )
 
     @classmethod
@@ -270,7 +334,44 @@ class AlertsCatalog:
             return ["A raiz do arquivo deve ser um mapa YAML (chave: valor)."]
 
         for key in sorted(set(data.keys()) - ALLOWED_ROOT_KEYS):
-            errors.append(f"Chave invalida na raiz: '{key}' (permitido: alerts).")
+            errors.append(f"Chave invalida na raiz: '{key}' (permitido: alerts, alarm_dispatch).")
+
+        alarm_block = data.get("alarm_dispatch")
+        if alarm_block is not None:
+            if not isinstance(alarm_block, dict):
+                errors.append("'alarm_dispatch' deve ser um mapa.")
+            else:
+                alarm_allowed = {
+                    "enabled",
+                    "cooldown",
+                    "cooldown_seconds",
+                    "debounce_seconds",
+                    "describe_cameras",
+                    "notify",
+                }
+                for k in sorted(set(alarm_block.keys()) - alarm_allowed):
+                    errors.append(f"alarm_dispatch: chave desconhecida '{k}'.")
+                if "enabled" in alarm_block and not isinstance(alarm_block["enabled"], bool):
+                    errors.append("alarm_dispatch.enabled deve ser true ou false.")
+                describe = alarm_block.get("describe_cameras")
+                if describe is not None and not isinstance(describe, bool):
+                    errors.append("alarm_dispatch.describe_cameras deve ser true ou false.")
+                debounce = alarm_block.get("debounce_seconds")
+                if debounce is not None and not isinstance(debounce, (int, float)):
+                    errors.append("alarm_dispatch.debounce_seconds deve ser numero.")
+                for cooldown_key in ("cooldown", "cooldown_seconds"):
+                    if cooldown_key in alarm_block:
+                        parsed = parse_interval_seconds(alarm_block[cooldown_key])
+                        if parsed is None:
+                            errors.append(f"alarm_dispatch.{cooldown_key} invalido.")
+                notify = alarm_block.get("notify")
+                if notify is not None:
+                    if not isinstance(notify, dict):
+                        errors.append("alarm_dispatch.notify deve ser um mapa.")
+                    elif notify.get("phones") is not None and not isinstance(
+                        notify.get("phones"), list
+                    ):
+                        errors.append("alarm_dispatch.notify.phones deve ser uma lista.")
 
         if "alerts" not in data:
             errors.append("Defina a secao 'alerts:'.")
@@ -296,6 +397,8 @@ class AlertsCatalog:
             "recovery_context",
             "recovery_label",
             "camera_group",
+            "describe_cameras",
+            "describe_cameras_watch",
         }
 
         for i, row in enumerate(data["alerts"]):
@@ -355,6 +458,27 @@ class AlertsCatalog:
             camera_group = row.get("camera_group")
             if camera_group is not None and not isinstance(camera_group, str):
                 errors.append(f"{path}: 'camera_group' deve ser texto.")
+
+            describe_cameras = row.get("describe_cameras")
+            if describe_cameras is not None and not isinstance(describe_cameras, bool):
+                errors.append(f"{path}: 'describe_cameras' deve ser true ou false.")
+            if describe_cameras and not (
+                isinstance(row.get("camera_group"), str) and str(row.get("camera_group")).strip()
+            ):
+                errors.append(
+                    f"{path}: 'describe_cameras' requer 'camera_group' definido."
+                )
+
+            raw_watch = row.get("describe_cameras_watch")
+            if raw_watch is not None:
+                if not isinstance(raw_watch, list):
+                    errors.append(f"{path}: 'describe_cameras_watch' deve ser uma lista.")
+                else:
+                    for j, item in enumerate(raw_watch):
+                        if not isinstance(item, str) or not item.strip():
+                            errors.append(
+                                f"{path}.describe_cameras_watch[{j}]: use nomes de camera em texto."
+                            )
 
             if "enabled" in row and not isinstance(row["enabled"], bool):
                 errors.append(f"{path}: 'enabled' deve ser true ou false.")

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import os
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -12,6 +14,11 @@ from app.cameras_catalog import CamerasCatalog
 from app.config import AppSettings
 from app.evolution import EvolutionClient
 from app.frigate import FrigateClient, FrigateError
+from app.camera_vision import (
+    CameraPanelInfo,
+    analyze_camera_mosaic,
+    format_analysis_message,
+)
 from app.image_collage import build_image_grid
 from app.whatsapp_steps import StepMessenger, pulse_whatsapp_typing, truncate_whatsapp
 
@@ -23,6 +30,9 @@ class CameraSnapshotsResult:
     sent: int = 0
     failed: list[str] = field(default_factory=list)
     summary: str = ""
+    image_bytes: bytes | None = None
+    image_labels: list[str] = field(default_factory=list)
+    image_panels: list[CameraPanelInfo] = field(default_factory=list)
 
 
 def parse_camera_snapshot_targets(
@@ -53,6 +63,80 @@ def parse_camera_snapshot_targets(
     )
 
 
+def build_vision_context(*, intro: str = "", result: CameraSnapshotsResult) -> str:
+    parts: list[str] = []
+    if intro.strip():
+        parts.append(intro.strip())
+    if result.image_labels:
+        parts.append("Câmeras: " + ", ".join(result.image_labels))
+    return "\n".join(parts).strip()
+
+
+async def send_camera_vision_description(
+    *,
+    settings: AppSettings,
+    evo: EvolutionClient,
+    phone: str,
+    instance: str,
+    result: CameraSnapshotsResult,
+    context: str = "",
+    messenger: StepMessenger | None = None,
+) -> bool:
+    """Analisa imagem enviada (uma ou mosaico) com Gemini Vision e manda texto ao usuario."""
+    if not result.image_bytes or result.sent <= 0:
+        return False
+
+    api_key = settings.gemini_api_key.strip()
+    if not api_key:
+        log.warning("Descricao de cameras: gemini_api_key ausente")
+        return False
+
+    model = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
+    try:
+        analysis = await asyncio.to_thread(
+            analyze_camera_mosaic,
+            api_key=api_key,
+            image_bytes=result.image_bytes,
+            camera_panels=result.image_panels,
+            context=context,
+            model=model,
+        )
+    except Exception:
+        log.exception("Descricao de cameras: falha Gemini Vision phone=%s", phone)
+        return False
+
+    if analysis is None:
+        log.warning("Descricao de cameras: Gemini retornou vazio phone=%s", phone)
+        return False
+
+    description = format_analysis_message(analysis)
+    if not description:
+        return False
+
+    evo_base = settings.evolution_base_url.strip()
+    evo_key = settings.evolution_api_key.strip()
+    msg = truncate_whatsapp(description)
+    if not msg:
+        return False
+
+    if messenger:
+        await messenger.step(msg, final=True)
+    elif evo_base and evo_key and instance:
+        await pulse_whatsapp_typing()
+        await evo.send_text(
+            base_url=evo_base,
+            api_key=evo_key,
+            instance=instance,
+            number=phone,
+            text=msg,
+        )
+    else:
+        return False
+
+    log.info("Descricao de cameras enviada phone=%s chars=%s", phone, len(msg))
+    return True
+
+
 async def send_camera_snapshots(
     *,
     settings: AppSettings,
@@ -64,6 +148,8 @@ async def send_camera_snapshots(
     camera_ids: list[str],
     intro: str = "",
     messenger: StepMessenger | None = None,
+    send_progress: bool = True,
+    send_summary: bool = True,
 ) -> CameraSnapshotsResult:
     """
     Obtem snapshots do Frigate e envia pelo WhatsApp.
@@ -120,24 +206,26 @@ async def send_camera_snapshots(
         await say(f"Não identifiquei quais câmeras enviar. Disponíveis: {hint}.", final=True)
         return result
 
-    if intro:
+    if intro and send_progress:
         await say(intro)
 
     total = len(camera_ids)
-    if total == 1:
-        cam = cameras.camera_map().get(camera_ids[0])
-        label = cam.name if cam else camera_ids[0]
-        await say(f"Vou buscar a imagem da câmera {label}...")
-    else:
-        await say(f"Vou buscar imagens de {total} câmeras e enviar numa única mensagem...")
+    if send_progress:
+        if total == 1:
+            cam = cameras.camera_map().get(camera_ids[0])
+            label = cam.name if cam else camera_ids[0]
+            await say(f"Vou buscar a imagem da câmera {label}...")
+        else:
+            await say(f"Vou buscar imagens de {total} câmeras e enviar numa única mensagem...")
 
     frigate = FrigateClient(http, base_url=settings.frigate_url)
     cam_map = cameras.camera_map()
 
-    fetched: list[tuple[bytes, str, str]] = []
+    fetched: list[tuple[bytes, str, str, str]] = []
     for index, camera_id in enumerate(camera_ids, start=1):
         cam = cam_map.get(camera_id)
         label = cam.name if cam else camera_id
+        description = cam.description if cam else ""
         log.info(
             "Frigate snapshot camera=%s (%s/%s) url=%s",
             camera_id,
@@ -153,7 +241,7 @@ async def send_camera_snapshots(
             result.failed.append(camera_id)
             continue
 
-        fetched.append((image_bytes, label, camera_id))
+        fetched.append((image_bytes, label, camera_id, description))
 
     if not fetched:
         if total == 1:
@@ -167,7 +255,7 @@ async def send_camera_snapshots(
     await pulse_whatsapp_typing()
 
     if len(fetched) == 1:
-        image_bytes, label, camera_id = fetched[0]
+        image_bytes, label, camera_id, description = fetched[0]
         caption = f"Câmera: {label}"[:1024]
         fname = f"shakira_{camera_id}.jpg"
         ok = await evo.send_image_bytes(
@@ -185,9 +273,12 @@ async def send_camera_snapshots(
         else:
             result.sent = 1
             result.summary = "1 imagem enviada."
+            result.image_bytes = image_bytes
+            result.image_labels = [label]
+            result.image_panels = [CameraPanelInfo(name=label, description=description)]
         return result
 
-    collage_items = [(img_bytes, label) for img_bytes, label, _cid in fetched]
+    collage_items = [(img_bytes, label) for img_bytes, label, _cid, _desc in fetched]
     try:
         collage_bytes = build_image_grid(collage_items)
     except Exception:
@@ -196,7 +287,11 @@ async def send_camera_snapshots(
         result.summary = "Falha ao montar collage das cameras."
         return result
 
-    labels = [label for _, label, _ in fetched]
+    labels = [label for _, label, _, _ in fetched]
+    panels = [
+        CameraPanelInfo(name=label, description=description)
+        for _, label, _, description in fetched
+    ]
     caption = "Câmeras: " + ", ".join(labels)
     if result.failed:
         caption += f" (falharam: {', '.join(result.failed)})"
@@ -212,7 +307,7 @@ async def send_camera_snapshots(
         caption=caption,
     )
     if ok is None:
-        result.failed.extend(camera_id for _, _, camera_id in fetched)
+        result.failed.extend(camera_id for _, _, camera_id, _ in fetched)
         await say("Capturei as câmeras mas não consegui enviar pelo WhatsApp.", final=True)
         result.summary = "Não foi possível enviar as imagens das câmeras."
         return result
@@ -226,7 +321,11 @@ async def send_camera_snapshots(
     else:
         result.summary = f"{result.sent} imagem(ns) enviada(s) numa única mensagem."
 
-    await say(result.summary, final=True)
+    result.image_bytes = collage_bytes
+    result.image_labels = labels
+    result.image_panels = panels
+    if send_summary:
+        await say(result.summary, final=True)
     return result
 
 
@@ -261,7 +360,7 @@ async def handle_camera_snapshot_decision(
             )
         return CameraSnapshotsResult(summary=error)
 
-    return await send_camera_snapshots(
+    result = await send_camera_snapshots(
         settings=settings,
         cameras=cameras,
         evo=evo,
@@ -271,4 +370,19 @@ async def handle_camera_snapshot_decision(
         camera_ids=camera_ids,
         intro=intro,
         messenger=messenger,
+        send_summary=False,
     )
+
+    if result.sent > 0 and result.image_bytes:
+        vision_context = build_vision_context(intro=intro, result=result)
+        await send_camera_vision_description(
+            settings=settings,
+            evo=evo,
+            phone=phone,
+            instance=instance,
+            result=result,
+            context=vision_context,
+            messenger=messenger,
+        )
+
+    return result
