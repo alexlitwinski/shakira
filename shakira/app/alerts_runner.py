@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from app.alarm_dispatch_runner import AlarmDispatchRunner
+    from app.interfone_dispatch_runner import InterfoneDispatchRunner
 from app.rain_dispatch_runner import RainDispatchRunner
 
 import httpx
@@ -72,6 +73,7 @@ class AlertsRunner:
     _ws_listener: HaWebSocketListener | None = None
     _alarm_dispatch: AlarmDispatchRunner | None = None
     _rain_dispatch: RainDispatchRunner | None = None
+    _interfone_dispatch: InterfoneDispatchRunner | None = None
 
     def attach_alarm_dispatch(self, runner: AlarmDispatchRunner | None) -> None:
         """Partilha o WebSocket live com a rotina de disparo do alarme."""
@@ -81,6 +83,11 @@ class AlertsRunner:
     def attach_rain_dispatch(self, runner: RainDispatchRunner | None) -> None:
         """Partilha o WebSocket live com a rotina de chuva."""
         self._rain_dispatch = runner
+        self._sync_websocket_entities()
+
+    def attach_interfone_dispatch(self, runner: InterfoneDispatchRunner | None) -> None:
+        """Partilha o WebSocket live com a rotina de chamadas do interfone."""
+        self._interfone_dispatch = runner
         self._sync_websocket_entities()
 
     def reload(self, catalog: AlertsCatalog) -> None:
@@ -118,12 +125,20 @@ class AlertsRunner:
             and self._rain_dispatch.config.enabled
         )
 
+    def _interfone_dispatch_active(self) -> bool:
+        return bool(
+            self._interfone_dispatch
+            and self._interfone_dispatch.config.enabled
+        )
+
     def _live_entity_ids(self) -> set[str]:
         ids = {a.entity_id for a in self.catalog.enabled_live_alerts()}
         if self._alarm_dispatch_active():
             ids |= self._alarm_dispatch.partition_entity_ids  # type: ignore[union-attr]
         if self._rain_dispatch_active():
             ids |= self._rain_dispatch.watched_entity_ids  # type: ignore[union-attr]
+        if self._interfone_dispatch_active():
+            ids |= self._interfone_dispatch.watched_entity_ids  # type: ignore[union-attr]
         return ids
 
     def _needs_live_websocket(self) -> bool:
@@ -131,6 +146,7 @@ class AlertsRunner:
             bool(self.catalog.enabled_live_alerts())
             or self._alarm_dispatch_active()
             or self._rain_dispatch_active()
+            or self._interfone_dispatch_active()
         )
 
     def _sync_websocket_entities(self) -> None:
@@ -484,6 +500,14 @@ class AlertsRunner:
 
         if self._rain_dispatch_active() and entity_id in self._rain_dispatch.watched_entity_ids:  # type: ignore[union-attr]
             await self._rain_dispatch.handle_live_state_change(  # type: ignore[union-attr]
+                entity_id,
+                old_state,
+                new_state,
+                _event_data,
+            )
+
+        if self._interfone_dispatch_active() and entity_id in self._interfone_dispatch.watched_entity_ids:  # type: ignore[union-attr]
+            await self._interfone_dispatch.handle_live_state_change(  # type: ignore[union-attr]
                 entity_id,
                 old_state,
                 new_state,

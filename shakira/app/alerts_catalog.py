@@ -21,7 +21,7 @@ FALLBACK_ALERTS_PATHS = (
 )
 
 ALLOWED_ROOT_KEYS = frozenset(
-    {"alerts", "alarm_dispatch", "rain_dispatch", "default_notify"}
+    {"alerts", "alarm_dispatch", "rain_dispatch", "interfone_dispatch", "default_notify"}
 )
 ALERT_ID_RE = re.compile(r"^[a-z][a-z0-9_]+$", re.IGNORECASE)
 ENTITY_ID_RE = re.compile(r"^[a-z][a-z0-9_]+\.[a-z0-9_]+$", re.IGNORECASE)
@@ -137,6 +137,27 @@ DEFAULT_RAIN_VOLUME_ENTITY = "sensor.volume_de_chuva_15m"
 DEFAULT_PORTA_VIDRO_ENTITY = "cover.porta_de_vidro_gourmet"
 DEFAULT_TOLDO_ENTITY = "cover.toldo_gourmet"
 
+DEFAULT_INTERFONE_ENTITY = "input_boolean.interfone_tocando"
+DEFAULT_INTERFONE_CAMERA_ID = "Porta_Vidro"
+DEFAULT_PORTAO_SOCIAL_ENTITY = "sensor.amt_8000_zone_1"
+DEFAULT_PORTAO_SERVICO_ENTITY = "sensor.amt_8000_zone_7"
+DEFAULT_HALL_PERSON_ENTITY = "binary_sensor.hall_interno_person_occupancy"
+DEFAULT_INTERFONE_ATTEND_SECONDS = 180
+DEFAULT_INTERFONE_DEBOUNCE_SECONDS = 10.0
+
+
+@dataclass
+class InterfoneDispatchConfig:
+    enabled: bool = False
+    interfone_entity: str = DEFAULT_INTERFONE_ENTITY
+    camera_id: str = DEFAULT_INTERFONE_CAMERA_ID
+    attend_window_seconds: int = DEFAULT_INTERFONE_ATTEND_SECONDS
+    debounce_seconds: float = DEFAULT_INTERFONE_DEBOUNCE_SECONDS
+    portao_social_entity: str = DEFAULT_PORTAO_SOCIAL_ENTITY
+    portao_servico_entity: str = DEFAULT_PORTAO_SERVICO_ENTITY
+    hall_person_entity: str = DEFAULT_HALL_PERSON_ENTITY
+    data_path: str = ""
+
 
 @dataclass
 class RainDispatchConfig:
@@ -184,6 +205,9 @@ class AlertsCatalog:
     alerts: list[AlertConfig] = field(default_factory=list)
     alarm_dispatch: AlarmDispatchConfig = field(default_factory=AlarmDispatchConfig)
     rain_dispatch: RainDispatchConfig = field(default_factory=RainDispatchConfig)
+    interfone_dispatch: InterfoneDispatchConfig = field(
+        default_factory=InterfoneDispatchConfig
+    )
     default_notify: AlertNotifyConfig = field(default_factory=AlertNotifyConfig)
     source_path: Path | None = None
     content_hash: str = ""
@@ -223,23 +247,26 @@ class AlertsCatalog:
         alerts = cls._parse_data(data)
         alarm_dispatch = cls._parse_alarm_dispatch(data)
         rain_dispatch = cls._parse_rain_dispatch(data)
+        interfone_dispatch = cls._parse_interfone_dispatch(data)
         default_notify = cls._parse_default_notify(data)
         enabled = sum(1 for a in alerts if a.enabled)
         if source_path:
             log.info(
                 "Alertas carregados: %s (%s regra(s), %s ativa(s), alarm_dispatch=%s, "
-                "rain_dispatch=%s, default_notify=%s telefone(s))",
+                "rain_dispatch=%s, interfone_dispatch=%s, default_notify=%s telefone(s))",
                 source_path,
                 len(alerts),
                 enabled,
                 alarm_dispatch.enabled,
                 rain_dispatch.enabled,
+                interfone_dispatch.enabled,
                 len(default_notify.phones),
             )
         return cls(
             alerts=alerts,
             alarm_dispatch=alarm_dispatch,
             rain_dispatch=rain_dispatch,
+            interfone_dispatch=interfone_dispatch,
             default_notify=default_notify,
             source_path=source_path,
             content_hash=h,
@@ -387,6 +414,71 @@ class AlertsCatalog:
         )
 
     @classmethod
+    def _parse_interfone_dispatch(cls, data: Any) -> InterfoneDispatchConfig:
+        if not isinstance(data, dict):
+            return InterfoneDispatchConfig()
+        block = data.get("interfone_dispatch")
+        if not isinstance(block, dict):
+            return InterfoneDispatchConfig()
+
+        window_raw = block.get("attend_window_seconds")
+        if window_raw is None:
+            window_raw = block.get("attend_window")
+        window_sec = DEFAULT_INTERFONE_ATTEND_SECONDS
+        if isinstance(window_raw, (int, float)) and not isinstance(window_raw, bool):
+            window_sec = int(window_raw)
+        elif isinstance(window_raw, str):
+            parsed = parse_interval_seconds(window_raw)
+            if parsed is not None:
+                window_sec = parsed
+        window_sec = max(60, min(window_sec, 600))
+
+        debounce_raw = block.get("debounce_seconds")
+        debounce = DEFAULT_INTERFONE_DEBOUNCE_SECONDS
+        if isinstance(debounce_raw, (int, float)) and not isinstance(debounce_raw, bool):
+            debounce = max(2.0, min(float(debounce_raw), 120.0))
+
+        entities = block.get("entities")
+        ent_map: dict[str, str] = {}
+        if isinstance(entities, dict):
+            for key in (
+                "interfone",
+                "portao_social",
+                "portao_servico",
+                "hall_person",
+            ):
+                val = entities.get(key)
+                if isinstance(val, str) and val.strip():
+                    ent_map[key] = val.strip()
+
+        camera_id = block.get("camera_id")
+        if isinstance(camera_id, str) and camera_id.strip():
+            cam_id = camera_id.strip()
+        else:
+            cam_id = DEFAULT_INTERFONE_CAMERA_ID
+
+        data_path = ""
+        raw_path = block.get("data_path")
+        if isinstance(raw_path, str) and raw_path.strip():
+            data_path = raw_path.strip()
+
+        return InterfoneDispatchConfig(
+            enabled=bool(block.get("enabled", False)),
+            interfone_entity=ent_map.get("interfone", DEFAULT_INTERFONE_ENTITY),
+            camera_id=cam_id,
+            attend_window_seconds=window_sec,
+            debounce_seconds=debounce,
+            portao_social_entity=ent_map.get(
+                "portao_social", DEFAULT_PORTAO_SOCIAL_ENTITY
+            ),
+            portao_servico_entity=ent_map.get(
+                "portao_servico", DEFAULT_PORTAO_SERVICO_ENTITY
+            ),
+            hall_person_entity=ent_map.get("hall_person", DEFAULT_HALL_PERSON_ENTITY),
+            data_path=data_path,
+        )
+
+    @classmethod
     def _parse_data(cls, data: Any) -> list[AlertConfig]:
         if data is None:
             return []
@@ -414,7 +506,8 @@ class AlertsCatalog:
         for key in sorted(set(data.keys()) - ALLOWED_ROOT_KEYS):
             errors.append(
                 f"Chave invalida na raiz: '{key}' "
-                "(permitido: alerts, alarm_dispatch, rain_dispatch, default_notify)."
+                "(permitido: alerts, alarm_dispatch, rain_dispatch, interfone_dispatch, "
+                "default_notify)."
             )
 
         default_notify = data.get("default_notify")
@@ -514,6 +607,64 @@ class AlertsCatalog:
                                 errors.append(f"rain_dispatch.entities.{ek} deve ser entity_id texto.")
                             elif not ENTITY_ID_RE.match(ev.strip()):
                                 errors.append(f"rain_dispatch.entities.{ek}: entity_id invalido.")
+
+        interfone_block = data.get("interfone_dispatch")
+        if interfone_block is not None:
+            if not isinstance(interfone_block, dict):
+                errors.append("'interfone_dispatch' deve ser um mapa.")
+            else:
+                if_allowed = {
+                    "enabled",
+                    "camera_id",
+                    "attend_window",
+                    "attend_window_seconds",
+                    "debounce_seconds",
+                    "data_path",
+                    "entities",
+                }
+                for k in sorted(set(interfone_block.keys()) - if_allowed):
+                    errors.append(f"interfone_dispatch: chave desconhecida '{k}'.")
+                if "enabled" in interfone_block and not isinstance(
+                    interfone_block["enabled"], bool
+                ):
+                    errors.append("interfone_dispatch.enabled deve ser true ou false.")
+                for window_key in ("attend_window", "attend_window_seconds"):
+                    if window_key in interfone_block:
+                        parsed = parse_interval_seconds(interfone_block[window_key])
+                        if parsed is None and not isinstance(
+                            interfone_block[window_key], (int, float)
+                        ):
+                            errors.append(f"interfone_dispatch.{window_key} invalido.")
+                debounce = interfone_block.get("debounce_seconds")
+                if debounce is not None and not isinstance(debounce, (int, float)):
+                    errors.append("interfone_dispatch.debounce_seconds deve ser numero.")
+                cam = interfone_block.get("camera_id")
+                if cam is not None and (not isinstance(cam, str) or not cam.strip()):
+                    errors.append("interfone_dispatch.camera_id deve ser texto.")
+                entities = interfone_block.get("entities")
+                if entities is not None:
+                    if not isinstance(entities, dict):
+                        errors.append("interfone_dispatch.entities deve ser um mapa.")
+                    else:
+                        allowed_ent = {
+                            "interfone",
+                            "portao_social",
+                            "portao_servico",
+                            "hall_person",
+                        }
+                        for ek in sorted(set(entities.keys()) - allowed_ent):
+                            errors.append(
+                                f"interfone_dispatch.entities: chave desconhecida '{ek}'."
+                            )
+                        for ek, ev in entities.items():
+                            if not isinstance(ev, str) or not ev.strip():
+                                errors.append(
+                                    f"interfone_dispatch.entities.{ek} deve ser entity_id texto."
+                                )
+                            elif not ENTITY_ID_RE.match(ev.strip()):
+                                errors.append(
+                                    f"interfone_dispatch.entities.{ek}: entity_id invalido."
+                                )
 
         if "alerts" not in data:
             errors.append("Defina a secao 'alerts:'.")

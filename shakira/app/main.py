@@ -23,6 +23,8 @@ from app.alerts_catalog import AlertsCatalog, AlertsCatalogValidationError
 from app.alerts_runner import AlertsRunner
 from app.alarm_dispatch_runner import AlarmDispatchRunner
 from app.rain_dispatch_runner import RainDispatchRunner
+from app.interfone_dispatch_runner import InterfoneDispatchRunner
+from app.interfone_call_store import configure_interfone_data_root
 from app.scheduled_responses import count_all_pending_globally
 from app.scheduled_responses_runner import ScheduledResponsesRunner, set_scheduled_runner
 from app.google_calendar_runner import GoogleCalendarRunner, set_google_calendar_runner
@@ -138,10 +140,29 @@ async def lifespan(app: FastAPI):
         devices=catalog,
     )
     app.state.rain_runner = rain_runner
+    interfone_runner = InterfoneDispatchRunner(
+        settings=settings,
+        ha=app.state.ha,
+        config=alerts.interfone_dispatch,
+        cameras=cameras,
+        http=client,
+    )
+    if alerts.interfone_dispatch.data_path:
+        configure_interfone_data_root(alerts.interfone_dispatch.data_path)
+    else:
+        configure_interfone_data_root()
+    interfone_runner.reload(alerts.interfone_dispatch, cameras=cameras)
+    app.state.interfone_runner = interfone_runner
     alerts_runner.attach_alarm_dispatch(alarm_runner)
     alerts_runner.attach_rain_dispatch(rain_runner)
+    alerts_runner.attach_interfone_dispatch(interfone_runner)
 
-    if alerts.enabled_alerts() or alerts.alarm_dispatch.enabled or alerts.rain_dispatch.enabled:
+    if (
+        alerts.enabled_alerts()
+        or alerts.alarm_dispatch.enabled
+        or alerts.rain_dispatch.enabled
+        or alerts.interfone_dispatch.enabled
+    ):
         alerts_runner.start()
     else:
         log.info(
@@ -426,6 +447,7 @@ async def put_alerts_yaml(request: Request, body: AlertsYamlBody) -> dict[str, A
     runner: AlertsRunner = request.app.state.alerts_runner
     alarm_runner: AlarmDispatchRunner = request.app.state.alarm_runner
     rain_runner: RainDispatchRunner = request.app.state.rain_runner
+    interfone_runner: InterfoneDispatchRunner = request.app.state.interfone_runner
     alarm_runner.reload(
         catalog.alarm_dispatch,
         cameras=request.app.state.cameras,
@@ -434,14 +456,19 @@ async def put_alerts_yaml(request: Request, body: AlertsYamlBody) -> dict[str, A
     alarm_runner.default_notify_phones = list(catalog.default_notify.phones)
     rain_runner.reload(catalog.rain_dispatch, devices=request.app.state.catalog)
     rain_runner.default_notify_phones = list(catalog.default_notify.phones)
+    interfone_runner.reload(
+        catalog.interfone_dispatch,
+        cameras=request.app.state.cameras,
+    )
     runner.reload(catalog)
     runner.attach_alarm_dispatch(alarm_runner)
     runner.attach_rain_dispatch(rain_runner)
+    runner.attach_interfone_dispatch(interfone_runner)
     await runner.ensure_running()
     await alarm_runner.ensure_running()
     await rain_runner.ensure_running()
     result["message"] = (
-        "Arquivo salvo. Alertas periodicos, live, rotina de alarme e rotina de chuva recarregados."
+        "Arquivo salvo. Alertas periodicos, live, rotina de alarme, chuva e interfone recarregados."
     )
     return result
 
@@ -452,11 +479,16 @@ async def get_alerts_status(request: Request) -> dict[str, Any]:
     runner: AlertsRunner = request.app.state.alerts_runner
     alarm_runner: AlarmDispatchRunner | None = getattr(request.app.state, "alarm_runner", None)
     rain_runner: RainDispatchRunner | None = getattr(request.app.state, "rain_runner", None)
+    interfone_runner: InterfoneDispatchRunner | None = getattr(
+        request.app.state, "interfone_runner", None
+    )
     payload = runner.status_snapshot()
     if alarm_runner is not None:
         payload["alarm_dispatch"] = alarm_runner.status_snapshot()
     if rain_runner is not None:
         payload["rain_dispatch"] = rain_runner.status_snapshot()
+    if interfone_runner is not None:
+        payload["interfone_dispatch"] = interfone_runner.status_snapshot()
     return payload
 
 

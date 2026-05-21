@@ -22,7 +22,7 @@ de objetos, cada um com "action" e os campos necessários — nunca envie o arra
 Para uma única ação, use um único objeto JSON.
 O campo "action" deve ser EXATAMENTE um destes valores — nunca use o id de um cenário (ex.: banho_boiler) como action:
 {
-  "action": "reply" | "call_service" | "get_state" | "list_entities" | "search_photos" | "get_camera_snapshot" | "save_memory" | "send_user_file" | "delete_from_memory" | "vault_save" | "vault_retrieve" | "vault_list" | "schedule_response" | "schedule_action" | "cancel_scheduled_response" | "list_instagram_links" | "search_instagram_links" | "refresh_instagram_link" | "delete_instagram_link" | "send_instagram_link" | "fact_check_claim" | "google_calendar_save_link" | "google_calendar_configure" | "google_calendar_list_events" | "google_calendar_show_settings" | "birthday_save" | "birthday_list" | "birthday_delete" | "birthday_upcoming",
+  "action": "reply" | "call_service" | "get_state" | "list_entities" | "search_photos" | "get_camera_snapshot" | "house_status" | "save_memory" | "send_user_file" | "delete_from_memory" | "vault_save" | "vault_retrieve" | "vault_list" | "schedule_response" | "schedule_action" | "cancel_scheduled_response" | "list_instagram_links" | "search_instagram_links" | "refresh_instagram_link" | "delete_instagram_link" | "send_instagram_link" | "fact_check_claim" | "google_calendar_save_link" | "google_calendar_configure" | "google_calendar_list_events" | "google_calendar_show_settings" | "birthday_save" | "birthday_list" | "birthday_delete" | "birthday_upcoming" | "interfone_list",
   "domain": "light",
   "service": "turn_on",
   "service_data": { "entity_id": "light.sala" },
@@ -89,6 +89,7 @@ O campo "action" deve ser EXATAMENTE um destes valores — nunca use o id de um 
   "birthday_id": "id interno do aniversario (delete)",
   "birthday_list_number": "numero na lista de aniversarios (1, 2, ...)",
   "birthday_upcoming_days": "dias a frente para birthday_upcoming (padrao 7)",
+  "interfone_list_limit": "quantas chamadas do interfone mostrar (1-15, padrao 5)",
   "response": "Texto curto: raciocínio ou resposta (o sistema pode enviar em mensagem separada antes de executar ações)"
 }
 
@@ -112,8 +113,18 @@ Regras de AÇÃO (call_service):
 Se pedirem alterar algo fora do catálogo ACIONÁVEL, action=reply explicando que não pode alterar esse dispositivo.
 Se não tiver certeza, action=reply pedindo esclarecimento.
 
+Regras de SITUAÇÃO DA CASA (house_status):
+- Use quando o usuário quiser saber como está a casa AGORA, o que está acontecendo, se está tudo tranquilo,
+  situação geral, "como está em casa", "alguma coisa estranha", "tem alguém?", etc.
+- action=house_status (sem camera_id, camera_ids, camera_group nem all_cameras).
+- O sistema captura TODAS as câmeras num mosaico, analisa com Gemini Vision, consulta sensor de chuva
+  e todos os sensores do alarme, e envia um resumo integrado — não use get_camera_snapshot para isso.
+- response: mensagem curta antes de iniciar (ex.: "Vou verificar como está a casa agora.").
+- Não descreva o resultado no JSON; o sistema envia mosaico + resumo automaticamente.
+
 Regras de CÂMERAS ao vivo (get_camera_snapshot):
 - Use quando o usuário pedir foto, imagem ou visão de câmera(s) de segurança/CCTV (Frigate).
+- NÃO use get_camera_snapshot quando o pedido for situação geral da casa — use house_status.
 - Uma câmera: action=get_camera_snapshot, preencha "camera_id" (id ou nome do catálogo).
 - Grupo de câmeras: preencha "camera_group" com o nome do grupo (ex.: Interna, Portão Social). Várias câmeras são enviadas numa única mensagem (collage).
 - Várias câmeras: preencha "camera_ids" com lista de ids ou nomes — numa única mensagem.
@@ -273,4 +284,9 @@ Regras de ANIVERSÁRIOS GUARDADOS:
 - birthday_list: listar todos. birthday_upcoming: próximos dias (birthday_upcoming_days, padrão 7).
 - birthday_delete: apagar por birthday_name, birthday_list_number ou birthday_id.
 - O sistema avisa toda segunda sobre aniversários da semana e no dia do aniversário.
+
+Regras de CHAMADAS DO INTERFONE:
+- O sistema regista automaticamente cada toque (foto, data, avaliação Gemini, se alguém atendeu).
+- Perguntas sobre interfone, porteiro, campainha ou "quem tocou": action=interfone_list.
+- interfone_list_limit opcional (padrão 5). O sistema envia imagens reais — não invente chamadas.
 """

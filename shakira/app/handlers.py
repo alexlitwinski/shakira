@@ -88,6 +88,9 @@ from app.google_calendar_runner import ensure_google_calendar_runner_running
 from app.google_calendar_routine import try_handle_google_calendar_link_inbound
 from app.google_calendar_overrides import try_google_calendar_decision_override
 from app.birthday_prompts import BIRTHDAY_ACTIONS_INSTRUCTION
+from app.interfone_prompts import INTERFONE_ACTIONS_INSTRUCTION
+from app.interfone_actions import handle_interfone_list
+from app.house_status_routine import handle_house_status
 from app.birthday_actions import (
     execute_birthday_save_batch,
     handle_birthday_delete,
@@ -180,6 +183,7 @@ VALID_GEMINI_ACTIONS = frozenset(
         "list_entities",
         "search_photos",
         "get_camera_snapshot",
+        "house_status",
         "save_memory",
         "send_user_file",
         "delete_from_memory",
@@ -203,6 +207,7 @@ VALID_GEMINI_ACTIONS = frozenset(
         "birthday_list",
         "birthday_delete",
         "birthday_upcoming",
+        "interfone_list",
     }
 )
 
@@ -230,6 +235,8 @@ _SINGLE_USER_MESSAGE_ACTIONS = frozenset(
         "birthday_list",
         "birthday_delete",
         "birthday_upcoming",
+        "interfone_list",
+        "house_status",
     }
 )
 
@@ -1069,6 +1076,7 @@ def _build_catalog_fallback_text(
         f"{FACT_CHECK_ACTIONS_INSTRUCTION}\n\n"
         f"{GOOGLE_CALENDAR_ACTIONS_INSTRUCTION}\n\n"
         f"{BIRTHDAY_ACTIONS_INSTRUCTION}\n\n"
+        f"{INTERFONE_ACTIONS_INSTRUCTION}\n\n"
         f"{catalog_fallback}"
     )
 
@@ -2433,6 +2441,11 @@ async def execute_decision(
             "Pedido de câmera recebido. Se nada chegar, verifique Frigate nas opções do add-on."
         )
 
+    if action == "house_status":
+        return await finalize(
+            "Vou verificar como está a casa agora — câmeras, chuva e alarme."
+        )
+
     if action == "save_memory":
         from app.vault_credential_detection import (
             memory_decision_looks_like_vault,
@@ -2567,6 +2580,11 @@ async def execute_decision(
     if action == "birthday_delete":
         result = handle_birthday_delete(decision, phone)
         return await finalize(result)
+
+    if action == "interfone_list":
+        return await finalize(
+            "Vou buscar o histórico de chamadas do interfone e enviar as imagens."
+        )
 
     fallback = reply or "Não entendi o próximo passo."
     if messenger:
@@ -3588,6 +3606,64 @@ async def _process_inbound_message(
                 user_text=user_text or "",
                 messenger=messenger,
                 reply_text=str(decision.get("response") or "").strip() or "Imagem da camera enviada.",
+                evo=evo,
+                evo_base=evo_base,
+                evo_key=evo_key,
+                instance=send_instance,
+            )
+            _log_message_timings(timings, messenger)
+            return
+
+        if action == "house_status" and http is not None and send_instance:
+            from app.alerts_catalog import AlertsCatalog
+
+            alerts_cfg = AlertsCatalog.load(settings.alerts_config_path)
+            await handle_house_status(
+                decision,
+                settings=settings,
+                catalog=catalog,
+                cameras=cameras,
+                ha=ha,
+                evo=evo,
+                http=http,
+                phone=phone_norm,
+                instance=send_instance,
+                alerts_catalog=alerts_cfg,
+                messenger=messenger,
+            )
+            await _finish_whatsapp_exchange(
+                phone=phone_norm,
+                user_text=user_text or "",
+                messenger=messenger,
+                reply_text=str(decision.get("response") or "").strip()
+                or "Resumo da casa enviado.",
+                evo=evo,
+                evo_base=evo_base,
+                evo_key=evo_key,
+                instance=send_instance,
+            )
+            _log_message_timings(timings, messenger)
+            return
+
+        if action == "interfone_list" and send_instance:
+            from app.alerts_catalog import AlertsCatalog
+
+            alerts_cfg = AlertsCatalog.load(settings.alerts_config_path)
+            await handle_interfone_list(
+                decision,
+                settings=settings,
+                evo=evo,
+                phone=phone_norm,
+                instance=send_instance,
+                messenger=messenger,
+                data_path=alerts_cfg.interfone_dispatch.data_path,
+            )
+            await _finish_whatsapp_exchange(
+                phone=phone_norm,
+                user_text=user_text or "",
+                messenger=messenger,
+                reply_text=str(decision.get("response") or "").strip()
+                or "Histórico do interfone enviado.",
                 evo=evo,
                 evo_base=evo_base,
                 evo_key=evo_key,
