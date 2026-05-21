@@ -7,11 +7,13 @@ from app.alerts_runner import AlertsRunner
 from app.devices_catalog import DevicesCatalog
 from app.rain_dispatch_runner import (
     RainDispatchRunner,
+    RainStartStatus,
     build_rain_started_message,
     cover_is_closed,
     cover_is_open,
     is_raining,
     parse_rain_volume,
+    rain_started_transition,
     window_is_open,
 )
 
@@ -30,12 +32,59 @@ def test_cover_states():
     assert not window_is_open("closed")
 
 
-def test_build_rain_started_message_with_open_windows():
-    msg = build_rain_started_message(["Janela Jantar 1", "Janela Quarto 2"])
+def test_rain_started_transition_uses_websocket_old_new():
+    assert rain_started_transition(
+        rain_entity="binary_sensor.rain",
+        entity_id="binary_sensor.rain",
+        old_state="off",
+        new_state="on",
+        prev_rain_on=True,
+        rain_on=True,
+        source="live",
+        bootstrapped=True,
+    )
+
+
+def test_rain_started_transition_poll_uses_prev():
+    assert rain_started_transition(
+        rain_entity="binary_sensor.rain",
+        entity_id=None,
+        old_state=None,
+        new_state=None,
+        prev_rain_on=False,
+        rain_on=True,
+        source="poll",
+        bootstrapped=True,
+    )
+
+
+def test_build_rain_started_message_all_ok():
+    msg = build_rain_started_message(
+        RainStartStatus(
+            open_windows=[],
+            porta_vidro_open=False,
+            toldo_closed=False,
+        )
+    )
     assert "Começou a chover" in msg
-    assert "Janelas abertas:" in msg
+    assert "Situação:" in msg
+    assert "nenhuma aberta" in msg
+    assert "aberto (recolhido)" in msg
+    assert "fechada" in msg
+
+
+def test_build_rain_started_message_with_issues():
+    msg = build_rain_started_message(
+        RainStartStatus(
+            open_windows=["Janela Jantar 1"],
+            porta_vidro_open=True,
+            toldo_closed=True,
+        )
+    )
     assert "Janela Jantar 1" in msg
-    assert build_rain_started_message([]) == "Começou a chover."
+    assert "Feche as janelas" in msg
+    assert "fechado" in msg
+    assert "aberta" in msg
 
 
 def test_parse_rain_dispatch_from_alerts_yaml():
@@ -186,6 +235,49 @@ devices:
         )
     )
     first_msg = runner._notify.call_args_list[0][0][1]
-    assert "Janelas abertas:" in first_msg
+    assert "Situação:" in first_msg
     assert "Janela Jantar 1" in first_msg
     assert "Janela Jantar 2" not in first_msg
+
+
+def test_rain_started_after_bootstrap_race():
+    """Bootstrap lia on antes da comparacao; live off->on deve avisar mesmo com prev_rain True."""
+    import asyncio
+
+    from app.alerts_catalog import AlertNotifyConfig, RainDispatchConfig
+
+    config = RainDispatchConfig(
+        enabled=True,
+        notify=AlertNotifyConfig(phones=["5511999999999"]),
+    )
+    runner = RainDispatchRunner(
+        settings=Mock(),
+        ha=AsyncMock(),
+        evo=Mock(),
+        config=config,
+    )
+
+    async def _get_state(entity_id: str) -> dict[str, str]:
+        return {
+            "state": {
+                config.rain_entity: "on",
+                config.volume_entity: "0",
+                config.porta_vidro_entity: "closed",
+                config.toldo_entity: "open",
+            }[entity_id]
+        }
+
+    runner.ha.get_state = _get_state  # type: ignore[method-assign]
+    runner._bootstrapped = False
+    runner._notify = AsyncMock()  # type: ignore[method-assign]
+
+    asyncio.run(
+        runner._evaluate_all(
+            source="live",
+            entity_id=config.rain_entity,
+            old_state="off",
+            new_state="on",
+        )
+    )
+    runner._notify.assert_called()
+    assert "Começou a chover" in runner._notify.call_args_list[0][0][1]

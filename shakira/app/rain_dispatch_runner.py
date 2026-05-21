@@ -22,6 +22,9 @@ from app.whatsapp_outbound import WhatsAppSendError, send_whatsapp_text
 
 log = logging.getLogger(__name__)
 
+DEFAULT_PORTA_VIDRO_LABEL = "Porta de vidro da cozinha gourmet"
+DEFAULT_TOLDO_LABEL = "Toldo da área gourmet"
+
 POLL_TICK_SECONDS = 60
 STATE_ON = "on"
 COVER_OPEN = "open"
@@ -55,12 +58,63 @@ def window_is_open(state: str) -> bool:
     return (state or "").strip().lower() in WINDOW_OPEN_STATES
 
 
-def build_rain_started_message(open_window_labels: list[str]) -> str:
-    if not open_window_labels:
-        return "Começou a chover."
-    lines = ["Começou a chover.", "", "Janelas abertas:"]
-    for label in open_window_labels:
-        lines.append(f"• {label}")
+def rain_started_transition(
+    *,
+    rain_entity: str,
+    entity_id: str | None,
+    old_state: str | None,
+    new_state: str | None,
+    prev_rain_on: bool | None,
+    rain_on: bool,
+    source: str,
+    bootstrapped: bool,
+) -> bool:
+    """Detecta inicio de chuva (live com old/new ou poll com prev vs atual)."""
+    if entity_id == rain_entity and new_state is not None:
+        if old_state is not None:
+            return not is_raining(old_state) and is_raining(new_state)
+        if source == "live" and not bootstrapped and is_raining(new_state):
+            return True
+    if prev_rain_on is None:
+        return False
+    return not prev_rain_on and rain_on
+
+
+@dataclass(frozen=True)
+class RainStartStatus:
+    open_windows: list[str]
+    porta_vidro_open: bool
+    toldo_closed: bool
+    porta_label: str = DEFAULT_PORTA_VIDRO_LABEL
+    toldo_label: str = DEFAULT_TOLDO_LABEL
+
+
+def build_rain_started_message(status: RainStartStatus) -> str:
+    """Resumo ao iniciar chuva: alertas e confirmacao quando tudo estiver ok."""
+    lines = ["Começou a chover.", "", "Situação:"]
+
+    if status.open_windows:
+        lines.append("• Janelas abertas:")
+        for label in status.open_windows:
+            lines.append(f"  - {label}")
+        lines.append("  Feche as janelas.")
+    else:
+        lines.append("• Janelas: nenhuma aberta.")
+
+    if status.toldo_closed:
+        lines.append(
+            f"• {status.toldo_label}: fechado — abra o toldo para proteger o espaço."
+        )
+    else:
+        lines.append(f"• {status.toldo_label}: aberto (recolhido).")
+
+    if status.porta_vidro_open:
+        lines.append(
+            f"• {status.porta_label}: aberta — considere fechar."
+        )
+    else:
+        lines.append(f"• {status.porta_label}: fechada.")
+
     return "\n".join(lines)
 
 
@@ -96,6 +150,8 @@ class RainDispatchRunner:
     async def ensure_running(self) -> None:
         if self.config.enabled:
             self._start_poll_loop()
+            if not self._bootstrapped:
+                asyncio.create_task(self._bootstrap_states(), name="shakira-rain-bootstrap")
         else:
             await self.stop()
 
@@ -104,6 +160,8 @@ class RainDispatchRunner:
             log.info("Rotina de chuva desativada (rain_dispatch.enabled=false)")
             return
         self._start_poll_loop()
+        if not self._bootstrapped:
+            asyncio.create_task(self._bootstrap_states(), name="shakira-rain-bootstrap")
         log.info(
             "Rotina de chuva ativa (entidades=%s, chuva forte >= %.1f mm/15min)",
             sorted(self.watched_entity_ids),
@@ -150,6 +208,13 @@ class RainDispatchRunner:
     ) -> None:
         if entity_id not in self.watched_entity_ids:
             return
+        if entity_id == self.config.rain_entity:
+            log.info(
+                "Chuva (live): %s %s -> %s",
+                entity_id,
+                old_state or "(vazio)",
+                new_state,
+            )
         await self._evaluate_all(source="live", entity_id=entity_id, old_state=old_state, new_state=new_state)
 
     async def _evaluate_all(
@@ -160,6 +225,7 @@ class RainDispatchRunner:
         old_state: str | None = None,
         new_state: str | None = None,
     ) -> None:
+        bootstrapped_before = self._bootstrapped
         if not self._bootstrapped:
             await self._bootstrap_states()
             if source == "poll":
@@ -183,18 +249,29 @@ class RainDispatchRunner:
             volume_mm = parse_rain_volume(new_state)
             heavy = volume_mm >= self.config.heavy_rain_mm
 
-        if prev_rain is not None and not prev_rain and rain_on:
-            open_windows = await self._fetch_open_window_labels()
+        started = rain_started_transition(
+            rain_entity=self.config.rain_entity,
+            entity_id=entity_id,
+            old_state=old_state,
+            new_state=new_state,
+            prev_rain_on=prev_rain,
+            rain_on=rain_on,
+            source=source,
+            bootstrapped=bootstrapped_before,
+        )
+        if started:
+            status = await self._gather_rain_start_status(porta_state, toldo_state)
+            log.info(
+                "Chuva: inicio detectado (source=%s, janelas=%s, toldo_fechado=%s, porta_aberta=%s)",
+                source,
+                status.open_windows,
+                status.toldo_closed,
+                status.porta_vidro_open,
+            )
             await self._notify(
                 "rain_started",
-                build_rain_started_message(open_windows),
+                build_rain_started_message(status),
             )
-            if cover_is_closed(toldo_state):
-                await self._notify(
-                    "toldo_closed_rain",
-                    "Começou a chover e o toldo da área gourmet está fechado. "
-                    "Abra o toldo para proteger o espaço.",
-                )
 
         if prev_volume > 0 and volume_mm == 0:
             await self._notify(
@@ -249,6 +326,13 @@ class RainDispatchRunner:
             self._last_volume_mm,
         )
 
+    def _entity_label(self, entity_id: str, default: str) -> str:
+        if self.devices:
+            ent = self.devices.get_entity(entity_id)
+            if ent and ent.description.strip():
+                return ent.description.strip()
+        return default
+
     async def _fetch_open_window_labels(self) -> list[str]:
         if not self.devices:
             return []
@@ -257,6 +341,25 @@ class RainDispatchRunner:
             if window_is_open(await self._get_state(entity_id)):
                 open_labels.append(label)
         return open_labels
+
+    async def _gather_rain_start_status(
+        self,
+        porta_state: str,
+        toldo_state: str,
+    ) -> RainStartStatus:
+        return RainStartStatus(
+            open_windows=await self._fetch_open_window_labels(),
+            porta_vidro_open=cover_is_open(porta_state),
+            toldo_closed=cover_is_closed(toldo_state),
+            porta_label=self._entity_label(
+                self.config.porta_vidro_entity,
+                DEFAULT_PORTA_VIDRO_LABEL,
+            ),
+            toldo_label=self._entity_label(
+                self.config.toldo_entity,
+                DEFAULT_TOLDO_LABEL,
+            ),
+        )
 
     async def _get_state(self, entity_id: str) -> str:
         data = await self.ha.get_state(entity_id)

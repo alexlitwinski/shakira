@@ -74,6 +74,7 @@ class AlarmDispatchRunner:
     _pending_zones: dict[str, tuple[str, str, str]] = field(default_factory=dict)
     _last_notified_at: float = 0.0
     _had_triggered: bool = False
+    _partitions_seeded: bool = False
 
     @property
     def partition_entity_ids(self) -> set[str]:
@@ -91,10 +92,16 @@ class AlarmDispatchRunner:
             self.cameras = cameras
         if devices is not None:
             self.devices = devices
+        self._partitions_seeded = False
 
     async def ensure_running(self) -> None:
         if self.config.enabled:
             self._start_poll_loop()
+            if not self._partitions_seeded:
+                asyncio.create_task(
+                    self._seed_partition_states(),
+                    name="shakira-alarm-seed",
+                )
         else:
             await self.stop()
 
@@ -137,7 +144,9 @@ class AlarmDispatchRunner:
         if not self.config.enabled:
             log.info("Rotina de disparo do alarme desativada (alarm_dispatch.enabled=false)")
             return
+        self._partitions_seeded = False
         self._start_poll_loop()
+        asyncio.create_task(self._seed_partition_states(), name="shakira-alarm-seed")
         log.info(
             "Rotina de disparo do alarme ativa (particoes=%s, debounce=%ss, poll=%ss, WebSocket via alertas)",
             len(self.partition_entity_ids),
@@ -187,8 +196,26 @@ class AlarmDispatchRunner:
             except asyncio.TimeoutError:
                 continue
 
+    async def _seed_partition_states(self) -> None:
+        """Grava estado atual das particoes sem disparar aviso (arranque do add-on)."""
+        for entity_id, _ in DEFAULT_PARTITIONS:
+            state_data = await self.ha.get_state(entity_id)
+            state = (
+                str(state_data.get("state", "")).strip().lower()
+                if state_data
+                else ""
+            )
+            self._last_known_states[entity_id] = state
+        self._partitions_seeded = True
+        log.info(
+            "Alarme: baseline de particoes no arranque (%s)",
+            {eid: self._last_known_states.get(eid, "") for eid, _ in DEFAULT_PARTITIONS},
+        )
+
     async def _poll_check_partitions(self) -> None:
         """Backup: detecta triggered via REST (util em simulacoes no HA)."""
+        if not self._partitions_seeded:
+            await self._seed_partition_states()
         for entity_id, _ in DEFAULT_PARTITIONS:
             state_data = await self.ha.get_state(entity_id)
             state = (

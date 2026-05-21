@@ -92,6 +92,39 @@ def test_skip_home_state_question():
     assert fixed["action"] == "reply"
 
 
+def test_override_confira_noticia():
+    decision = {
+        "action": "delete_from_memory",
+        "response": "Vou apagar da sua memória pessoal.",
+    }
+    text = (
+        "Confira se essa notícia é verdade:\n\n"
+        "UOL Notícias\n"
+        "Justiça manda apagar perfil de médica da Fiocruz por espalhar desinformação"
+    )
+    fixed = try_fact_check_decision_override(
+        decision,
+        user_text=text,
+        settings=_settings(),
+    )
+    assert fixed["action"] == "fact_check_claim"
+    assert "Fiocruz" in fixed["fact_check_query"] or "desinformação" in fixed["fact_check_query"]
+
+
+def test_override_delete_from_memory_on_isso_verdade():
+    decision = {
+        "action": "delete_from_memory",
+        "memory_id": "abc123",
+        "response": "Vou apagar da sua memória pessoal.",
+    }
+    fixed = try_fact_check_decision_override(
+        decision,
+        user_text="Isso é verdade?",
+        settings=_settings(),
+    )
+    assert fixed["action"] == "fact_check_claim"
+
+
 def test_skip_when_disabled():
     decision = {"action": "reply", "response": "Não tenho informações."}
     fixed = try_fact_check_decision_override(

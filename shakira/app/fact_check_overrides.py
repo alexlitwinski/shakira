@@ -10,15 +10,16 @@ from app.fact_check_actions import fact_check_configured
 
 _FACT_CHECK_INTENT_RE = re.compile(
     r"(?:"
-    r"\b(?:verifique|verifica|checa|checar|confirme|confirma)\s+(?:se\s+)?(?:[eé]\s+verdade\s+que\s+)?"
+    r"\b(?:verifique|verifica|checa|checar|cheque|confira|confere|confirme|confirma)\s+"
+    r"(?:se\s+)?(?:[eé]\s+verdade\s+que\s+)?"
     r"|\b[eé]\s+verdade\s+que\b"
     r"|\bisso\s+[eé]\s+verdade\b"
     r"|\bisso\s+procede\b"
     r"|\bfake\s*news\b"
     r"|\bfact[\s-]?check\b"
     r"|\b(?:desminta|desmentir)\b"
-    r"|\b(?:not[ií]cia|alega[cç][aã]o|boato)\b.*\b(?:verdade|verificar|confirmar|checar)\b"
-    r"|\b(?:verificar|confirmar|checar)\b.*\b(?:not[ií]cia|alega[cç][aã]o|boato)\b"
+    r"|\b(?:not[ií]cia|alega[cç][aã]o|boato)\b.*\b(?:verdade|verificar|confirmar|checar|confira)\b"
+    r"|\b(?:verificar|confirmar|checar|confira)\b.*\b(?:not[ií]cia|alega[cç][aã]o|boato)\b"
     r")",
     re.I,
 )
@@ -42,8 +43,9 @@ _HOME_STATE_RE = re.compile(
 
 _QUERY_PREFIX_RE = re.compile(
     r"^(?:"
-    r"(?:verifique|verifica|checa|checar|confirme|confirma)\s+(?:se\s+)?(?:[eé]\s+verdade\s+que\s+)?"
-    r"|(?:pode\s+)?(?:confirmar|verificar|checar)\s+(?:essa\s+)?(?:not[ií]cia|alega[cç][aã]o|boato)[:\s]+"
+    r"(?:verifique|verifica|checa|checar|cheque|confira|confere|confirme|confirma)\s+"
+    r"(?:se\s+)?(?:[eé]\s+verdade\s+que\s+)?"
+    r"|(?:pode\s+)?(?:confirmar|verificar|checar|confira)\s+(?:essa\s+)?(?:not[ií]cia|alega[cç][aã]o|boato)[:\s]+"
     r"|(?:desminta|desmentir)\s+(?:isso|essa\s+not[ií]cia)[:\s]*"
     r"|isso\s+[eé]\s+verdade[:\s]*"
     r"|isso\s+procede[:\s]*"
@@ -106,7 +108,10 @@ def try_fact_check_decision_override(
     if not wants_check and not refused:
         return decision
 
-    if action != "reply" and not refused:
+    should_override = (wants_check and action != "fact_check_claim") or (
+        refused and action == "reply"
+    )
+    if not should_override:
         return decision
 
     query = extract_fact_check_query_from_user_text(user_text)
@@ -117,5 +122,5 @@ def try_fact_check_decision_override(
         **decision,
         "action": "fact_check_claim",
         "fact_check_query": query,
-        "response": reply or "Vou consultar verificadores de fact-check...",
+        "response": "Vou consultar verificadores de fact-check...",
     }

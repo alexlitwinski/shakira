@@ -3294,6 +3294,11 @@ async def _process_inbound_message(
             if retry_scenario_id:
                 active_scenario_id = retry_scenario_id
 
+        decision = try_fact_check_decision_override(
+            decision,
+            user_text=user_text or "",
+            settings=settings,
+        )
         decision = try_memory_delete_override(
             decision,
             phone=phone_norm,
@@ -3305,11 +3310,6 @@ async def _process_inbound_message(
             decision,
             phone=phone_norm,
             user_text=user_text or "",
-        )
-        decision = try_fact_check_decision_override(
-            decision,
-            user_text=user_text or "",
-            settings=settings,
         )
 
         if not _decision_is_complete(decision):

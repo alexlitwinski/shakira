@@ -94,6 +94,7 @@ class AlertsRunner:
         for aid in list(self._runtimes.keys()):
             if aid not in active_ids:
                 del self._runtimes[aid]
+        self._seed_polling_baseline()
         self._sync_websocket_entities()
         live_count = len(catalog.enabled_live_alerts())
         poll_count = len(catalog.enabled_polling_alerts())
@@ -142,7 +143,14 @@ class AlertsRunner:
         if self._ws_listener:
             self._ws_listener.update_entity_ids(entity_ids)
 
+    def _seed_polling_baseline(self) -> None:
+        """Evita disparar alertas de polling no primeiro ciclo apos arranque/reload."""
+        now = time.monotonic()
+        for alert in self.catalog.enabled_polling_alerts():
+            self._runtime(alert.id).last_check_at = now
+
     def start(self) -> None:
+        self._seed_polling_baseline()
         if self.catalog.enabled_polling_alerts() and not (
             self._poll_task and not self._poll_task.done()
         ):
@@ -157,6 +165,7 @@ class AlertsRunner:
         """Inicia polling e/ou WebSocket se houver alertas activos."""
         if self.catalog.enabled_polling_alerts():
             if not (self._poll_task and not self._poll_task.done()):
+                self._seed_polling_baseline()
                 self._poll_stop.clear()
                 self._poll_task = asyncio.create_task(
                     self._poll_loop(), name="shakira-alerts-poll"
@@ -217,7 +226,7 @@ class AlertsRunner:
 
     def _runtime(self, alert_id: str) -> _AlertRuntime:
         if alert_id not in self._runtimes:
-            self._runtimes[alert_id] = _AlertRuntime()
+            self._runtimes[alert_id] = _AlertRuntime(last_check_at=time.monotonic())
         return self._runtimes[alert_id]
 
     async def _resolve_phones(self, alert: AlertConfig) -> list[str]:

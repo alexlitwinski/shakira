@@ -6,6 +6,7 @@ import re
 from typing import Any
 
 from app.conversation_history import HistoryEntry
+from app.fact_check_overrides import _looks_like_fact_check_request
 from app.user_memory import MemoryEntry, StoredFile, UserMemoryStore, get_store
 from app.user_memory_cache import invalidate_user_memory_cache
 
@@ -377,6 +378,8 @@ def try_memory_delete_override(
     Se o usuario pediu apagar, corrige decisoes erradas (ex.: send_user_file)
     e resolve indices da ultima listagem (ex.: "apague 1 e 4").
     """
+    if _looks_like_fact_check_request(user_text):
+        return decision
     if not is_delete_memory_intent(user_text):
         return decision
 
