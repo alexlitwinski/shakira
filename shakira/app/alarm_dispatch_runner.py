@@ -10,8 +10,6 @@ import asyncio
 
 import logging
 
-import os
-
 import time
 
 from dataclasses import dataclass, field
@@ -26,17 +24,7 @@ import httpx
 
 from app.alerts_catalog import AlarmDispatchConfig
 
-from app.camera_snapshots import send_camera_snapshots
-
-from app.camera_vision import (
-
-    DEFAULT_MAX_VISION_RETRIES,
-
-    analyze_camera_mosaic,
-
-    format_analysis_message,
-
-)
+from app.camera_snapshots import send_camera_snapshots, send_camera_vision_description
 
 from app.cameras_catalog import CamerasCatalog
 
@@ -633,85 +621,17 @@ class AlarmDispatchRunner:
 
 
 
-        if not self.config.describe_cameras or not result.image_bytes or result.sent <= 0:
-
+        if not self.config.describe_cameras:
             return
 
-
-
-        api_key = self.settings.gemini_api_key.strip()
-
-        if not api_key:
-
-            log.warning("Alarme: describe_cameras ativo mas gemini_api_key ausente")
-
-            return
-
-
-
-        model = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
-
-        try:
-
-            analysis = await asyncio.to_thread(
-
-                analyze_camera_mosaic,
-
-                api_key=api_key,
-
-                image_bytes=result.image_bytes,
-
-                camera_panels=result.image_panels,
-
-                context=context,
-
-                model=model,
-
-            )
-
-        except Exception:
-
-            log.exception("Alarme: falha Gemini vision phone=%s", phone)
-
-            return
-
-
-
-        if analysis is None:
-
-            log.warning("Alarme: Gemini vision vazio phone=%s", phone)
-
-            return
-
-
-
-        description = format_analysis_message(analysis)
-
-        if not description:
-
-            return
-
-
-
-        try:
-
-            await send_whatsapp_text(
-
-                settings=self.settings,
-
-                evo=self.evo,
-
-                number=phone,
-
-                message=description,
-
-            )
-
-            log.info("Alarme: analise Gemini enviada phone=%s chars=%s", phone, len(description))
-
-        except WhatsAppSendError as e:
-
-            log.warning("Alarme: falha WhatsApp analise phone=%s: %s", phone, e)
+        await send_camera_vision_description(
+            settings=self.settings,
+            evo=self.evo,
+            phone=phone,
+            instance=instance,
+            result=result,
+            context=context,
+        )
 
 
 

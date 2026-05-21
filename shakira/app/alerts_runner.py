@@ -39,6 +39,17 @@ from app.whatsapp_outbound import WhatsAppSendError, send_whatsapp_text
 log = logging.getLogger(__name__)
 
 TICK_SECONDS = 30
+ALARM_TRIGGERED_STATE = "triggered"
+
+
+def should_describe_alert_cameras(alert: AlertConfig) -> bool:
+    """True se o alerta pede descricao Gemini (explicita ou disparo de particao)."""
+    if alert.describe_cameras:
+        return True
+    return (
+        alert.entity_id.startswith("alarm_control_panel.")
+        and alert.when_state.strip().lower() == ALARM_TRIGGERED_STATE
+    )
 
 
 @dataclass
@@ -223,7 +234,7 @@ class AlertsRunner:
                 result.sent,
                 result.failed,
             )
-            if alert.describe_cameras and result.image_bytes and result.sent > 0:
+            if should_describe_alert_cameras(alert) and result.image_bytes and result.sent > 0:
                 await self._send_camera_description(
                     alert=alert,
                     phone=phone,
