@@ -22,6 +22,7 @@ from app.devices_catalog import CatalogValidationError, DevicesCatalog
 from app.alerts_catalog import AlertsCatalog, AlertsCatalogValidationError
 from app.alerts_runner import AlertsRunner
 from app.scheduled_responses import count_all_pending_globally
+from app.scheduled_responses_runner import ScheduledResponsesRunner, set_scheduled_runner
 from app.google_calendar_runner import GoogleCalendarRunner, set_google_calendar_runner
 from app.google_calendar_store import count_configured_calendars
 from app.birthday_runner import BirthdayRunner, set_birthday_runner
