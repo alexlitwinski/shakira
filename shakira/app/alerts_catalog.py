@@ -20,7 +20,7 @@ FALLBACK_ALERTS_PATHS = (
     "/config/shakira_alerts.yaml",
 )
 
-ALLOWED_ROOT_KEYS = frozenset({"alerts", "alarm_dispatch"})
+ALLOWED_ROOT_KEYS = frozenset({"alerts", "alarm_dispatch", "rain_dispatch"})
 ALERT_ID_RE = re.compile(r"^[a-z][a-z0-9_]+$", re.IGNORECASE)
 ENTITY_ID_RE = re.compile(r"^[a-z][a-z0-9_]+\.[a-z0-9_]+$", re.IGNORECASE)
 INTERVAL_RE = re.compile(r"^(\d+)\s*([smhd])?$", re.IGNORECASE)
@@ -127,6 +127,25 @@ class AlertNotifyConfig:
 
 DEFAULT_ALARM_COOLDOWN_SECONDS = 300
 DEFAULT_ALARM_DEBOUNCE_SECONDS = 2.0
+DEFAULT_RAIN_COOLDOWN_SECONDS = 900
+DEFAULT_HEAVY_RAIN_MM = 4.0
+
+DEFAULT_RAIN_ENTITY = "binary_sensor.sensor_chuva_e_lux_rain"
+DEFAULT_RAIN_VOLUME_ENTITY = "sensor.volume_de_chuva_15m"
+DEFAULT_PORTA_VIDRO_ENTITY = "cover.porta_de_vidro_gourmet"
+DEFAULT_TOLDO_ENTITY = "cover.toldo_gourmet"
+
+
+@dataclass
+class RainDispatchConfig:
+    enabled: bool = False
+    cooldown_seconds: int = DEFAULT_RAIN_COOLDOWN_SECONDS
+    heavy_rain_mm: float = DEFAULT_HEAVY_RAIN_MM
+    notify: AlertNotifyConfig = field(default_factory=AlertNotifyConfig)
+    rain_entity: str = DEFAULT_RAIN_ENTITY
+    volume_entity: str = DEFAULT_RAIN_VOLUME_ENTITY
+    porta_vidro_entity: str = DEFAULT_PORTA_VIDRO_ENTITY
+    toldo_entity: str = DEFAULT_TOLDO_ENTITY
 
 
 @dataclass
@@ -161,6 +180,7 @@ class AlertConfig:
 class AlertsCatalog:
     alerts: list[AlertConfig] = field(default_factory=list)
     alarm_dispatch: AlarmDispatchConfig = field(default_factory=AlarmDispatchConfig)
+    rain_dispatch: RainDispatchConfig = field(default_factory=RainDispatchConfig)
     source_path: Path | None = None
     content_hash: str = ""
 
@@ -198,18 +218,21 @@ class AlertsCatalog:
         data = yaml.safe_load(text)
         alerts = cls._parse_data(data)
         alarm_dispatch = cls._parse_alarm_dispatch(data)
+        rain_dispatch = cls._parse_rain_dispatch(data)
         enabled = sum(1 for a in alerts if a.enabled)
         if source_path:
             log.info(
-                "Alertas carregados: %s (%s regra(s), %s ativa(s), alarm_dispatch=%s)",
+                "Alertas carregados: %s (%s regra(s), %s ativa(s), alarm_dispatch=%s, rain_dispatch=%s)",
                 source_path,
                 len(alerts),
                 enabled,
                 alarm_dispatch.enabled,
+                rain_dispatch.enabled,
             )
         return cls(
             alerts=alerts,
             alarm_dispatch=alarm_dispatch,
+            rain_dispatch=rain_dispatch,
             source_path=source_path,
             content_hash=h,
         )
@@ -309,6 +332,46 @@ class AlertsCatalog:
         )
 
     @classmethod
+    def _parse_rain_dispatch(cls, data: Any) -> RainDispatchConfig:
+        if not isinstance(data, dict):
+            return RainDispatchConfig()
+        block = data.get("rain_dispatch")
+        if not isinstance(block, dict):
+            return RainDispatchConfig()
+
+        cooldown_raw = block.get("cooldown_seconds")
+        if cooldown_raw is None:
+            cooldown_raw = block.get("cooldown")
+        cooldown = parse_interval_seconds(cooldown_raw)
+        if cooldown is None:
+            cooldown = DEFAULT_RAIN_COOLDOWN_SECONDS
+        cooldown = max(MIN_CHECK_INTERVAL_SECONDS, min(cooldown, MAX_CHECK_INTERVAL_SECONDS * 7))
+
+        heavy_raw = block.get("heavy_rain_mm")
+        heavy = DEFAULT_HEAVY_RAIN_MM
+        if isinstance(heavy_raw, (int, float)) and not isinstance(heavy_raw, bool):
+            heavy = max(0.1, min(float(heavy_raw), 500.0))
+
+        entities = block.get("entities")
+        ent_map: dict[str, str] = {}
+        if isinstance(entities, dict):
+            for key in ("rain", "volume_15m", "porta_vidro", "toldo"):
+                val = entities.get(key)
+                if isinstance(val, str) and val.strip():
+                    ent_map[key] = val.strip()
+
+        return RainDispatchConfig(
+            enabled=bool(block.get("enabled", False)),
+            cooldown_seconds=cooldown,
+            heavy_rain_mm=heavy,
+            notify=AlertNotifyConfig(phones=cls._parse_notify_phones(block.get("notify"))),
+            rain_entity=ent_map.get("rain", DEFAULT_RAIN_ENTITY),
+            volume_entity=ent_map.get("volume_15m", DEFAULT_RAIN_VOLUME_ENTITY),
+            porta_vidro_entity=ent_map.get("porta_vidro", DEFAULT_PORTA_VIDRO_ENTITY),
+            toldo_entity=ent_map.get("toldo", DEFAULT_TOLDO_ENTITY),
+        )
+
+    @classmethod
     def _parse_data(cls, data: Any) -> list[AlertConfig]:
         if data is None:
             return []
@@ -334,7 +397,9 @@ class AlertsCatalog:
             return ["A raiz do arquivo deve ser um mapa YAML (chave: valor)."]
 
         for key in sorted(set(data.keys()) - ALLOWED_ROOT_KEYS):
-            errors.append(f"Chave invalida na raiz: '{key}' (permitido: alerts, alarm_dispatch).")
+            errors.append(
+                f"Chave invalida na raiz: '{key}' (permitido: alerts, alarm_dispatch, rain_dispatch)."
+            )
 
         alarm_block = data.get("alarm_dispatch")
         if alarm_block is not None:
@@ -372,6 +437,52 @@ class AlertsCatalog:
                         notify.get("phones"), list
                     ):
                         errors.append("alarm_dispatch.notify.phones deve ser uma lista.")
+
+        rain_block = data.get("rain_dispatch")
+        if rain_block is not None:
+            if not isinstance(rain_block, dict):
+                errors.append("'rain_dispatch' deve ser um mapa.")
+            else:
+                rain_allowed = {
+                    "enabled",
+                    "cooldown",
+                    "cooldown_seconds",
+                    "heavy_rain_mm",
+                    "notify",
+                    "entities",
+                }
+                for k in sorted(set(rain_block.keys()) - rain_allowed):
+                    errors.append(f"rain_dispatch: chave desconhecida '{k}'.")
+                if "enabled" in rain_block and not isinstance(rain_block["enabled"], bool):
+                    errors.append("rain_dispatch.enabled deve ser true ou false.")
+                heavy = rain_block.get("heavy_rain_mm")
+                if heavy is not None and not isinstance(heavy, (int, float)):
+                    errors.append("rain_dispatch.heavy_rain_mm deve ser numero.")
+                for cooldown_key in ("cooldown", "cooldown_seconds"):
+                    if cooldown_key in rain_block:
+                        parsed = parse_interval_seconds(rain_block[cooldown_key])
+                        if parsed is None:
+                            errors.append(f"rain_dispatch.{cooldown_key} invalido.")
+                notify = rain_block.get("notify")
+                if notify is not None:
+                    if not isinstance(notify, dict):
+                        errors.append("rain_dispatch.notify deve ser um mapa.")
+                    elif notify.get("phones") is not None and not isinstance(
+                        notify.get("phones"), list
+                    ):
+                        errors.append("rain_dispatch.notify.phones deve ser uma lista.")
+                entities = rain_block.get("entities")
+                if entities is not None:
+                    if not isinstance(entities, dict):
+                        errors.append("rain_dispatch.entities deve ser um mapa.")
+                    else:
+                        for ek in sorted(set(entities.keys()) - {"rain", "volume_15m", "porta_vidro", "toldo"}):
+                            errors.append(f"rain_dispatch.entities: chave desconhecida '{ek}'.")
+                        for ek, ev in entities.items():
+                            if not isinstance(ev, str) or not ev.strip():
+                                errors.append(f"rain_dispatch.entities.{ek} deve ser entity_id texto.")
+                            elif not ENTITY_ID_RE.match(ev.strip()):
+                                errors.append(f"rain_dispatch.entities.{ek}: entity_id invalido.")
 
         if "alerts" not in data:
             errors.append("Defina a secao 'alerts:'.")

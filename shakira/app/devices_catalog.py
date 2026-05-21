@@ -25,6 +25,20 @@ ALLOWED_ROOT_KEYS = frozenset({"devices", "scenarios"})
 ENTITY_ID_RE = re.compile(r"^[a-z][a-z0-9_]+\.[a-z0-9_]+$", re.IGNORECASE)
 SCENARIO_ID_RE = re.compile(r"^[a-z][a-z0-9_]+$", re.IGNORECASE)
 
+ALLOWED_OPENING_KINDS = frozenset({"door", "window", "port", "cover", "awning"})
+ALLOWED_SENSOR_KINDS = frozenset({"contact", "infrared", "motion", "rain"})
+ENTITY_OPTIONAL_KEYS = frozenset(
+    {
+        "entity_id",
+        "description",
+        "allow_actions",
+        "security",
+        "service_defaults",
+        "opening_kind",
+        "sensor_kind",
+    }
+)
+
 
 class CatalogValidationError(ValueError):
     """Erros de estrutura do shakira_devices.yaml."""
@@ -84,6 +98,8 @@ class EntityConfig:
     entity_id: str
     description: str = ""
     allow_actions: bool = False
+    opening_kind: str = ""
+    sensor_kind: str = ""
     security: SecurityConfig | None = None
     service_defaults: dict[str, Any] = field(default_factory=dict)
 
@@ -203,11 +219,15 @@ class DevicesCatalog:
                     defaults = {
                         str(k): v for k, v in raw_defaults.items() if str(k).strip()
                     }
+                opening_kind = str(ent.get("opening_kind") or "").strip().lower()
+                sensor_kind = str(ent.get("sensor_kind") or "").strip().lower()
                 entities.append(
                     EntityConfig(
                         entity_id=eid,
                         description=str(ent.get("description") or "").strip(),
                         allow_actions=bool(ent.get("allow_actions", False)),
+                        opening_kind=opening_kind,
+                        sensor_kind=sensor_kind,
                         security=sec,
                         service_defaults=defaults,
                     )
@@ -301,6 +321,27 @@ class DevicesCatalog:
                         sd = ent.get("service_defaults")
                         if sd is not None and not isinstance(sd, dict):
                             errors.append(f"{ep}: 'service_defaults' deve ser um mapa.")
+                        ok = ent.get("opening_kind")
+                        if ok is not None:
+                            if not isinstance(ok, str) or not ok.strip():
+                                errors.append(f"{ep}: 'opening_kind' deve ser texto.")
+                            elif ok.strip().lower() not in ALLOWED_OPENING_KINDS:
+                                errors.append(
+                                    f"{ep}: opening_kind invalido '{ok}' "
+                                    f"(use: {', '.join(sorted(ALLOWED_OPENING_KINDS))})."
+                                )
+                        sk = ent.get("sensor_kind")
+                        if sk is not None:
+                            if not isinstance(sk, str) or not sk.strip():
+                                errors.append(f"{ep}: 'sensor_kind' deve ser texto.")
+                            elif sk.strip().lower() not in ALLOWED_SENSOR_KINDS:
+                                errors.append(
+                                    f"{ep}: sensor_kind invalido '{sk}' "
+                                    f"(use: {', '.join(sorted(ALLOWED_SENSOR_KINDS))})."
+                                )
+                        extra_ent = set(ent.keys()) - ENTITY_OPTIONAL_KEYS
+                        for k in sorted(extra_ent):
+                            errors.append(f"{ep}: chave desconhecida '{k}'.")
 
         if "scenarios" in data:
             if not isinstance(data["scenarios"], list):
@@ -362,6 +403,19 @@ class DevicesCatalog:
     def get_entity(self, entity_id: str) -> EntityConfig | None:
         return self.entity_map().get(entity_id)
 
+    def entities_by_opening_kind(self, kind: str) -> list[tuple[str, str]]:
+        """Lista (entity_id, descricao) com opening_kind igual ao pedido."""
+        kind_norm = (kind or "").strip().lower()
+        if not kind_norm:
+            return []
+        found: list[tuple[str, str]] = []
+        for device in self.devices:
+            for ent in device.entities:
+                if ent.opening_kind == kind_norm:
+                    label = (ent.description or "").strip() or ent.entity_id
+                    found.append((ent.entity_id, label))
+        return sorted(found, key=lambda row: row[1].casefold())
+
     def apply_service_defaults(self, entity_id: str, service_data: dict[str, Any]) -> dict[str, Any]:
         ent = self.get_entity(entity_id)
         if not ent or not ent.service_defaults:
@@ -384,6 +438,13 @@ class DevicesCatalog:
                 lines.append(f"  - {ent.entity_id} [{flag}]")
                 if ent.description:
                     lines.append(f"    {ent.description}")
+                meta: list[str] = []
+                if ent.opening_kind:
+                    meta.append(f"tipo_abertura={ent.opening_kind}")
+                if ent.sensor_kind:
+                    meta.append(f"tipo_sensor={ent.sensor_kind}")
+                if meta:
+                    lines.append(f"    ({', '.join(meta)})")
                 if ent.security and ent.security.require_password_for_services:
                     svcs = ", ".join(ent.security.require_password_for_services)
                     lines.append(

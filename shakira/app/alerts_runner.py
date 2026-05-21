@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from app.alarm_dispatch_runner import AlarmDispatchRunner
+from app.rain_dispatch_runner import RainDispatchRunner
 
 import httpx
 
@@ -75,10 +76,16 @@ class AlertsRunner:
     _poll_stop: asyncio.Event = field(default_factory=asyncio.Event)
     _ws_listener: HaWebSocketListener | None = None
     _alarm_dispatch: AlarmDispatchRunner | None = None
+    _rain_dispatch: RainDispatchRunner | None = None
 
     def attach_alarm_dispatch(self, runner: AlarmDispatchRunner | None) -> None:
         """Partilha o WebSocket live com a rotina de disparo do alarme."""
         self._alarm_dispatch = runner
+        self._sync_websocket_entities()
+
+    def attach_rain_dispatch(self, runner: RainDispatchRunner | None) -> None:
+        """Partilha o WebSocket live com a rotina de chuva."""
+        self._rain_dispatch = runner
         self._sync_websocket_entities()
 
     def reload(self, catalog: AlertsCatalog) -> None:
@@ -109,14 +116,26 @@ class AlertsRunner:
             and self._alarm_dispatch.config.enabled
         )
 
+    def _rain_dispatch_active(self) -> bool:
+        return bool(
+            self._rain_dispatch
+            and self._rain_dispatch.config.enabled
+        )
+
     def _live_entity_ids(self) -> set[str]:
         ids = {a.entity_id for a in self.catalog.enabled_live_alerts()}
         if self._alarm_dispatch_active():
             ids |= self._alarm_dispatch.partition_entity_ids  # type: ignore[union-attr]
+        if self._rain_dispatch_active():
+            ids |= self._rain_dispatch.watched_entity_ids  # type: ignore[union-attr]
         return ids
 
     def _needs_live_websocket(self) -> bool:
-        return bool(self.catalog.enabled_live_alerts()) or self._alarm_dispatch_active()
+        return (
+            bool(self.catalog.enabled_live_alerts())
+            or self._alarm_dispatch_active()
+            or self._rain_dispatch_active()
+        )
 
     def _sync_websocket_entities(self) -> None:
         entity_ids = self._live_entity_ids()
@@ -458,6 +477,14 @@ class AlertsRunner:
 
         if self._alarm_dispatch_active() and entity_id in self._alarm_dispatch.partition_entity_ids:  # type: ignore[union-attr]
             await self._alarm_dispatch.handle_live_state_change(  # type: ignore[union-attr]
+                entity_id,
+                old_state,
+                new_state,
+                _event_data,
+            )
+
+        if self._rain_dispatch_active() and entity_id in self._rain_dispatch.watched_entity_ids:  # type: ignore[union-attr]
+            await self._rain_dispatch.handle_live_state_change(  # type: ignore[union-attr]
                 entity_id,
                 old_state,
                 new_state,

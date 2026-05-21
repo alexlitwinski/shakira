@@ -22,6 +22,7 @@ from app.devices_catalog import CatalogValidationError, DevicesCatalog
 from app.alerts_catalog import AlertsCatalog, AlertsCatalogValidationError
 from app.alerts_runner import AlertsRunner
 from app.alarm_dispatch_runner import AlarmDispatchRunner
+from app.rain_dispatch_runner import RainDispatchRunner
 from app.scheduled_responses import count_all_pending_globally
 from app.scheduled_responses_runner import ScheduledResponsesRunner, set_scheduled_runner
 from app.google_calendar_runner import GoogleCalendarRunner, set_google_calendar_runner
@@ -117,9 +118,18 @@ async def lifespan(app: FastAPI):
         http=client,
     )
     app.state.alarm_runner = alarm_runner
+    rain_runner = RainDispatchRunner(
+        settings=settings,
+        ha=app.state.ha,
+        evo=app.state.evo,
+        config=alerts.rain_dispatch,
+        devices=catalog,
+    )
+    app.state.rain_runner = rain_runner
     alerts_runner.attach_alarm_dispatch(alarm_runner)
+    alerts_runner.attach_rain_dispatch(rain_runner)
 
-    if alerts.enabled_alerts() or alerts.alarm_dispatch.enabled:
+    if alerts.enabled_alerts() or alerts.alarm_dispatch.enabled or alerts.rain_dispatch.enabled:
         alerts_runner.start()
     else:
         log.info(
@@ -133,6 +143,14 @@ async def lifespan(app: FastAPI):
     else:
         log.info(
             "Rotina de disparo do alarme desativada (alarm_dispatch.enabled=false em %s)",
+            settings.alerts_config_path,
+        )
+
+    if alerts.rain_dispatch.enabled:
+        rain_runner.start()
+    else:
+        log.info(
+            "Rotina de chuva desativada (rain_dispatch.enabled=false em %s)",
             settings.alerts_config_path,
         )
 
@@ -392,17 +410,21 @@ async def put_alerts_yaml(request: Request, body: AlertsYamlBody) -> dict[str, A
     request.app.state.alerts = catalog
     runner: AlertsRunner = request.app.state.alerts_runner
     alarm_runner: AlarmDispatchRunner = request.app.state.alarm_runner
+    rain_runner: RainDispatchRunner = request.app.state.rain_runner
     alarm_runner.reload(
         catalog.alarm_dispatch,
         cameras=request.app.state.cameras,
         devices=request.app.state.catalog,
     )
+    rain_runner.reload(catalog.rain_dispatch, devices=request.app.state.catalog)
     runner.reload(catalog)
     runner.attach_alarm_dispatch(alarm_runner)
+    runner.attach_rain_dispatch(rain_runner)
     await runner.ensure_running()
     await alarm_runner.ensure_running()
+    await rain_runner.ensure_running()
     result["message"] = (
-        "Arquivo salvo. Alertas periodicos, live e rotina de alarme recarregados."
+        "Arquivo salvo. Alertas periodicos, live, rotina de alarme e rotina de chuva recarregados."
     )
     return result
 
@@ -412,9 +434,12 @@ async def get_alerts_status(request: Request) -> dict[str, Any]:
     """Estado do executor de alertas (painel / diagnostico)."""
     runner: AlertsRunner = request.app.state.alerts_runner
     alarm_runner: AlarmDispatchRunner | None = getattr(request.app.state, "alarm_runner", None)
+    rain_runner: RainDispatchRunner | None = getattr(request.app.state, "rain_runner", None)
     payload = runner.status_snapshot()
     if alarm_runner is not None:
         payload["alarm_dispatch"] = alarm_runner.status_snapshot()
+    if rain_runner is not None:
+        payload["rain_dispatch"] = rain_runner.status_snapshot()
     return payload
 
 
