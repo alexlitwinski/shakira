@@ -3,8 +3,10 @@
 from app.devices_catalog import DevicesCatalog
 from app.house_status_prompts import build_house_status_prompt, vision_analysis_to_facts
 from app.house_status_routine import (
+    build_problem_devices_block,
     build_sensor_context_block,
     collect_house_status_entity_ids,
+    describe_entity_problem,
     humanize_zone_or_sensor_state,
 )
 from app.camera_vision import CameraMosaicAnalysis, CameraPresence
@@ -89,3 +91,42 @@ def test_vision_analysis_to_facts():
     prompt = build_house_status_prompt(vision_analysis=analysis, sensor_context="Chuva: seca.")
     assert "Sala" in prompt
     assert "Chuva: seca." in prompt
+
+
+def test_describe_entity_problem():
+    catalog = _catalog()
+    ping_issue = describe_entity_problem(
+        "binary_sensor.ping_roteador",
+        {"state": "off", "attributes": {}},
+        catalog=catalog,
+    )
+    assert ping_issue is not None
+    assert "offline" in ping_issue
+    assert (
+        describe_entity_problem(
+            "sensor.temperatura_boiler",
+            {"state": "47.3", "attributes": {}},
+            catalog=catalog,
+        )
+        is None
+    )
+    boiler_issue = describe_entity_problem(
+        "sensor.temperatura_boiler",
+        {"state": "unavailable", "attributes": {}},
+        catalog=catalog,
+    )
+    assert boiler_issue is not None
+    assert "indisponível" in boiler_issue
+
+
+def test_build_problem_devices_block():
+    catalog = _catalog()
+    states = {
+        "binary_sensor.ping_roteador": {"state": "off", "attributes": {}},
+        "sensor.temperatura_boiler": {"state": "47.3", "attributes": {}},
+    }
+    block = build_problem_devices_block(catalog=catalog, states_by_id=states)
+    assert block == ""
+    states["sensor.temperatura_boiler"] = {"state": "unavailable", "attributes": {}}
+    block = build_problem_devices_block(catalog=catalog, states_by_id=states)
+    assert "indisponível" in block

@@ -42,6 +42,11 @@ _PARTITION_STATE_PT = {
     "arming": "armando…",
 }
 
+_EXTRA_PROBLEM_ENTITY_IDS = (
+    "binary_sensor.status_cameras_paradas",
+    "binary_sensor.amt_8000_falha_na_conexao",
+)
+
 
 def _is_alarm_entity(ent: EntityConfig) -> bool:
     eid = ent.entity_id.strip()
@@ -83,6 +88,73 @@ def collect_house_status_entity_ids(
         add(rain_config.volume_entity)
 
     return ordered
+
+
+def collect_problem_entity_ids(catalog: DevicesCatalog) -> list[str]:
+    """Entidades do catalogo (+ extras conhecidos) para detectar indisponibilidade."""
+    seen: set[str] = set()
+    ordered: list[str] = []
+
+    def add(eid: str) -> None:
+        eid = eid.strip()
+        if eid and eid not in seen:
+            seen.add(eid)
+            ordered.append(eid)
+
+    for eid in catalog.context_entity_ids():
+        add(eid)
+    for eid in _EXTRA_PROBLEM_ENTITY_IDS:
+        add(eid)
+    return ordered
+
+
+def describe_entity_problem(
+    entity_id: str,
+    state: dict[str, Any] | None,
+    *,
+    catalog: DevicesCatalog,
+) -> str | None:
+    """Retorna descricao curta do problema ou None se a entidade estiver OK."""
+    label = entity_display_name(entity_id, catalog, state)
+
+    if state is None:
+        return f"{label}: sem resposta do Home Assistant"
+
+    raw = str(state.get("state", "")).strip()
+    low = raw.lower()
+    domain = entity_id.split(".", 1)[0] if "." in entity_id else ""
+
+    if entity_id == "binary_sensor.status_cameras_paradas" and low == "on":
+        return f"{label}: câmeras com problema"
+
+    if entity_id == "binary_sensor.amt_8000_falha_na_conexao" and low == "on":
+        return f"{label}: falha na conexão"
+
+    if domain == "binary_sensor" and "ping" in entity_id.lower() and low == "off":
+        return f"{label}: offline"
+
+    if low == "unavailable":
+        return f"{label}: indisponível"
+    if low in ("unknown", ""):
+        return f"{label}: estado desconhecido"
+
+    return None
+
+
+def build_problem_devices_block(
+    *,
+    catalog: DevicesCatalog,
+    states_by_id: dict[str, dict[str, Any]],
+) -> str:
+    """Lista compacta de dispositivos com problema para o prompt Gemini."""
+    problems: list[str] = []
+    for eid in collect_problem_entity_ids(catalog):
+        issue = describe_entity_problem(eid, states_by_id.get(eid), catalog=catalog)
+        if issue:
+            problems.append(f"- {issue}")
+    if not problems:
+        return ""
+    return "Dispositivos com problema:\n" + "\n".join(problems)
 
 
 def humanize_zone_or_sensor_state(entity_id: str, raw_state: str) -> str:
@@ -158,6 +230,7 @@ def generate_house_status_summary(
     api_key: str,
     vision_analysis: CameraMosaicAnalysis | None,
     sensor_context: str,
+    problems_context: str = "",
     model: str | None = None,
 ) -> str:
     key = (api_key or "").strip()
@@ -167,6 +240,7 @@ def generate_house_status_summary(
     prompt = build_house_status_prompt(
         vision_analysis=vision_analysis,
         sensor_context=sensor_context,
+        problems_context=problems_context,
     )
     try:
         genai.configure(api_key=key)
@@ -192,6 +266,7 @@ def generate_house_status_summary(
 def _fallback_summary(
     vision_analysis: CameraMosaicAnalysis | None,
     sensor_context: str,
+    problems_context: str = "",
 ) -> str:
     from app.camera_vision import format_analysis_message
 
@@ -204,6 +279,9 @@ def _fallback_summary(
     if sensor_context.strip():
         parts.append("")
         parts.append(sensor_context.strip())
+    if problems_context.strip():
+        parts.append("")
+        parts.append(problems_context.strip())
     return "\n".join(parts).strip()[:4000]
 
 
@@ -220,10 +298,12 @@ async def handle_house_status(
     instance: str,
     alerts_catalog: AlertsCatalog | None = None,
     messenger: StepMessenger | None = None,
+    catalog_states_map: dict[str, dict[str, Any]] | None = None,
 ) -> str:
     """Captura todas as cameras, analisa e envia resumo integrado ao usuario."""
     intro = str(decision.get("response") or "").strip()
     rain_config = alerts_catalog.rain_dispatch if alerts_catalog else None
+    states_map = catalog_states_map or {}
 
     async def say(text: str, *, final: bool = False) -> None:
         msg = truncate_whatsapp(text)
@@ -289,6 +369,21 @@ async def handle_house_status(
     entity_ids = collect_house_status_entity_ids(catalog, rain_config)
     states_by_id: dict[str, dict[str, Any]] = {}
     for eid in entity_ids:
+        cached = states_map.get(eid)
+        if cached:
+            states_by_id[eid] = cached
+            continue
+        state = await ha.get_state(eid)
+        if state:
+            states_by_id[eid] = state
+
+    for eid in collect_problem_entity_ids(catalog):
+        if eid in states_by_id:
+            continue
+        cached = states_map.get(eid)
+        if cached:
+            states_by_id[eid] = cached
+            continue
         state = await ha.get_state(eid)
         if state:
             states_by_id[eid] = state
@@ -298,6 +393,10 @@ async def handle_house_status(
         states_by_id=states_by_id,
         rain_config=rain_config,
     )
+    problems_context = build_problem_devices_block(
+        catalog=catalog,
+        states_by_id=states_by_id,
+    )
 
     summary = ""
     if api_key:
@@ -306,11 +405,12 @@ async def handle_house_status(
             api_key=api_key,
             vision_analysis=vision_analysis,
             sensor_context=sensor_context,
+            problems_context=problems_context,
             model=model,
         )
 
     if not summary:
-        summary = _fallback_summary(vision_analysis, sensor_context)
+        summary = _fallback_summary(vision_analysis, sensor_context, problems_context)
 
     if not summary:
         summary = "Capturei as câmeras, mas não consegui gerar o resumo da casa agora."

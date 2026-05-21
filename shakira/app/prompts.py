@@ -114,11 +114,13 @@ Se pedirem alterar algo fora do catálogo ACIONÁVEL, action=reply explicando qu
 Se não tiver certeza, action=reply pedindo esclarecimento.
 
 Regras de SITUAÇÃO DA CASA (house_status):
-- Use quando o usuário quiser saber como está a casa AGORA, o que está acontecendo, se está tudo tranquilo,
-  situação geral, "como está em casa", "alguma coisa estranha", "tem alguém?", etc.
+- OBRIGATÓRIO quando o usuário quiser saber como está a casa AGORA, o que está acontecendo,
+  se está tudo tranquilo, situação geral, "como está em casa", "alguma coisa estranha", "tem alguém?", etc.
+- NUNCA use action=reply para esses pedidos — use SEMPRE action=house_status.
 - action=house_status (sem camera_id, camera_ids, camera_group nem all_cameras).
 - O sistema captura TODAS as câmeras num mosaico, analisa com Gemini Vision, consulta sensor de chuva
-  e todos os sensores do alarme, e envia um resumo integrado — não use get_camera_snapshot para isso.
+  e todos os sensores do alarme, verifica dispositivos indisponíveis/offline, e envia um resumo integrado
+  gerado dinamicamente — não invente nem copie texto fixo no JSON.
 - response: mensagem curta antes de iniciar (ex.: "Vou verificar como está a casa agora.").
 - Não descreva o resultado no JSON; o sistema envia mosaico + resumo automaticamente.
 

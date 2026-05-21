@@ -12,14 +12,16 @@ Responda SOMENTE com texto plano em português do Brasil — sem JSON, sem markd
 Tom natural e direto, como um assistente de casa falando com o morador.
 Use linguagem simples; nunca cite nomes técnicos do Home Assistant.
 
-Estruture em 2–4 parágrafos curtos:
+Estruture em 2–5 parágrafos curtos:
 1. Resumo geral (tranquilo, atenção necessária, etc.)
 2. O que as câmeras mostram (pessoas, movimento, áreas vazias)
 3. Chuva e sensores do alarme (portas/janelas abertas, movimento, partições armadas/disparadas)
-4. Se houver algo que mereça ação, diga o que fazer — senão, tranquilize.
+4. Se houver dispositivos com problema (indisponíveis, offline, falha de conexão), liste-os
+   brevemente num parágrafo separado — omita esta secção se não houver nenhum problema.
+5. Se houver algo que mereça ação, diga o que fazer — senão, tranquilize.
 
 Não repita literalmente listas longas de sensores; sintetize o que importa.
-Máximo 12–15 linhas no total."""
+Máximo 12–18 linhas no total."""
 
 
 def vision_analysis_to_facts(analysis: CameraMosaicAnalysis | None) -> dict[str, Any]:
@@ -46,6 +48,7 @@ def build_house_status_prompt(
     *,
     vision_analysis: CameraMosaicAnalysis | None,
     sensor_context: str,
+    problems_context: str = "",
 ) -> str:
     vision_facts = json.dumps(
         vision_analysis_to_facts(vision_analysis),
@@ -53,6 +56,7 @@ def build_house_status_prompt(
         indent=2,
     )
     sensors_block = sensor_context.strip() or "(Sensores indisponíveis no momento.)"
+    problems_block = problems_context.strip() or "(Nenhum dispositivo com problema detectado.)"
     return f"""O morador pediu para saber como está a casa agora.
 
 Análise das câmeras (Gemini Vision):
@@ -61,5 +65,10 @@ Análise das câmeras (Gemini Vision):
 Estados dos sensores (chuva e alarme):
 {sensors_block}
 
+Dispositivos com problema (indisponíveis, offline, etc.):
+{problems_block}
+
 Redija uma única mensagem para WhatsApp descrevendo a situação geral da casa,
-integrando o que aparece nas câmeras com os sensores de chuva e do alarme."""
+integrando o que aparece nas câmeras com os sensores de chuva e do alarme.
+Se houver dispositivos com problema, mencione-os num parágrafo separado; se a lista
+indicar que não há problemas, omita essa parte."""

@@ -87,6 +87,7 @@ from app.google_calendar_store import get_google_calendar_store
 from app.google_calendar_runner import ensure_google_calendar_runner_running
 from app.google_calendar_routine import try_handle_google_calendar_link_inbound
 from app.google_calendar_overrides import try_google_calendar_decision_override
+from app.house_status_overrides import try_house_status_decision_override
 from app.birthday_prompts import BIRTHDAY_ACTIONS_INSTRUCTION
 from app.interfone_prompts import INTERFONE_ACTIONS_INSTRUCTION
 from app.interfone_actions import handle_interfone_list
@@ -3489,6 +3490,10 @@ async def _process_inbound_message(
             phone=phone_norm,
             user_text=user_text or "",
         )
+        decision = try_house_status_decision_override(
+            decision,
+            user_text=user_text or "",
+        )
 
         if not _decision_is_complete(decision):
             reply_preview = str(decision.get("response") or "").strip()
@@ -3630,6 +3635,7 @@ async def _process_inbound_message(
                 instance=send_instance,
                 alerts_catalog=alerts_cfg,
                 messenger=messenger,
+                catalog_states_map=states_map,
             )
             await _finish_whatsapp_exchange(
                 phone=phone_norm,
