@@ -46,7 +46,7 @@ from app.gemini_cache import ensure_catalog_cache
 from app.handlers import handle_evolution_payload
 from app.homeassistant import HomeAssistantClient
 from app.status_report import build_status_report
-from app.user_data_migration import LEGACY_USER_DATA_ROOT, maybe_migrate_legacy_user_data
+from app.user_data_migration import LEGACY_USER_DATA_ROOT, merge_legacy_user_data
 from app.user_memory import configure_user_data_root, resolve_user_data_root
 from app.whatsapp_outbound import WhatsAppSendError, send_whatsapp_text
 
@@ -65,12 +65,12 @@ async def lifespan(app: FastAPI):
     user_data_root = configure_user_data_root(
         resolve_user_data_root(settings.user_data_path)
     )
-    user_data_migrated = maybe_migrate_legacy_user_data(
+    user_data_migrated_phones = merge_legacy_user_data(
         LEGACY_USER_DATA_ROOT, user_data_root
     )
     app.state.settings = settings
     app.state.user_data_root = str(user_data_root)
-    app.state.user_data_migrated = user_data_migrated
+    app.state.user_data_migrated_phones = user_data_migrated_phones
     app.state.started_at = time.time()
 
     if not settings.supervisor_token:
@@ -243,7 +243,9 @@ async def _status_payload(request: Request) -> dict[str, Any]:
         gemini_cache_name=getattr(request.app.state, "gemini_cache_name", None),
         started_at=started,
         scheduled_responses_status=scheduled_status,
-        user_data_migrated=getattr(request.app.state, "user_data_migrated", None),
+        user_data_migrated_phones=getattr(
+            request.app.state, "user_data_migrated_phones", None
+        ),
     )
 
 

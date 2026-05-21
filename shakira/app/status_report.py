@@ -19,12 +19,12 @@ from app.whatsapp_phones import ENTITY_PERMITTED, fetch_permitted_phones_raw, pa
 from app.homeassistant import HomeAssistantClient
 from app.photoprism import PhotoprismClient
 from app.message_timing import recent_averages
-from app.user_data_migration import LEGACY_USER_DATA_ROOT
+from app.user_data_migration import LEGACY_USER_DATA_ROOT, _list_phone_dirs
 from app.user_memory import USER_DATA_ROOT
 
 log = logging.getLogger(__name__)
 
-VERSION = "1.7.29"
+VERSION = "1.7.30"
 
 
 def _mask_secret(value: str, visible: int = 4) -> str:
@@ -277,39 +277,45 @@ def _check_webhook() -> dict[str, Any]:
 def _check_user_data(
     settings: AppSettings,
     *,
-    user_data_migrated: bool | None = None,
+    user_data_migrated_phones: list[str] | None = None,
 ) -> dict[str, Any]:
     root = USER_DATA_ROOT
     exists = root.is_dir()
-    phone_dirs = 0
-    if exists:
-        try:
-            phone_dirs = sum(
-                1
-                for c in root.iterdir()
-                if c.is_dir() and not c.name.startswith(".")
-            )
-        except OSError:
-            pass
+    dest_phones = [p.name for p in _list_phone_dirs(root)] if exists else []
+    legacy_phones = [p.name for p in _list_phone_dirs(LEGACY_USER_DATA_ROOT)]
+    pending_legacy = [p for p in legacy_phones if p not in dest_phones]
     ha_path = "/config/shakira_users"
     if str(root).startswith("/homeassistant"):
         ha_path = "/config" + str(root)[len("/homeassistant") :]
+
+    if not exists:
+        status, summary = "warning", "Pasta de dados inacessivel"
+    elif pending_legacy:
+        status = "warning"
+        summary = (
+            f"{len(dest_phones)} utilizador(es) activos; "
+            f"legado em /data ainda tem {len(pending_legacy)} telefone(s) por migrar"
+        )
+    elif dest_phones:
+        status, summary = "ok", f"Pasta activa ({len(dest_phones)} utilizador(es))"
+    else:
+        status, summary = "ok", "Pasta activa (vazia)"
+
     return {
         "id": "user_data",
         "name": "Dados por utilizador",
-        "status": "ok" if exists else "warning",
-        "summary": (
-            f"Pasta activa ({phone_dirs} utilizador(es))"
-            if exists and phone_dirs
-            else ("Pasta activa (vazia)" if exists else "Pasta de dados inacessivel")
-        ),
+        "status": status,
+        "summary": summary,
         "details": {
             "configured_path": settings.user_data_path,
             "resolved_path": str(root),
             "ha_config_path_hint": ha_path,
             "legacy_path": str(LEGACY_USER_DATA_ROOT),
-            "legacy_migrated_this_start": bool(user_data_migrated),
-            "user_dirs": phone_dirs,
+            "legacy_phones": legacy_phones,
+            "dest_phones": dest_phones,
+            "pending_legacy_phones": pending_legacy,
+            "migrated_phones_this_start": list(user_data_migrated_phones or []),
+            "user_dirs": len(dest_phones),
         },
     }
 
@@ -392,7 +398,7 @@ async def build_status_report(
     gemini_cache_name: str | None,
     started_at: float | None = None,
     scheduled_responses_status: dict[str, Any] | None = None,
-    user_data_migrated: bool | None = None,
+    user_data_migrated_phones: list[str] | None = None,
 ) -> dict[str, Any]:
     if cameras is None:
         cameras = CamerasCatalog.load(settings.frigate_cameras_config_path)
@@ -423,7 +429,9 @@ async def build_status_report(
             services.append(item)
 
     services.append(_check_catalog(catalog, settings))
-    services.append(_check_user_data(settings, user_data_migrated=user_data_migrated))
+    services.append(
+        _check_user_data(settings, user_data_migrated_phones=user_data_migrated_phones)
+    )
     services.append(_check_webhook())
     services.append(_check_scheduled_responses(scheduled_responses_status))
 
