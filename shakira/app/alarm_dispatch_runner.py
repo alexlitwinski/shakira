@@ -76,6 +76,7 @@ class AlarmDispatchRunner:
     _poll_task: asyncio.Task[None] | None = None
     _poll_stop: asyncio.Event = field(default_factory=asyncio.Event)
     _last_known_states: dict[str, str] = field(default_factory=dict)
+    _pending_partitions: set[str] = field(default_factory=set)
     _last_notified_at: float = 0.0
     _had_triggered: bool = False
 
@@ -245,6 +246,7 @@ class AlarmDispatchRunner:
         self._on_partition_triggered(entity_id)
 
     def _on_partition_triggered(self, entity_id: str) -> None:
+        self._pending_partitions.add(entity_id)
         self._schedule_debounced_dispatch()
 
     def _schedule_debounced_dispatch(self) -> None:
@@ -260,10 +262,26 @@ class AlarmDispatchRunner:
 
         self._debounce_task = asyncio.create_task(_run(), name="shakira-alarm-dispatch")
 
+    async def _collect_triggered_partitions(self) -> list[tuple[str, str]]:
+        """
+        Particoes a notificar: capturadas no evento (pending) + ainda em triggered no HA.
+        Simulacoes no painel do desenvolvedor revertem o estado antes do debounce — pending resolve isso.
+        """
+        current = await self._fetch_triggered_partitions()
+        current_ids = {eid for eid, _ in current}
+        all_ids = self._pending_partitions | current_ids
+        if not all_ids:
+            return []
+        return [(eid, self._sector_label(eid)) for eid in sorted(all_ids)]
+
     async def _dispatch_notification(self) -> None:
-        triggered = await self._fetch_triggered_partitions()
+        triggered = await self._collect_triggered_partitions()
         if not triggered:
-            log.info("Alarme: debounce concluido mas nenhuma particao em triggered")
+            log.info(
+                "Alarme: debounce concluido sem particoes (pending=%s)",
+                sorted(self._pending_partitions),
+            )
+            self._pending_partitions.clear()
             return
 
         now = time.monotonic()
@@ -274,6 +292,16 @@ class AlarmDispatchRunner:
                 [eid for eid, _ in triggered],
             )
             return
+
+        self._pending_partitions.clear()
+        still_active = await self._fetch_triggered_partitions()
+        if still_active:
+            log.info("Alarme: disparo com particoes ainda em triggered no HA")
+        else:
+            log.info(
+                "Alarme: disparo a partir de evento (estado ja revertido no HA; particoes=%s)",
+                [eid for eid, _ in triggered],
+            )
 
         phones = await self._resolve_phones()
         if not phones:

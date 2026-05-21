@@ -81,6 +81,29 @@ def test_alerts_runner_includes_partitions_when_alarm_dispatch_attached():
     assert "alarm_control_panel.amt_8000_partition_1" in runner._live_entity_ids()
 
 
+def test_collect_triggered_uses_pending_when_ha_reverted():
+    from unittest.mock import AsyncMock, Mock
+
+    from app.alerts_catalog import AlarmDispatchConfig
+    from app.alarm_dispatch_runner import AlarmDispatchRunner
+
+    runner = AlarmDispatchRunner(
+        settings=Mock(),
+        ha=Mock(),
+        evo=Mock(),
+        cameras=CamerasCatalog(),
+        config=AlarmDispatchConfig(enabled=True),
+    )
+    runner._pending_partitions.add("alarm_control_panel.amt_8000_partition_1")
+    runner._fetch_triggered_partitions = AsyncMock(return_value=[])  # type: ignore[method-assign]
+
+    import asyncio
+
+    collected = asyncio.run(runner._collect_triggered_partitions())
+    assert len(collected) == 1
+    assert collected[0][0] == "alarm_control_panel.amt_8000_partition_1"
+
+
 def test_validate_alarm_dispatch_structure():
     data = {
         "alarm_dispatch": {"enabled": "yes"},
