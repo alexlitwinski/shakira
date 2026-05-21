@@ -210,6 +210,11 @@ async def enrich_and_notify_instagram_profile(
     entry = await fetch_and_update_entry(http, settings, store, entry_id)
     if not entry:
         return
+    if entry.fetch_status == "ok":
+        from app.user_memory import get_store
+        from app.user_memory_cache import invalidate_user_memory_cache
+
+        invalidate_user_memory_cache(get_store(phone))
     await notify_profile_fetched(
         entry=entry,
         phone=phone,

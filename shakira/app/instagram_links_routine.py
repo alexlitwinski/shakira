@@ -17,6 +17,9 @@ from app.instagram_links_parser import (
 )
 from app.instagram_links_store import get_instagram_store
 from app.instagram_profile_fetcher import enrich_and_notify_instagram_profile
+from app.password_vault_store import get_vault_store
+from app.pending_flow_utils import PENDING_FLOW_TTL_SEC, should_abandon_pending_flow
+from app.portao_social_routine import clear_pending as clear_portao_social_pending
 from app.user_memory import get_store
 from app.user_memory_cache import invalidate_user_memory_cache
 from app.whatsapp_steps import truncate_whatsapp
@@ -29,9 +32,7 @@ import httpx
 
 log = logging.getLogger(__name__)
 
-PENDING_TIMEOUT_SEC = float(
-    __import__("os").environ.get("SHAKIRA_INSTAGRAM_PENDING_TIMEOUT_SEC", "1800")
-)
+PENDING_TIMEOUT_SEC = PENDING_FLOW_TTL_SEC
 
 _YES_RE = re.compile(r"^\s*(sim|s|quero|com\s+descri[cç][aã]o|1)\s*\.?\s*$", re.I)
 _NO_RE = re.compile(r"^\s*(n[aã]o|nao|n|sem\s+descri[cç][aã]o|pular|2)\s*\.?\s*$", re.I)
@@ -136,6 +137,10 @@ def _clear_pending(phone: str) -> None:
     _pending.pop(phone, None)
 
 
+def clear_instagram_link_pending(phone: str) -> None:
+    _clear_pending(phone)
+
+
 async def _finalize_save(
     phone: str,
     entry_id: str,
@@ -176,6 +181,9 @@ async def _begin_instagram_link_flow(
     evo_key: str,
     instance: str,
 ) -> bool:
+    clear_portao_social_pending(phone)
+    get_vault_store(phone).clear_pending()
+
     try:
         parsed = parse_instagram_url(url)
     except InstagramParseError as e:
@@ -272,6 +280,11 @@ async def try_handle_instagram_link_pending(
 ) -> bool:
     pending = _pending.get(phone)
     if not pending:
+        return False
+
+    if should_abandon_pending_flow(pending.created_at, text, pending_kind="text"):
+        _clear_pending(phone)
+        log.info("Instagram pending abandonado phone=%s stage=%s", phone, pending.stage)
         return False
 
     if time.monotonic() - pending.created_at > PENDING_TIMEOUT_SEC:

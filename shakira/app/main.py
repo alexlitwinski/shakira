@@ -22,7 +22,10 @@ from app.devices_catalog import CatalogValidationError, DevicesCatalog
 from app.alerts_catalog import AlertsCatalog, AlertsCatalogValidationError
 from app.alerts_runner import AlertsRunner
 from app.scheduled_responses import count_all_pending_globally
-from app.scheduled_responses_runner import ScheduledResponsesRunner, set_scheduled_runner
+from app.google_calendar_runner import GoogleCalendarRunner, set_google_calendar_runner
+from app.google_calendar_store import count_configured_calendars
+from app.birthday_runner import BirthdayRunner, set_birthday_runner
+from app.birthday_store import count_stores_with_birthdays
 from app.alerts_yaml_io import (
     read_yaml_file as read_alerts_yaml_file,
     validate_yaml_content as validate_alerts_yaml_content,
@@ -126,8 +129,33 @@ async def lifespan(app: FastAPI):
     else:
         log.info("Nenhum agendamento pending — executor de respostas agendadas em espera")
 
+    calendar_runner = GoogleCalendarRunner(
+        settings=settings,
+        evo=app.state.evo,
+        http=client,
+    )
+    app.state.calendar_runner = calendar_runner
+    set_google_calendar_runner(calendar_runner)
+    if count_configured_calendars():
+        calendar_runner.start()
+    else:
+        log.info("Nenhuma agenda Google configurada — executor de calendario em espera")
+
+    birthday_runner = BirthdayRunner(
+        settings=settings,
+        evo=app.state.evo,
+    )
+    app.state.birthday_runner = birthday_runner
+    set_birthday_runner(birthday_runner)
+    if count_stores_with_birthdays():
+        birthday_runner.start()
+    else:
+        log.info("Nenhum aniversario guardado — executor de aniversarios em espera")
+
     yield
 
+    await birthday_runner.stop()
+    await calendar_runner.stop()
     await scheduled_runner.stop()
     await alerts_runner.stop()
     await client.aclose()

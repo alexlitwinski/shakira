@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import uuid
+import time
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -38,6 +39,11 @@ class VaultPending:
     label: str = ""
     secret_prefill: str = ""
     candidates: list[str] = field(default_factory=list)
+    created_at: float = 0.0
+
+    def __post_init__(self) -> None:
+        if not self.created_at:
+            self.created_at = time.monotonic()
 
 
 class PasswordVaultStore:
@@ -167,6 +173,7 @@ class PasswordVaultStore:
             label=str(row.get("label") or ""),
             secret_prefill=str(row.get("secret_prefill") or ""),
             candidates=[str(x) for x in row.get("candidates") or [] if str(x).strip()],
+            created_at=float(row.get("created_at") or 0.0) or time.monotonic(),
         )
 
     def save_pending(self, pending: VaultPending) -> None:

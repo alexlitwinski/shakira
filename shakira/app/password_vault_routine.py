@@ -11,9 +11,21 @@ from typing import Any
 from app.conversation_history import record_exchange
 from app.evolution import EvolutionClient, parse_message_key, remote_jid_for_number
 from app.password_vault_store import PasswordVaultStore, VaultPending, get_vault_store
-from app.password_security import try_delete_inbound_password_message
 from app.user_friendly import polish_user_message
+from app.user_memory import MemoryEntry
+from app.pending_flow_utils import should_abandon_pending_flow
 from app.vault_crypto import vault_configured, vault_master_key
+from app.vault_credential_detection import (
+    is_ha_lock_context,
+    is_vault_save_intent,
+    parse_credential_save,
+)
+from app.vault_memory_fallback import (
+    extract_secret_from_memory,
+    find_memory_password_matches,
+    list_memory_password_hints,
+    memory_password_display_label,
+)
 from app.whatsapp_steps import StepMessenger, TypingSession, pulse_whatsapp_typing, truncate_whatsapp
 
 log = logging.getLogger(__name__)
@@ -24,16 +36,23 @@ _CANCEL_RE = re.compile(r"^\s*(cancelar|cancela|nao|não|desistir)\s*[.!?]?\s*$"
 
 _VAULT_LIST_RE = re.compile(
     r"(?:"
-    r"\b(?:quais|listar?|mostrar?|mostre|ver)\b.*\b(?:senhas?|credenciais?)\b.*(?:"
+    r"\b(?:quais|listar?|mostrar?|mostre|mostra|ver)\b.*\b(?:senhas?|credenciais?)\b.*(?:"
     r"gravad\w*|guardad\w*|cofre"
     r")"
     r"|"
     r"\b(?:senhas?|credenciais?)\b.*(?:gravad\w*|guardad\w*|cofre)"
     r"|"
+    r"\bmostre?\s+(?:as\s+)?senhas?\b"
+    r"|"
     r"\b(?:o\s+que\s+tenho|itens)\b.*\b(?:no\s+)?cofre\b"
     r"|"
     r"\bcofre\s+de\s+senhas?\b"
     r")",
+    re.I,
+)
+
+_VAULT_RETRIEVE_SIMPLE_RE = re.compile(
+    r"\b(?:qual|quais)\s+(?:é|e|s[aã]o)\s+(?:a\s+)?senha\b",
     re.I,
 )
 
@@ -50,11 +69,6 @@ _VAULT_RETRIEVE_RE = re.compile(
 
 _VAULT_SAVE_RE = re.compile(
     r"\b(?:guardar?|grava(?:r)?|salva(?:r)?|anotar?)\b.*\b(?:senha|credencial)\b",
-    re.I,
-)
-
-_HA_LOCK_PASSWORD_RE = re.compile(
-    r"\b(?:destranc|tranc|abre|fecha|porta|portão|portao|fechadura|lock)\b",
     re.I,
 )
 
@@ -101,12 +115,20 @@ def classify_vault_intent(user_text: str) -> tuple[str, str]:
     text = (user_text or "").strip()
     if not text or _CANCEL_RE.match(text):
         return "", ""
-    if _HA_LOCK_PASSWORD_RE.search(text) and not re.search(
-        r"\b(?:cofre|wifi|conta|site|servi[cç]o|email|e-mail)\b", text, re.I
-    ):
+
+    if is_vault_save_intent(text):
+        label, _secret = parse_credential_save(text)
+        return "vault_save", label
+
+    if is_ha_lock_context(text):
         return "", ""
 
     if _VAULT_LIST_RE.search(text):
+        return "vault_list", ""
+
+    if _VAULT_RETRIEVE_SIMPLE_RE.search(text) and re.search(
+        r"\bsenhas?\b", text, re.I
+    ) and not _VAULT_RETRIEVE_RE.search(text):
         return "vault_list", ""
 
     m = _VAULT_SAVE_RE.search(text)
@@ -325,14 +347,33 @@ def _format_pick_prompt(labels: list[str]) -> str:
     return "\n".join(lines)
 
 
-def _format_list_labels(labels: list[str]) -> str:
-    if not labels:
-        return "Ainda não há senhas guardadas no seu cofre."
-    lines = ["Senhas guardadas:", ""] + [f"• {label}" for label in labels[:30]]
-    if len(labels) > 30:
-        lines.append(f"\n(+ {len(labels) - 30} outras)")
-    lines.append("\nPara ver uma, peça a senha pelo nome (ex.: wifi, casa).")
-    return "\n".join(lines)
+def _format_list_labels(labels: list[str], phone: str = "") -> str:
+    if labels:
+        lines = ["Senhas guardadas no cofre:", ""] + [f"• {label}" for label in labels[:30]]
+        if len(labels) > 30:
+            lines.append(f"\n(+ {len(labels) - 30} outras)")
+        lines.append("\nPara ver uma, peça a senha pelo nome (ex.: wifi, casa).")
+        return "\n".join(lines)
+
+    if phone:
+        mem_hints = list_memory_password_hints(phone)
+        if mem_hints:
+            lines = [
+                "No cofre encriptado ainda não há senhas.",
+                "",
+                "Na memória pessoal encontrei anotações que parecem senhas:",
+                "",
+            ]
+            lines.extend(f"• {label}" for label in mem_hints[:20])
+            if len(mem_hints) > 20:
+                lines.append(f"\n(+ {len(mem_hints) - 20} outras)")
+            lines.append(
+                "\nPosso mostrar uma se pedir (ex.: *qual é a senha da casa*).\n"
+                "Para guardar no cofre encriptado: *guardar senha de wifi*."
+            )
+            return "\n".join(lines)
+
+    return "Ainda não há senhas guardadas no seu cofre."
 
 
 def _resolve_pick(text: str, labels: list[str]) -> str | None:
@@ -367,19 +408,7 @@ async def _save_vault_entry(
     instance: str,
 ) -> str:
     store.upsert_entry(master_key=master_key, label=label, secret=secret)
-    deleted = await try_delete_inbound_password_message(
-        record=record,
-        user_text=user_text,
-        should_treat_as_password=True,
-        evo=evo,
-        evo_base=evo_base,
-        evo_key=evo_key,
-        instance=instance,
-    )
-    confirm = f"Senha guardada para *{label}*."
-    if deleted:
-        confirm += "\n\nApaguei a mensagem com a senha no WhatsApp por segurança."
-    return confirm
+    return f"Senha guardada para *{label}*."
 
 
 async def _handle_save_pending(
@@ -468,14 +497,35 @@ async def _handle_retrieve_pick(
     if not label:
         return _format_pick_prompt(pending.candidates)
     matches = store.find_entries(label)
-    if not matches:
+    if matches:
         store.clear_pending()
-        return f"Não encontrei senha para *{label}*."
+        secret = store.decrypt_entry(matches[0], master_key=master_key)
+        return await _reply_with_secret(
+            phone=phone,
+            label=matches[0].label,
+            secret=secret,
+            evo=evo,
+            evo_base=evo_base,
+            evo_key=evo_key,
+            instance=instance,
+            messenger=messenger,
+        )
+
+    mem_matches = [
+        m
+        for m in find_memory_password_matches(phone, label)
+        if memory_password_display_label(m).casefold() == label.casefold()
+        or label.casefold() in _entry_blob_for_pick(m)
+    ]
+    if not mem_matches:
+        mem_matches = find_memory_password_matches(phone, label)
     store.clear_pending()
-    secret = store.decrypt_entry(matches[0], master_key=master_key)
+    if not mem_matches:
+        return f"Não encontrei senha para *{label}*."
+    secret = extract_secret_from_memory(mem_matches[0])
     return await _reply_with_secret(
         phone=phone,
-        label=matches[0].label,
+        label=memory_password_display_label(mem_matches[0]),
         secret=secret,
         evo=evo,
         evo_base=evo_base,
@@ -483,6 +533,10 @@ async def _handle_retrieve_pick(
         instance=instance,
         messenger=messenger,
     )
+
+
+def _entry_blob_for_pick(entry: MemoryEntry) -> str:
+    return f"{entry.label} {entry.text}".casefold()
 
 
 async def _handle_vault_retrieve(
@@ -499,45 +553,112 @@ async def _handle_vault_retrieve(
 ) -> tuple[str, bool]:
     """Retorna (mensagem, redact_assistant se a senha foi enviada no chat)."""
     labels = store.list_labels()
-    if not labels:
-        return "Ainda não há senhas guardadas no seu cofre.", False
-
-    if not label_query:
-        if len(labels) == 1:
-            matches = store.find_entries(labels[0])
+    if labels:
+        if not label_query:
+            if len(labels) == 1:
+                matches = store.find_entries(labels[0])
+            else:
+                pending = VaultPending(
+                    mode="retrieve_pick",
+                    stage="pick",
+                    candidates=labels[:10],
+                )
+                store.save_pending(pending)
+                return _format_pick_prompt(pending.candidates), False
         else:
-            pending = VaultPending(
-                mode="retrieve_pick",
-                stage="pick",
-                candidates=labels[:10],
+            matches = store.find_entries(label_query)
+
+        if matches:
+            if len(matches) > 1:
+                pending = VaultPending(
+                    mode="retrieve_pick",
+                    stage="pick",
+                    candidates=[m.label for m in matches[:10]],
+                )
+                store.save_pending(pending)
+                return _format_pick_prompt(pending.candidates), False
+
+            await _reply_with_secret(
+                phone=phone,
+                label=matches[0].label,
+                secret=store.decrypt_entry(matches[0], master_key=master_key),
+                evo=evo,
+                evo_base=evo_base,
+                evo_key=evo_key,
+                instance=instance,
+                messenger=messenger,
             )
-            store.save_pending(pending)
-            return _format_pick_prompt(pending.candidates), False
+            return "", True
 
-    else:
-        matches = store.find_entries(label_query)
+        if label_query:
+            mem_matches = find_memory_password_matches(phone, label_query)
+            if mem_matches:
+                return await _retrieve_from_memory_matches(
+                    phone=phone,
+                    matches=mem_matches,
+                    evo=evo,
+                    evo_base=evo_base,
+                    evo_key=evo_key,
+                    instance=instance,
+                    messenger=messenger,
+                )
 
+            return (
+                f"Não encontrei senha para *{label_query}* no cofre encriptado.\n\n"
+                "Se ainda não guardou aqui, diga por exemplo: "
+                f"*guardar senha de {label_query}* e envie a senha quando eu pedir.",
+            ), False
+
+        return _format_list_labels([], phone), False
+
+    mem_matches = find_memory_password_matches(phone, label_query)
+    if mem_matches:
+        return await _retrieve_from_memory_matches(
+            phone=phone,
+            matches=mem_matches,
+            evo=evo,
+            evo_base=evo_base,
+            evo_key=evo_key,
+            instance=instance,
+            messenger=messenger,
+        )
+
+    if label_query:
+        return (
+            f"Não encontrei senha para *{label_query}*.\n\n"
+            f"Diga *guardar senha de {label_query}* para gravar no cofre encriptado."
+        ), False
+
+    return _format_list_labels([], phone), False
+
+
+async def _retrieve_from_memory_matches(
+    *,
+    phone: str,
+    matches: list[MemoryEntry],
+    evo: EvolutionClient,
+    evo_base: str,
+    evo_key: str,
+    instance: str,
+    messenger: StepMessenger | None,
+) -> tuple[str, bool]:
     if not matches:
-        hint = (
-            f"Não encontrei senha para *{label_query}* no cofre encriptado.\n\n"
-            "Se ainda não guardou aqui, diga por exemplo: "
-            f"*guardar senha de {label_query}* e envie a senha quando eu pedir."
-        )
-        return hint, False
-
+        return "Não encontrei essa senha.", False
     if len(matches) > 1:
-        pending = VaultPending(
-            mode="retrieve_pick",
-            stage="pick",
-            candidates=[m.label for m in matches[:10]],
-        )
-        store.save_pending(pending)
-        return _format_pick_prompt(pending.candidates), False
+        labels = [memory_password_display_label(m) for m in matches[:10]]
+        pending = VaultPending(mode="retrieve_pick", stage="pick", candidates=labels)
+        get_vault_store(phone).save_pending(pending)
+        return _format_pick_prompt(labels), False
 
+    entry = matches[0]
+    secret = extract_secret_from_memory(entry)
+    if not secret:
+        return "Encontrei a anotação mas não consegui ler a senha.", False
+    label = memory_password_display_label(entry)
     await _reply_with_secret(
         phone=phone,
-        label=matches[0].label,
-        secret=store.decrypt_entry(matches[0], master_key=master_key),
+        label=label,
+        secret=secret,
         evo=evo,
         evo_base=evo_base,
         evo_key=evo_key,
@@ -574,7 +695,7 @@ async def handle_vault_gemini_decision(
         return _NOT_CONFIGURED_MSG, False, False
 
     if action == "vault_list":
-        return _format_list_labels(store.list_labels()), False, False
+        return _format_list_labels(store.list_labels(), phone), False, False
 
     if action == "vault_save":
         label, secret = _vault_fields(decision)
@@ -661,6 +782,12 @@ async def try_handle_vault_intent_direct(
     decision: dict[str, Any] = {"action": action}
     if label:
         decision["vault_label"] = label
+    if action == "vault_save":
+        parsed_label, parsed_secret = parse_credential_save(user_text)
+        if parsed_label and not decision.get("vault_label"):
+            decision["vault_label"] = parsed_label
+        if parsed_secret:
+            decision["vault_secret"] = parsed_secret
 
     redact_user = False
     redact_assistant = False
@@ -722,6 +849,14 @@ async def try_handle_password_vault_pending(
         return False
 
     text = (user_text or "").strip()
+    kind = "menu" if pending.stage == "pick" else "text"
+    if pending.stage == "secret":
+        kind = "password"
+    if should_abandon_pending_flow(pending.created_at, text, pending_kind=kind):
+        store.clear_pending()
+        log.info("Cofre pending abandonado phone=%s mode=%s stage=%s", phone, pending.mode, pending.stage)
+        return False
+
     settings_key = getattr(settings, "vault_master_key", "")
     master_key = vault_master_key(settings_key)
 

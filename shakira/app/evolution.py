@@ -342,7 +342,12 @@ class EvolutionClient:
         from_me: bool = False,
         participant: str | None = None,
     ) -> bool:
-        """Apaga mensagem para todos no chat (ex.: senha enviada pelo utilizador)."""
+        """Apaga mensagem enviada pelo bot para todos no chat (ex.: senha revelada)."""
+        if not from_me:
+            log.debug(
+                "deleteMessageForEveryone ignorado: so mensagens do bot (fromMe=true)"
+            )
+            return False
         base = base_url.rstrip("/")
         url = f"{base}/chat/deleteMessageForEveryone/{instance}"
         body: dict[str, Any] = {

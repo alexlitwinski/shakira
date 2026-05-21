@@ -13,11 +13,7 @@ import httpx
 
 from app.devices_catalog import DevicesCatalog
 from app.homeassistant import HomeAssistantClient
-from app.password_security import (
-    SECURITY_DELETE_NOTICE,
-    append_security_delete_notice,
-    try_delete_inbound_password_message,
-)
+from app.pending_flow_utils import should_abandon_pending_flow
 from app.user_friendly import polish_user_message
 from app.whatsapp_steps import StepMessenger, TypingSession
 
@@ -68,13 +64,22 @@ _FOLLOWUP_PROMPT = (
 )
 
 _CANCEL_RE = re.compile(r"^\s*(cancelar|cancela|nao|não|desistir)\s*[.!?]?\s*$", re.I)
-_SERVICO_ONLY_RE = re.compile(r"port[aã]o\s+de\s+servi", re.I)
+_PORTAO_SERVICO_RE = re.compile(
+    r"(?:"
+    r"\b(?:abrir?|abre|abra|acione|aciona|activ|ativa)\b.*\bport[aã]o\s+(?:de\s+)?servi"
+    r"|"
+    r"\bport[aã]o\s+(?:de\s+)?servi[cç]o\b"
+    r")",
+    re.I,
+)
 _DIGITS_RE = re.compile(r"\b(\d{4,8})\b")
 
 _INTENT_PATTERNS = (
     re.compile(r"entrar\s+(em\s+)?casa", re.I),
-    re.compile(r"abrir\s+(o\s+)?port[aã]o(\s+social)?", re.I),
-    re.compile(r"abre\s+(o\s+)?port[aã]o(\s+social)?", re.I),
+    re.compile(r"abrir\s+(o\s+)?port[aã]o\s+social\b", re.I),
+    re.compile(r"abre\s+(o\s+)?port[aã]o\s+social\b", re.I),
+    re.compile(r"abrir\s+(o\s+)?port[aã]o(?!\s+(?:de\s+)?servi)", re.I),
+    re.compile(r"abre\s+(o\s+)?port[aã]o(?!\s+(?:de\s+)?servi)", re.I),
     re.compile(r"quero\s+entrar", re.I),
     re.compile(r"deixa(r)?(-me)?\s+entrar", re.I),
     re.compile(r"preciso\s+entrar(\s+em\s+casa)?", re.I),
@@ -114,12 +119,24 @@ class _PendingPortaoSocial:
 _pending: dict[str, _PendingPortaoSocial] = {}
 
 
+def detect_portao_servico_intent(user_text: str) -> bool:
+    text = (user_text or "").strip()
+    if not text:
+        return False
+    low = text.casefold()
+    if "social" in low and "servi" not in low:
+        return False
+    return bool(_PORTAO_SERVICO_RE.search(text))
+
+
 def detect_portao_social_intent(user_text: str) -> bool:
     text = (user_text or "").strip()
     if not text:
         return False
+    if detect_portao_servico_intent(text):
+        return False
     low = text.lower()
-    if _SERVICO_ONLY_RE.search(low) and "social" not in low:
+    if "servi" in low and "port" in low:
         return False
     return any(p.search(text) for p in _INTENT_PATTERNS)
 
@@ -306,7 +323,7 @@ async def _run_fallback_fechadura(
     return False
 
 
-async def _run_fallback_servico(
+async def _run_portao_servico(
     *,
     ha: HomeAssistantClient,
     catalog: DevicesCatalog,
@@ -322,6 +339,15 @@ async def _run_fallback_servico(
         await messenger.step(
             f"Não foi possível abrir o portão de serviço ({err or 'erro'}).", final=True
         )
+
+
+async def _run_fallback_servico(
+    *,
+    ha: HomeAssistantClient,
+    catalog: DevicesCatalog,
+    messenger: StepMessenger,
+) -> None:
+    await _run_portao_servico(ha=ha, catalog=catalog, messenger=messenger)
 
 
 def _parse_fallback_choice(user_text: str) -> str | None:
@@ -414,6 +440,27 @@ def clear_pending(phone: str) -> None:
     _pending.pop(phone, None)
 
 
+def has_portao_social_pending(phone: str) -> bool:
+    return phone in _pending
+
+
+def _drop_stale_pending(phone: str, text: str) -> bool:
+    """Limpa pending expirado ou fora de contexto. True se foi abandonado."""
+    pending = _pending.get(phone)
+    if not pending:
+        return False
+    kind = "password" if pending.stage == "password" else "menu"
+    if should_abandon_pending_flow(pending.created_at, text, pending_kind=kind):
+        clear_pending(phone)
+        log.info(
+            "Portao social pending abandonado phone=%s stage=%s",
+            phone,
+            pending.stage,
+        )
+        return True
+    return False
+
+
 def is_password_stage_pending(phone: str) -> bool:
     pending = _pending.get(phone)
     return pending is not None and pending.stage == "password"
@@ -454,24 +501,57 @@ async def _finish_exchange(
     record_exchange(phone, user_text, text)
 
 
-async def _delete_password_message_if_needed(
-    *,
+async def try_handle_portao_servico_inbound(
+    phone: str,
     user_text: str,
-    message_record: dict[str, Any] | None,
+    *,
+    ha: HomeAssistantClient,
+    catalog: DevicesCatalog,
     evo: Any,
     evo_base: str,
     evo_key: str,
     instance: str,
 ) -> bool:
-    return await try_delete_inbound_password_message(
-        record=message_record,
-        user_text=user_text,
-        should_treat_as_password=True,
+    """Abre o portao de servico (cena dedicada). Nao e a rotina do portao social."""
+    text = (user_text or "").strip()
+    if has_portao_social_pending(phone):
+        if _drop_stale_pending(phone, text):
+            pass
+        else:
+            return False
+    if _pending.get(phone):
+        return False
+    if not detect_portao_servico_intent(text):
+        return False
+
+    if not evo_base or not evo_key or not instance:
+        log.error("Portao servico sem Evolution phone=%s", phone)
+        return True
+
+    messenger = StepMessenger(
+        evo=evo,
+        evo_base=evo_base,
+        evo_key=evo_key,
+        instance=instance,
+        phone=phone,
+    )
+    async with TypingSession(
+        evo, evo_base=evo_base, evo_key=evo_key, instance=instance, phone=phone
+    ):
+        await _run_portao_servico(ha=ha, catalog=catalog, messenger=messenger)
+
+    await _finish_exchange(
+        phone=phone,
+        user_text=text,
+        messenger=messenger,
+        reply_text="",
         evo=evo,
         evo_base=evo_base,
         evo_key=evo_key,
         instance=instance,
     )
+    log.info("Portao servico tratado phone=%s", phone)
+    return True
 
 
 async def try_handle_portao_social_inbound(
@@ -492,6 +572,14 @@ async def try_handle_portao_social_inbound(
     """
     text = (user_text or "").strip()
     pending = _pending.get(phone)
+    if pending:
+        if pending.stage in ("fallback", "followup") and detect_portao_social_intent(text):
+            clear_pending(phone)
+            pending = None
+        elif _drop_stale_pending(phone, text):
+            return False
+        else:
+            pending = _pending.get(phone)
 
     if pending and pending.stage == "followup":
         choice = _parse_followup_choice(text)
@@ -688,21 +776,9 @@ async def try_handle_portao_social_inbound(
                 )
             return True
 
-        pwd_deleted = await _delete_password_message_if_needed(
-            user_text=text,
-            message_record=message_record,
-            evo=evo,
-            evo_base=evo_base,
-            evo_key=evo_key,
-            instance=instance,
-        )
-
         candidate = text if re.fullmatch(r"\d{4,8}", text) else None
         if not candidate or candidate != PORTAO_SOCIAL_PASSWORD:
-            reply = append_security_delete_notice(
-                "Código incorreto. Tente novamente ou envie *cancelar*.",
-                deleted=pwd_deleted,
-            )
+            reply = "Código incorreto. Tente novamente ou envie *cancelar*."
             if evo_base and evo_key and instance:
                 messenger = StepMessenger(
                     evo=evo,
@@ -735,8 +811,6 @@ async def try_handle_portao_social_inbound(
             instance=instance,
             phone=phone,
         )
-        if pwd_deleted:
-            await messenger.step(SECURITY_DELETE_NOTICE)
         async with TypingSession(
             evo, evo_base=evo_base, evo_key=evo_key, instance=instance, phone=phone
         ):
@@ -766,15 +840,6 @@ async def try_handle_portao_social_inbound(
             log.error("Portao social intent+senha sem Evolution phone=%s", phone)
             return True
 
-        pwd_deleted = await _delete_password_message_if_needed(
-            user_text=text,
-            message_record=message_record,
-            evo=evo,
-            evo_base=evo_base,
-            evo_key=evo_key,
-            instance=instance,
-        )
-
         messenger = StepMessenger(
             evo=evo,
             evo_base=evo_base,
@@ -782,8 +847,6 @@ async def try_handle_portao_social_inbound(
             instance=instance,
             phone=phone,
         )
-        if pwd_deleted:
-            await messenger.step(SECURITY_DELETE_NOTICE)
         async with TypingSession(
             evo, evo_base=evo_base, evo_key=evo_key, instance=instance, phone=phone
         ):

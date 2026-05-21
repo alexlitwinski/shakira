@@ -1,6 +1,6 @@
 name: Shakira - Assistente WhatsApp
 description: Assistente pessoal via WhatsApp para Home Assistant (Evolution API + Gemini)
-version: "1.7.15"
+version: "1.7.16"
 slug: shakira
 init: false
 arch:
@@ -39,6 +39,8 @@ options:
   apify_api_token: ""
   apify_instagram_actor: "apify/instagram-profile-scraper"
   instagram_links_fetch_enabled: true
+  google_fact_check_api_key: ""
+  fact_check_enabled: true
   log_level: info
 schema:
   ha_url: url
@@ -62,4 +64,6 @@ schema:
   apify_api_token: password?
   apify_instagram_actor: str?
   instagram_links_fetch_enabled: bool?
+  google_fact_check_api_key: password?
+  fact_check_enabled: bool?
   log_level: list(none|error|info|debug)?

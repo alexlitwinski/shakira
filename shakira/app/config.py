@@ -101,6 +101,8 @@ class AppSettings:
     apify_api_token: str
     apify_instagram_actor: str
     instagram_links_fetch_enabled: bool
+    google_fact_check_api_key: str
+    fact_check_enabled: bool
     log_level: str
 
     @classmethod
@@ -163,6 +165,12 @@ class AppSettings:
             or "apify/instagram-profile-scraper",
             instagram_links_fetch_enabled=_opts_bool(
                 opts, "instagram_links_fetch_enabled", True, env_fallback="INSTAGRAM_LINKS_FETCH_ENABLED"
+            ),
+            google_fact_check_api_key=_opts_str(
+                opts, "google_fact_check_api_key", "GOOGLE_FACT_CHECK_API_KEY"
+            ),
+            fact_check_enabled=_opts_bool(
+                opts, "fact_check_enabled", True, env_fallback="FACT_CHECK_ENABLED"
             ),
             log_level=_opts_log_level(opts),
         )

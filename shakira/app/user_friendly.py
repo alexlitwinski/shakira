@@ -29,6 +29,9 @@ INTERNAL_INSTRUCTION_MARKERS = (
     "[cenario aplicavel:",
     "no catalogo para responder",
     "no catalogo em cache",
+    "rotina automatica no sistema",
+    "nao use call_service manualmente",
+    "não use call_service manualmente",
 )
 
 

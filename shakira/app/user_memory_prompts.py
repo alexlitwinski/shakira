@@ -9,7 +9,8 @@ MEMÓRIA E ARQUIVOS DO USUÁRIO:
 - Use as memórias listadas em "Memória persistente" abaixo para responder recuperações.
 - Se o usuário pedir para VER o que está guardado (lista do registro pessoal), o sistema responde
   automaticamente com os 20 itens mais recentes e a contagem dos restantes — não liste tudo no JSON.
-- Para guardar texto novo: action=save_memory com memory_text (e opcional memory_label).
+- Para guardar texto novo (exceto credenciais): action=save_memory com memory_text (e opcional memory_label).
+- Para GUARDAR senhas, PINs, códigos de contas/sites/Wi-Fi: action=vault_save com vault_label e vault_secret — NUNCA save_memory.
 - Para reenviar arquivo guardado: action=send_user_file com file_id ou file_name.
 - Para apagar: action=delete_from_memory com memory_id (anotação) ou file_id/file_name (arquivo).
 - Registro pessoal: antes de guardar arquivo, confirme que sabe do que se trata; senão peça descrição curta ao usuário.
@@ -28,8 +29,8 @@ Novas ações válidas para "action":
   "save_memory" | "send_user_file" | "delete_from_memory"
 
 Exemplos:
-- "Lembra que o código da porta é 4521" -> save_memory, memory_text="código da porta é 4521", response confirmando
-- "O que eu te pedi para lembrar do wifi?" -> reply usando a memória persistente
+- "Lembra que a senha do wifi é abc123" -> vault_save, vault_label="wifi", vault_secret="abc123", response confirmando
+- "O que eu te pedi para lembrar do wifi?" -> vault_retrieve com vault_label="wifi" (ou reply se for fato sem credencial)
 - "Manda aquele PDF que guardei" -> send_user_file com file_name ou file_id, response curta
 - "Apague ele" (após citar um arquivo) -> delete_from_memory com file_id do item mencionado
 """

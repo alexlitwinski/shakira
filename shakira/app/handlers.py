@@ -70,6 +70,26 @@ from app.whatsapp_phones import (
 from app.user_memory_cache import ensure_user_memory_cache, invalidate_user_memory_cache
 from app.user_memory_prompts import USER_MEMORY_ACTIONS_INSTRUCTION
 from app.instagram_links_prompts import INSTAGRAM_LINKS_ACTIONS_INSTRUCTION
+from app.fact_check_prompts import FACT_CHECK_ACTIONS_INSTRUCTION
+from app.fact_check_actions import handle_fact_check_claim
+from app.google_calendar_prompts import GOOGLE_CALENDAR_ACTIONS_INSTRUCTION
+from app.google_calendar_actions import (
+    handle_google_calendar_configure,
+    handle_google_calendar_list_events,
+    handle_google_calendar_save_link,
+    handle_google_calendar_show_settings,
+)
+from app.google_calendar_store import get_google_calendar_store
+from app.google_calendar_runner import ensure_google_calendar_runner_running
+from app.birthday_prompts import BIRTHDAY_ACTIONS_INSTRUCTION
+from app.birthday_actions import (
+    handle_birthday_delete,
+    handle_birthday_list,
+    handle_birthday_save,
+    handle_birthday_upcoming,
+)
+from app.birthday_store import get_birthday_store
+from app.birthday_runner import ensure_birthday_runner_running
 from app.user_memory_actions import (
     handle_delete_from_memory,
     try_memory_delete_override,
@@ -77,7 +97,11 @@ from app.user_memory_actions import (
 )
 from app.instagram_links_actions import (
     handle_delete_instagram_link,
+    handle_search_instagram_links,
+    resolve_entry_for_reference,
+    try_handle_refresh_instagram_inbound,
     try_instagram_links_list_reply,
+    try_search_instagram_profiles_reply,
 )
 from app.instagram_links_routine import (
     is_instagram_link_pending,
@@ -85,18 +109,14 @@ from app.instagram_links_routine import (
     try_handle_instagram_link_pending,
 )
 from app.instagram_links_store import get_instagram_store
-from app.instagram_profile_fetcher import format_profile_summary
+from app.instagram_profile_fetcher import enrich_and_notify_instagram_profile, format_profile_summary
 from app.password_vault_routine import (
     handle_vault_gemini_decision,
     try_handle_password_vault_pending,
     try_handle_vault_intent_direct,
 )
-from app.password_security import (
-    append_security_delete_notice,
-    try_delete_inbound_password_message,
-)
 from app.portao_social_routine import (
-    is_password_stage_pending,
+    try_handle_portao_servico_inbound,
     try_handle_portao_social_inbound,
 )
 from app.pending_media import (
@@ -160,8 +180,19 @@ VALID_GEMINI_ACTIONS = frozenset(
         "schedule_action",
         "cancel_scheduled_response",
         "list_instagram_links",
+        "search_instagram_links",
+        "refresh_instagram_link",
         "delete_instagram_link",
         "send_instagram_link",
+        "fact_check_claim",
+        "google_calendar_save_link",
+        "google_calendar_configure",
+        "google_calendar_list_events",
+        "google_calendar_show_settings",
+        "birthday_save",
+        "birthday_list",
+        "birthday_delete",
+        "birthday_upcoming",
     }
 )
 
@@ -177,7 +208,18 @@ _SINGLE_USER_MESSAGE_ACTIONS = frozenset(
         "vault_retrieve",
         "vault_list",
         "list_instagram_links",
+        "search_instagram_links",
+        "refresh_instagram_link",
         "delete_instagram_link",
+        "fact_check_claim",
+        "google_calendar_save_link",
+        "google_calendar_configure",
+        "google_calendar_list_events",
+        "google_calendar_show_settings",
+        "birthday_save",
+        "birthday_list",
+        "birthday_delete",
+        "birthday_upcoming",
     }
 )
 
@@ -834,37 +876,6 @@ def _extract_password_from_message(user_text: str, decision: dict[str, Any]) -> 
     return None
 
 
-def _has_password_pending(phone: str) -> bool:
-    return phone in _pending_unlock or is_password_stage_pending(phone)
-
-
-def _should_delete_password_inbound(phone: str, user_text: str) -> bool:
-    if _has_password_pending(phone):
-        return True
-    return bool(_extract_password_from_message(user_text, {}))
-
-
-async def _secure_delete_password_message(
-    *,
-    phone: str,
-    user_text: str,
-    record: dict[str, Any] | None,
-    evo: EvolutionClient,
-    evo_base: str,
-    evo_key: str,
-    instance: str,
-) -> bool:
-    return await try_delete_inbound_password_message(
-        record=record,
-        user_text=user_text,
-        should_treat_as_password=_should_delete_password_inbound(phone, user_text),
-        evo=evo,
-        evo_base=evo_base,
-        evo_key=evo_key,
-        instance=instance,
-    )
-
-
 async def _execute_unlock_pending(
     phone: str,
     pending: PendingUnlock,
@@ -919,28 +930,14 @@ async def try_handle_pending_password(
         pending.domain,
         pending.service,
     )
-    deleted = False
-    if evo and message_record is not None:
-        deleted = await _secure_delete_password_message(
-            phone=phone,
-            user_text=user_text,
-            record=message_record,
-            evo=evo,
-            evo_base=evo_base,
-            evo_key=evo_key,
-            instance=instance,
-        )
     candidate = user_text.strip()
     if not catalog.verify_password(pending.entity_id, candidate):
         log.info("Senha incorreta phone=%s entity=%s (len=%s)", phone, pending.entity_id, len(candidate))
-        return append_security_delete_notice(
-            "Senha incorreta. Tente novamente ou cancele enviando outro comando.",
-            deleted=deleted,
-        )
+        return "Senha incorreta. Tente novamente ou cancele enviando outro comando."
 
     log.info("Senha OK phone=%s entity=%s, executando unlock", phone, pending.entity_id)
     reply = await _execute_unlock_pending(phone, pending, ha=ha)
-    return append_security_delete_notice(reply, deleted=deleted)
+    return reply
 
 
 def build_gemini_assistant(
@@ -991,6 +988,9 @@ def _build_catalog_fallback_text(
     return (
         f"{USER_MEMORY_ACTIONS_INSTRUCTION}\n\n"
         f"{INSTAGRAM_LINKS_ACTIONS_INSTRUCTION}\n\n"
+        f"{FACT_CHECK_ACTIONS_INSTRUCTION}\n\n"
+        f"{GOOGLE_CALENDAR_ACTIONS_INSTRUCTION}\n\n"
+        f"{BIRTHDAY_ACTIONS_INSTRUCTION}\n\n"
         f"{catalog_fallback}"
     )
 
@@ -1024,6 +1024,12 @@ def build_gemini_assistant_for_user(
     ig_context = get_instagram_store(store.phone).build_context_text()
     if ig_context:
         memory_context = f"{memory_context}\n\n{ig_context}" if memory_context else ig_context
+    cal_context = get_google_calendar_store(store.phone).build_context_text()
+    if cal_context:
+        memory_context = f"{memory_context}\n\n{cal_context}" if memory_context else cal_context
+    bday_context = get_birthday_store(store.phone).build_context_text()
+    if bday_context:
+        memory_context = f"{memory_context}\n\n{bday_context}" if memory_context else bday_context
     memory_in_cache = False
     catalog_system = _build_catalog_system_text(catalog, cameras)
 
@@ -1627,8 +1633,6 @@ async def handle_send_instagram_link(
     instance: str,
     messenger: StepMessenger | None = None,
 ) -> str:
-    from app.instagram_links_actions import resolve_entry_for_reference
-
     link_id = str(decision.get("instagram_link_id") or "").strip()
     handle = str(decision.get("instagram_handle") or "").strip().lstrip("@")
     raw_num = decision.get("instagram_list_number")
@@ -1711,7 +1715,62 @@ def handle_list_instagram_links(phone: str) -> str:
     return format_instagram_links_list(phone)
 
 
+async def handle_refresh_instagram_link(
+    decision: dict[str, Any],
+    *,
+    settings: AppSettings,
+    evo: EvolutionClient,
+    http: httpx.AsyncClient,
+    phone: str,
+    instance: str,
+) -> str:
+    link_id = str(decision.get("instagram_link_id") or "").strip()
+    handle = str(decision.get("instagram_handle") or "").strip().lstrip("@")
+    raw_num = decision.get("instagram_list_number")
+    num: int | None = None
+    if isinstance(raw_num, int):
+        num = raw_num
+    elif isinstance(raw_num, str) and raw_num.strip().isdigit():
+        num = int(raw_num.strip())
+
+    ent = resolve_entry_for_reference(phone, link_id=link_id, handle=handle, list_number=num)
+    if not ent:
+        reply = str(decision.get("response") or "").strip()
+        return reply or "Nao encontrei esse perfil Instagram guardado."
+
+    store = get_instagram_store(phone)
+    ent.fetch_status = "pending"
+    store.update_entry(ent)
+    invalidate_user_memory_cache(get_store(phone))
+
+    evo_base = settings.evolution_base_url.strip()
+    evo_key = settings.evolution_api_key.strip()
+    if evo_base and evo_key and instance:
+        asyncio.create_task(
+            enrich_and_notify_instagram_profile(
+                entry_id=ent.id,
+                phone=phone,
+                settings=settings,
+                evo=evo,
+                http=http,
+                evo_base=evo_base,
+                evo_key=evo_key,
+                instance=instance,
+            )
+        )
+
+    confirm = str(decision.get("response") or "").strip()
+    return confirm or f"A atualizar @{ent.handle}. Envio o resumo atualizado em instantes."
+
+
 def handle_save_memory(decision: dict[str, Any], phone: str) -> str:
+    from app.vault_credential_detection import memory_decision_looks_like_vault
+
+    if memory_decision_looks_like_vault(decision):
+        return (
+            "Credenciais devem ir para o cofre encriptado, não para a memória pessoal. "
+            "Peça para *guardar senha* ou repita o pedido."
+        )
     text = str(decision.get("memory_text") or "").strip()
     if not text:
         reply = str(decision.get("response") or "").strip()
@@ -2123,8 +2182,6 @@ async def execute_decision(
                 "Só posso controlar o que está na lista de dispositivos do assistente."
             )
 
-        pwd_deleted = False
-        pwd_notice_needed = False
         if catalog.service_requires_password(target, service):
             password = _extract_password_from_message(user_text, decision)
             has_pwd = bool(password)
@@ -2137,18 +2194,6 @@ async def execute_decision(
                 pwd_ok,
                 bool(decision.get("provided_password")),
             )
-            if has_pwd:
-                pwd_notice_needed = True
-            if has_pwd and evo and message_record is not None:
-                pwd_deleted = await _secure_delete_password_message(
-                    phone=phone,
-                    user_text=user_text,
-                    record=message_record,
-                    evo=evo,
-                    evo_base=evo_base,
-                    evo_key=evo_key,
-                    instance=instance,
-                )
             if not password or not pwd_ok:
                 _pending_unlock[phone] = PendingUnlock(
                     entity_id=target,
@@ -2159,8 +2204,6 @@ async def execute_decision(
                 log.info("Unlock pendente registrado phone=%s entity=%s", phone, target)
                 prompt = catalog.password_prompt_for(target)
                 msg = _password_prompt_message(reply, prompt)
-                if has_pwd:
-                    msg = append_security_delete_notice(msg, deleted=pwd_deleted)
                 if messenger:
                     await messenger.step(msg)
                     return ""
@@ -2198,8 +2241,6 @@ async def execute_decision(
             )
             if notify_extra:
                 done = f"{done}\n\n{notify_extra}"
-            if pwd_notice_needed:
-                done = append_security_delete_notice(done, deleted=pwd_deleted)
             if messenger:
                 await deliver(done, final=True)
                 return ""
@@ -2228,6 +2269,46 @@ async def execute_decision(
         )
 
     if action == "save_memory":
+        from app.vault_credential_detection import (
+            memory_decision_looks_like_vault,
+            vault_fields_from_memory_decision,
+        )
+
+        if memory_decision_looks_like_vault(decision):
+            if not evo or not evo_base or not evo_key or not instance:
+                return await finalize(
+                    "Credenciais vão para o cofre encriptado, mas o WhatsApp não está configurado."
+                )
+            vault_label, vault_secret = vault_fields_from_memory_decision(decision)
+            vault_decision: dict[str, Any] = {
+                "action": "vault_save",
+                "vault_label": vault_label,
+                "vault_secret": vault_secret,
+                "response": str(decision.get("response") or "").strip(),
+            }
+            settings_key = settings.vault_master_key if settings else ""
+            result, redact_user, redact_assistant = await handle_vault_gemini_decision(
+                vault_decision,
+                phone=phone,
+                user_text=user_text,
+                settings_key=settings_key,
+                message_record=message_record,
+                evo=evo,
+                evo_base=evo_base,
+                evo_key=evo_key,
+                instance=instance,
+                messenger=messenger,
+            )
+            if messenger and messenger.sent_any:
+                record_exchange(
+                    phone,
+                    "[senha omitida]" if redact_user else user_text,
+                    "Senha exibida (removida do chat por segurança)."
+                    if redact_assistant
+                    else messenger.combined(),
+                )
+                return ""
+            return await finalize(result)
         result = handle_save_memory(decision, phone)
         return await finalize(result)
 
@@ -2283,8 +2364,43 @@ async def execute_decision(
         result = handle_list_instagram_links(phone)
         return await finalize(result)
 
+    if action == "search_instagram_links":
+        result = handle_search_instagram_links(decision, phone)
+        return await finalize(result)
+
     if action == "delete_instagram_link":
         result = handle_delete_instagram_link(decision, phone)
+        return await finalize(result)
+
+    if action == "google_calendar_save_link":
+        result = handle_google_calendar_save_link(decision, phone)
+        ensure_google_calendar_runner_running()
+        return await finalize(result)
+
+    if action == "google_calendar_configure":
+        result = handle_google_calendar_configure(decision, phone)
+        ensure_google_calendar_runner_running()
+        return await finalize(result)
+
+    if action == "google_calendar_show_settings":
+        result = handle_google_calendar_show_settings(phone)
+        return await finalize(result)
+
+    if action == "birthday_save":
+        result = handle_birthday_save(decision, phone)
+        ensure_birthday_runner_running()
+        return await finalize(result)
+
+    if action == "birthday_list":
+        result = handle_birthday_list(phone)
+        return await finalize(result)
+
+    if action == "birthday_upcoming":
+        result = handle_birthday_upcoming(decision, phone)
+        return await finalize(result)
+
+    if action == "birthday_delete":
+        result = handle_birthday_delete(decision, phone)
         return await finalize(result)
 
     fallback = reply or "Não entendi o próximo passo."
@@ -2802,6 +2918,19 @@ async def handle_evolution_payload(
                 log.info("Listagem registro pessoal phone=%s", phone_norm)
                 continue
 
+            if await try_handle_portao_servico_inbound(
+                phone_norm,
+                user_text or "",
+                ha=ha,
+                catalog=catalog,
+                evo=evo,
+                evo_base=evo_base or "",
+                evo_key=evo_key or "",
+                instance=send_instance_early or "",
+            ):
+                log.info("Rotina portao servico tratou mensagem phone=%s", phone_norm)
+                continue
+
             if await try_handle_portao_social_inbound(
                 phone_norm,
                 user_text or "",
@@ -2850,6 +2979,42 @@ async def handle_evolution_payload(
                     )
                     record_exchange(phone_norm, user_text or "", reply_text)
                 log.info("Listagem Instagram phone=%s", phone_norm)
+                continue
+
+            ig_search_reply = try_search_instagram_profiles_reply(phone_norm, user_text or "")
+            if ig_search_reply:
+                reply_text = _truncate_whatsapp(ig_search_reply)
+                if evo_base and evo_key and send_instance_early:
+                    await pulse_whatsapp_typing()
+                    await evo.send_text(
+                        base_url=evo_base,
+                        api_key=evo_key,
+                        instance=send_instance_early,
+                        number=phone_norm,
+                        text=reply_text,
+                    )
+                    record_exchange(phone_norm, user_text or "", reply_text)
+                log.info("Busca Instagram phone=%s", phone_norm)
+                continue
+
+            if (
+                evo_base
+                and evo_key
+                and send_instance_early
+                and http is not None
+                and await try_handle_refresh_instagram_inbound(
+                    phone_norm,
+                    user_text or "",
+                    settings=settings,
+                    evo=evo,
+                    http=http,
+                    evo_base=evo_base,
+                    evo_key=evo_key,
+                    instance=send_instance_early,
+                )
+            ):
+                log.info("Refresh Instagram phone=%s", phone_norm)
+                record_exchange(phone_norm, user_text or "", "[atualizacao Instagram]")
                 continue
 
             if (
@@ -3202,6 +3367,43 @@ async def _process_inbound_message(
             _log_message_timings(timings, messenger)
             return
 
+        if action == "search_instagram_links":
+            search_reply = handle_search_instagram_links(decision, phone_norm)
+            await _finish_whatsapp_exchange(
+                phone=phone_norm,
+                user_text=user_text or "",
+                messenger=messenger,
+                reply_text=search_reply,
+                evo=evo,
+                evo_base=evo_base,
+                evo_key=evo_key,
+                instance=send_instance,
+            )
+            _log_message_timings(timings, messenger)
+            return
+
+        if action == "refresh_instagram_link" and send_instance and http is not None:
+            refresh_reply = await handle_refresh_instagram_link(
+                decision,
+                settings=settings,
+                evo=evo,
+                http=http,
+                phone=phone_norm,
+                instance=send_instance,
+            )
+            await _finish_whatsapp_exchange(
+                phone=phone_norm,
+                user_text=user_text or "",
+                messenger=messenger,
+                reply_text=refresh_reply,
+                evo=evo,
+                evo_base=evo_base,
+                evo_key=evo_key,
+                instance=send_instance,
+            )
+            _log_message_timings(timings, messenger)
+            return
+
         if action == "delete_instagram_link":
             del_ig = handle_delete_instagram_link(decision, phone_norm)
             await _finish_whatsapp_exchange(
@@ -3209,6 +3411,45 @@ async def _process_inbound_message(
                 user_text=user_text or "",
                 messenger=messenger,
                 reply_text=del_ig,
+                evo=evo,
+                evo_base=evo_base,
+                evo_key=evo_key,
+                instance=send_instance,
+            )
+            _log_message_timings(timings, messenger)
+            return
+
+        if action == "fact_check_claim" and http is not None:
+            fc_reply = await handle_fact_check_claim(
+                decision,
+                settings=settings,
+                http=http,
+                messenger=messenger,
+            )
+            await _finish_whatsapp_exchange(
+                phone=phone_norm,
+                user_text=user_text or "",
+                messenger=messenger,
+                reply_text=fc_reply,
+                evo=evo,
+                evo_base=evo_base,
+                evo_key=evo_key,
+                instance=send_instance,
+            )
+            _log_message_timings(timings, messenger)
+            return
+
+        if action == "google_calendar_list_events" and http is not None:
+            cal_reply = await handle_google_calendar_list_events(
+                decision,
+                phone=phone_norm,
+                http=http,
+            )
+            await _finish_whatsapp_exchange(
+                phone=phone_norm,
+                user_text=user_text or "",
+                messenger=messenger,
+                reply_text=cal_reply,
                 evo=evo,
                 evo_base=evo_base,
                 evo_key=evo_key,
