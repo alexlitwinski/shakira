@@ -1,24 +1,8 @@
 """Testes da rotina de disparo do alarme."""
 
-from app.alarm_dispatch_runner import (
-    build_trigger_message,
-    resolve_camera_ids_for_partitions,
-)
+from app.alarm_dispatch_runner import resolve_camera_ids_for_partitions
 from app.alerts_catalog import AlertsCatalog
 from app.cameras_catalog import CamerasCatalog
-
-
-def test_build_trigger_message_lists_sectors():
-    msg = build_trigger_message(
-        [
-            "Partição 1 — perímetro externo",
-            "Partição 4 — sensores internos",
-        ]
-    )
-    assert "ALERTA: alarme disparou!" in msg
-    assert "Setores com disparo:" in msg
-    assert "Partição 1 — perímetro externo" in msg
-    assert "Partição 4 — sensores internos" in msg
 
 
 def test_resolve_camera_ids_for_partitions_by_entity_group():

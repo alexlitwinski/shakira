@@ -94,7 +94,7 @@ def test_parse_analysis_payload():
     analysis = _parse_analysis_payload(raw)
     assert analysis is not None
     assert analysis.cameras[0].person_detected is False
-    assert format_analysis_message(analysis) == "Nada na porta.\n\nAguarde."
+    assert format_analysis_message(analysis) == "Aguarde.\n\nNada na porta."
 
 
 def test_build_camera_mosaic_prompt_uses_camera_names():

@@ -10,6 +10,10 @@ from typing import Any
 
 import httpx
 
+from app.amt_alarm_zones import (
+    build_trigger_message,
+    fetch_triggered_zones,
+)
 from app.alerts_catalog import AlarmDispatchConfig
 from app.camera_snapshots import send_camera_snapshots, send_camera_vision_description
 from app.cameras_catalog import CamerasCatalog
@@ -36,16 +40,6 @@ DEFAULT_PARTITIONS: tuple[tuple[str, str], ...] = (
     ("alarm_control_panel.amt_8000_partition_4", "Partição 4 — sensores internos"),
     ("alarm_control_panel.amt_8000_partition_5", "Partição 5 — segundo andar"),
 )
-
-
-def build_trigger_message(triggered_sectors: list[str]) -> str:
-    """Mensagem WhatsApp com os setores (particoes) em disparo."""
-    if not triggered_sectors:
-        return ""
-    lines = ["ALERTA: alarme disparou!", "", "Setores com disparo:"]
-    for label in triggered_sectors:
-        lines.append(f"• {label}")
-    return "\n".join(lines)
 
 
 def resolve_camera_ids_for_partitions(
@@ -77,6 +71,7 @@ class AlarmDispatchRunner:
     _poll_stop: asyncio.Event = field(default_factory=asyncio.Event)
     _last_known_states: dict[str, str] = field(default_factory=dict)
     _pending_partitions: set[str] = field(default_factory=set)
+    _pending_zones: dict[str, tuple[str, str, str]] = field(default_factory=dict)
     _last_notified_at: float = 0.0
     _had_triggered: bool = False
 
@@ -247,7 +242,18 @@ class AlarmDispatchRunner:
 
     def _on_partition_triggered(self, entity_id: str) -> None:
         self._pending_partitions.add(entity_id)
+        asyncio.create_task(
+            self._capture_zones_snapshot(),
+            name="shakira-alarm-zones-snapshot",
+        )
         self._schedule_debounced_dispatch()
+
+    async def _capture_zones_snapshot(self) -> None:
+        try:
+            for entity_id, label, state in await fetch_triggered_zones(self.ha, self.devices):
+                self._pending_zones[entity_id] = (entity_id, label, state)
+        except Exception:
+            log.exception("Alarme: falha ao capturar snapshot de zonas")
 
     def _schedule_debounced_dispatch(self) -> None:
         if self._debounce_task and not self._debounce_task.done():
@@ -261,6 +267,16 @@ class AlarmDispatchRunner:
                 pass
 
         self._debounce_task = asyncio.create_task(_run(), name="shakira-alarm-dispatch")
+
+    @staticmethod
+    def _merge_triggered_zones(
+        current: list[tuple[str, str, str]],
+        pending: list[tuple[str, str, str]],
+    ) -> list[tuple[str, str, str]]:
+        merged: dict[str, tuple[str, str, str]] = {}
+        for row in pending + current:
+            merged[row[0]] = row
+        return [merged[eid] for eid in sorted(merged)]
 
     async def _collect_triggered_partitions(self) -> list[tuple[str, str]]:
         """
@@ -282,6 +298,7 @@ class AlarmDispatchRunner:
                 sorted(self._pending_partitions),
             )
             self._pending_partitions.clear()
+            self._pending_zones.clear()
             return
 
         now = time.monotonic()
@@ -294,6 +311,8 @@ class AlarmDispatchRunner:
             return
 
         self._pending_partitions.clear()
+        pending_zone_snapshot = dict(self._pending_zones)
+        self._pending_zones.clear()
         still_active = await self._fetch_triggered_partitions()
         if still_active:
             log.info("Alarme: disparo com particoes ainda em triggered no HA")
@@ -308,9 +327,12 @@ class AlarmDispatchRunner:
             log.warning("Alarme: nenhum destino WhatsApp configurado")
             return
 
-        sector_labels = [label for _, label in triggered]
         partition_ids = [eid for eid, _ in triggered]
-        message = build_trigger_message(sector_labels)
+        triggered_zones = self._merge_triggered_zones(
+            await fetch_triggered_zones(self.ha, self.devices),
+            list(pending_zone_snapshot.values()),
+        )
+        message = build_trigger_message(triggered, triggered_zones)
         camera_ids = resolve_camera_ids_for_partitions(self.cameras, partition_ids)
 
         instance = (self.settings.evolution_instance or "").strip()
@@ -347,8 +369,9 @@ class AlarmDispatchRunner:
             self._last_notified_at = now
             self._had_triggered = True
             log.info(
-                "Alarme: aviso enviado setores=%s cameras=%s destinos=%s",
-                sector_labels,
+                "Alarme: aviso enviado particoes=%s zonas=%s cameras=%s destinos=%s",
+                [label for _, label in triggered],
+                [label for _, label, _ in triggered_zones],
                 len(camera_ids),
                 len(phones),
             )

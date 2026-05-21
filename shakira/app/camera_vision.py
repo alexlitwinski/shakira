@@ -36,8 +36,8 @@ Formato JSON obrigatório:
   "cameras": [
     {"name": "nome exato", "person_detected": true, "notes": "breve descricao do que ve"}
   ],
-  "description": "texto completo para WhatsApp descrevendo cada camera pelo nome",
-  "recommendation": "resumo pratico curto para o morador"
+  "description": "detalhes por camera (Nome: o que ve em cada uma), texto corrido para WhatsApp",
+  "recommendation": "resumo curto e direto para o morador (ex.: se ha pessoa, o que fazer)"
 }"""
 
 
@@ -169,7 +169,7 @@ def build_camera_mosaic_prompt(
 {context_block}{mapping_block}
 Descreva o que aparece em cada câmera. Para cada uma, defina person_detected com precisão.
 Se alguma câmera estiver escura, vazia ou sem movimento relevante, diga isso em notes.
-Monte description como texto corrido para WhatsApp (sem markdown) e recommendation curto no final."""
+Monte recommendation como resumo geral curto e description com detalhe de cada câmera (Nome: ...)."""
 
 
 def _parse_analysis_payload(raw: str) -> CameraMosaicAnalysis | None:
@@ -212,11 +212,14 @@ def _parse_analysis_payload(raw: str) -> CameraMosaicAnalysis | None:
 
 
 def format_analysis_message(analysis: CameraMosaicAnalysis) -> str:
-    parts = [analysis.description.strip()] if analysis.description.strip() else []
+    """WhatsApp: resumo (recommendation) primeiro, detalhes por câmera (description) depois."""
+    parts: list[str] = []
     if analysis.recommendation.strip():
+        parts.append(analysis.recommendation.strip())
+    if analysis.description.strip():
         if parts:
             parts.append("")
-        parts.append(analysis.recommendation.strip())
+        parts.append(analysis.description.strip())
     return "\n".join(parts).strip()[:4000]
 
 
