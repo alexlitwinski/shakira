@@ -183,8 +183,12 @@ async def handle_fact_check_claim(
             "google_fact_check_api_key (ou use a mesma chave do Gemini)."
         )
 
+    intro = "Consultando verificadores de fact-check..."
+    preview = str(decision.get("response") or "").strip()
     if messenger:
-        await messenger.step("Consultando verificadores de fact-check...")
+        if preview and preview != intro:
+            await messenger.step(preview)
+        await messenger.step(intro)
     else:
         await pulse_whatsapp_typing()
 
@@ -203,21 +207,28 @@ async def handle_fact_check_claim(
         status = exc.response.status_code
         log.warning("Fact-check API HTTP %s body=%s", status, exc.response.text[:300])
         if status in (401, 403):
-            return (
-                "Não consegui acessar o Google Fact Check Tools. "
-                "Verifique se a API está ativada no Google Cloud e se a chave tem permissão."
+            result = (
+                "Não consegui consultar o Google Fact Check Tools (acesso negado pela Google).\n\n"
+                "No Google Cloud Console, ative a API *Fact Check Tools* no mesmo projeto da chave "
+                "(google_fact_check_api_key ou gemini_api_key) e confirme que a chave não está "
+                "restrita a outras APIs apenas.\n\n"
+                "Enquanto isso, não consigo confirmar automaticamente essa alegação."
             )
-        return "Não consegui consultar o fact-check agora. Tente de novo em instantes."
+        else:
+            result = "Não consegui consultar o fact-check agora. Tente de novo em instantes."
     except Exception:
         log.exception("Fact-check search falhou query=%r", query[:80])
-        return "Não consegui consultar o fact-check agora. Tente de novo em instantes."
+        result = "Não consegui consultar o fact-check agora. Tente de novo em instantes."
+    else:
+        result = format_fact_check_response(query, claims, language_note=lang_used)
+        result = f"{result}\n\n{format_fact_check_api_footer()}"
+        log.info(
+            "Fact-check phone query=%r claims=%s",
+            query[:60],
+            len(claims),
+        )
 
-    result = format_fact_check_response(query, claims, language_note=lang_used)
-    result = f"{result}\n\n{format_fact_check_api_footer()}"
-    log.info(
-        "Fact-check phone query=%r claims=%s reviews_shown=%s",
-        query[:60],
-        len(claims),
-        result.count("\n\n"),
-    )
+    if messenger:
+        await messenger.step(result, final=True)
+        return ""
     return result

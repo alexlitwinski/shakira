@@ -656,8 +656,13 @@ async def _finish_whatsapp_exchange(
     instance: str,
 ) -> None:
     """Grava historico e envia resposta final se os passos ainda nao foram enviados."""
+    final = polish_user_message(reply_text).strip()
     if messenger and messenger.sent_any:
-        record_exchange(phone, user_text, messenger.combined())
+        if final and final not in messenger.combined():
+            await messenger.step(final, final=True)
+            record_exchange(phone, user_text, messenger.combined())
+        else:
+            record_exchange(phone, user_text, messenger.combined())
         return
     text = _truncate_whatsapp(polish_user_message(reply_text))
     if not text:
@@ -741,6 +746,21 @@ def _password_prompt_message(reply: str, prompt: str) -> str:
 def _is_placeholder_scenario_response(text: str) -> bool:
     t = text.lower()
     return any(m in t for m in _PLACEHOLDER_RESPONSE_MARKERS)
+
+
+def _substantive_reply(reply: str) -> bool:
+    return bool(reply.strip()) and not _is_placeholder_scenario_response(reply)
+
+
+def _messages_are_redundant(a: str, b: str) -> bool:
+    """True se duas mensagens dizem essencialmente a mesma coisa."""
+    na = " ".join(a.lower().split())
+    nb = " ".join(b.lower().split())
+    if not na or not nb:
+        return False
+    if na == nb:
+        return True
+    return na in nb or nb in na
 
 
 def normalize_gemini_action(
@@ -2137,6 +2157,8 @@ async def execute_decision(
         {
             "reply",
             "list_entities",
+            "get_state",
+            "call_service",
         }
     ) | _SINGLE_USER_MESSAGE_ACTIONS
     if (
@@ -2159,14 +2181,23 @@ async def execute_decision(
         if not isinstance(eid, str) or not eid.strip():
             return await finalize("Não entendi qual aparelho devo verificar.")
         eid = eid.strip()
-        await deliver(format_checking(eid, catalog))
         st = await ha.get_state(eid)
         if not st:
             return await finalize("Não encontrei esse aparelho na casa.")
         result = format_state_value(eid, st, catalog)
         if messenger:
-            await deliver(result, final=True)
+            if _substantive_reply(reply):
+                out = (
+                    reply
+                    if _messages_are_redundant(reply, result)
+                    else f"{reply.strip()}\n\n{result}".strip()
+                )
+            else:
+                out = result
+            await deliver(out, final=True)
             return ""
+        if _substantive_reply(reply) and _messages_are_redundant(reply, result):
+            return await finalize(reply)
         return await finalize(result)
 
     if action == "call_service":
@@ -2237,11 +2268,12 @@ async def execute_decision(
                 return msg
 
         st_before = await ha.get_state(target)
-        await deliver(
-            format_action_in_progress(
-                domain, service, target, svc_data, catalog, st_before
+        if not messenger:
+            await deliver(
+                format_action_in_progress(
+                    domain, service, target, svc_data, catalog, st_before
+                )
             )
-        )
         log.info("Chamando HA phone=%s %s/%s entity=%s", phone, domain, service, target)
         _log_service_payload("call_service", svc_data)
         try:
