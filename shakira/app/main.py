@@ -107,15 +107,6 @@ async def lifespan(app: FastAPI):
         cameras=cameras,
         http=client,
     )
-    if alerts.enabled_alerts():
-        alerts_runner.start()
-    else:
-        log.info(
-            "Nenhum alerta ativo em %s — executor de alertas em espera",
-            settings.alerts_config_path,
-        )
-    app.state.alerts_runner = alerts_runner
-
     alarm_runner = AlarmDispatchRunner(
         settings=settings,
         ha=app.state.ha,
@@ -125,11 +116,25 @@ async def lifespan(app: FastAPI):
         devices=catalog,
         http=client,
     )
+    app.state.alarm_runner = alarm_runner
+    alerts_runner.attach_alarm_dispatch(alarm_runner)
+
+    if alerts.enabled_alerts() or alerts.alarm_dispatch.enabled:
+        alerts_runner.start()
+    else:
+        log.info(
+            "Nenhum alerta ativo em %s — executor de alertas em espera",
+            settings.alerts_config_path,
+        )
+    app.state.alerts_runner = alerts_runner
+
     if alerts.alarm_dispatch.enabled:
         alarm_runner.start()
     else:
-        log.info("Rotina de disparo do alarme desativada em %s", settings.alerts_config_path)
-    app.state.alarm_runner = alarm_runner
+        log.info(
+            "Rotina de disparo do alarme desativada (alarm_dispatch.enabled=false em %s)",
+            settings.alerts_config_path,
+        )
 
     scheduled_runner = ScheduledResponsesRunner(
         settings=settings,
@@ -386,14 +391,15 @@ async def put_alerts_yaml(request: Request, body: AlertsYamlBody) -> dict[str, A
     catalog = AlertsCatalog.load(settings.alerts_config_path)
     request.app.state.alerts = catalog
     runner: AlertsRunner = request.app.state.alerts_runner
-    runner.reload(catalog)
-    await runner.ensure_running()
     alarm_runner: AlarmDispatchRunner = request.app.state.alarm_runner
     alarm_runner.reload(
         catalog.alarm_dispatch,
         cameras=request.app.state.cameras,
         devices=request.app.state.catalog,
     )
+    runner.reload(catalog)
+    runner.attach_alarm_dispatch(alarm_runner)
+    await runner.ensure_running()
     await alarm_runner.ensure_running()
     result["message"] = (
         "Arquivo salvo. Alertas periodicos, live e rotina de alarme recarregados."

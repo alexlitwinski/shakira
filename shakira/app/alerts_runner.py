@@ -7,7 +7,10 @@ import logging
 import os
 import time
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from app.alarm_dispatch_runner import AlarmDispatchRunner
 
 import httpx
 
@@ -71,6 +74,12 @@ class AlertsRunner:
     _poll_task: asyncio.Task[None] | None = None
     _poll_stop: asyncio.Event = field(default_factory=asyncio.Event)
     _ws_listener: HaWebSocketListener | None = None
+    _alarm_dispatch: AlarmDispatchRunner | None = None
+
+    def attach_alarm_dispatch(self, runner: AlarmDispatchRunner | None) -> None:
+        """Partilha o WebSocket live com a rotina de disparo do alarme."""
+        self._alarm_dispatch = runner
+        self._sync_websocket_entities()
 
     def reload(self, catalog: AlertsCatalog) -> None:
         self.catalog = catalog
@@ -94,8 +103,20 @@ class AlertsRunner:
         ws = bool(self._ws_listener and self._ws_listener._task and not self._ws_listener._task.done())
         return poll or ws
 
+    def _alarm_dispatch_active(self) -> bool:
+        return bool(
+            self._alarm_dispatch
+            and self._alarm_dispatch.config.enabled
+        )
+
     def _live_entity_ids(self) -> set[str]:
-        return {a.entity_id for a in self.catalog.enabled_live_alerts()}
+        ids = {a.entity_id for a in self.catalog.enabled_live_alerts()}
+        if self._alarm_dispatch_active():
+            ids |= self._alarm_dispatch.partition_entity_ids  # type: ignore[union-attr]
+        return ids
+
+    def _needs_live_websocket(self) -> bool:
+        return bool(self.catalog.enabled_live_alerts()) or self._alarm_dispatch_active()
 
     def _sync_websocket_entities(self) -> None:
         entity_ids = self._live_entity_ids()
@@ -110,7 +131,7 @@ class AlertsRunner:
             self._poll_task = asyncio.create_task(self._poll_loop(), name="shakira-alerts-poll")
             log.info("Executor de alertas polling iniciado (tick=%ss)", TICK_SECONDS)
 
-        if self.catalog.enabled_live_alerts():
+        if self._needs_live_websocket():
             self._start_websocket()
 
     async def ensure_running(self) -> None:
@@ -125,7 +146,7 @@ class AlertsRunner:
         elif self._poll_task and not self._poll_task.done():
             self._poll_stop.set()
 
-        if self.catalog.enabled_live_alerts():
+        if self._needs_live_websocket():
             self._start_websocket()
         else:
             await self._stop_websocket()
@@ -433,6 +454,14 @@ class AlertsRunner:
                 rt,
                 now,
                 state_override=new_state,
+            )
+
+        if self._alarm_dispatch_active() and entity_id in self._alarm_dispatch.partition_entity_ids:  # type: ignore[union-attr]
+            await self._alarm_dispatch.handle_live_state_change(  # type: ignore[union-attr]
+                entity_id,
+                old_state,
+                new_state,
+                _event_data,
             )
 
     async def _evaluate_alert(

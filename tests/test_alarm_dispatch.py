@@ -65,6 +65,22 @@ alerts: []
     assert cfg.notify.phones == ["5511999999999"]
 
 
+def test_alerts_runner_includes_partitions_when_alarm_dispatch_attached():
+    from unittest.mock import Mock
+
+    from app.alerts_runner import AlertsRunner
+
+    catalog = AlertsCatalog.from_yaml_string(
+        "alarm_dispatch:\n  enabled: true\nalerts: []\n"
+    )
+    runner = AlertsRunner(settings=Mock(), ha=Mock(), evo=Mock(), catalog=catalog)
+    alarm = Mock()
+    alarm.config.enabled = True
+    alarm.partition_entity_ids = {"alarm_control_panel.amt_8000_partition_1"}
+    runner.attach_alarm_dispatch(alarm)
+    assert "alarm_control_panel.amt_8000_partition_1" in runner._live_entity_ids()
+
+
 def test_validate_alarm_dispatch_structure():
     data = {
         "alarm_dispatch": {"enabled": "yes"},
