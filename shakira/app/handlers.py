@@ -765,13 +765,21 @@ def _messages_are_redundant(a: str, b: str) -> bool:
 
 
 def split_gemini_decisions(decision: dict[str, Any]) -> list[dict[str, Any]]:
-    """Expande decisao com action=_batch (varias acoes Gemini numa mensagem)."""
+    """Expande decisao com action=_batch ou chave batch/actions (varias acoes numa mensagem)."""
     if _normalize_action_name(decision.get("action")) == "_batch":
         batch = decision.get("batch")
         if isinstance(batch, list):
             out = [row for row in batch if isinstance(row, dict) and row.get("action")]
             if out:
                 return out
+
+    for key in ("batch", "actions", "steps", "decisions"):
+        nested = decision.get(key)
+        if isinstance(nested, list):
+            out = [row for row in nested if isinstance(row, dict) and row.get("action")]
+            if len(out) > 1:
+                return out
+
     return [decision]
 
 
@@ -831,6 +839,11 @@ async def _ensure_user_friendly_decision(
     states_map: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Garante resposta amigavel; nunca envia instrucao interna ou dump tecnico."""
+    if _normalize_action_name(decision.get("action")) == "_batch":
+        return decision
+    if len(split_gemini_decisions(decision)) > 1:
+        return decision
+
     raw = str(decision.get("response") or "").strip()
     action = str(decision.get("action") or "reply").lower()
     if action not in VALID_GEMINI_ACTIONS:
@@ -1055,14 +1068,11 @@ def _build_catalog_fallback_text(
 
 
 def _decision_is_complete(decision: dict[str, Any]) -> bool:
-    if _normalize_action_name(decision.get("action")) == "_batch":
-        batch = decision.get("batch")
-        if not isinstance(batch, list) or not batch:
-            return False
+    batch_steps = split_gemini_decisions(decision)
+    if len(batch_steps) > 1:
         return all(
             _normalize_action_name(row.get("action")) in VALID_GEMINI_ACTIONS
-            for row in batch
-            if isinstance(row, dict)
+            for row in batch_steps
         )
 
     action = _normalize_action_name(decision.get("action"))
@@ -3430,14 +3440,6 @@ async def _process_inbound_message(
                 )
                 decision, _ = normalize_gemini_action(decision, catalog)
 
-        decision = await _ensure_user_friendly_decision(
-            decision,
-            ha=ha,
-            catalog=catalog,
-            scenario_id=active_scenario_id,
-            states_map=states_map,
-        )
-
         decision_list = split_gemini_decisions(decision)
         if len(decision_list) > 1:
             _log_gemini_decision(phone_norm, decision)
@@ -3469,6 +3471,13 @@ async def _process_inbound_message(
             return
 
         decision = decision_list[0]
+        decision = await _ensure_user_friendly_decision(
+            decision,
+            ha=ha,
+            catalog=catalog,
+            scenario_id=active_scenario_id,
+            states_map=states_map,
+        )
         _log_gemini_decision(phone_norm, decision)
 
         action = _normalize_action_name(decision.get("action"))
