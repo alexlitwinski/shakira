@@ -246,7 +246,7 @@ class AlertsCatalog:
             cooldown = DEFAULT_COOLDOWN_SECONDS
         cooldown = max(MIN_CHECK_INTERVAL_SECONDS, min(cooldown, MAX_CHECK_INTERVAL_SECONDS * 7))
 
-        phones = cls._parse_notify_phones(row.get("notify"))
+        phones = AlertsCatalog._parse_notify_phones(row.get("notify"))
 
         return AlertConfig(
             id=aid,
