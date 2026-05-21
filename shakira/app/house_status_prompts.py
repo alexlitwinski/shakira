@@ -14,7 +14,7 @@ Use linguagem simples; nunca cite nomes técnicos do Home Assistant.
 
 Estruture em 2–5 parágrafos curtos:
 1. Resumo geral (tranquilo, atenção necessária, etc.)
-2. O que as câmeras mostram (pessoas, movimento, áreas vazias)
+2. O que as câmeras mostram, por área (Interna, Portão Social, Externas) — pessoas, movimento, áreas vazias
 3. Chuva e sensores do alarme (portas/janelas abertas, movimento, partições armadas/disparadas)
 4. Se houver dispositivos com problema (indisponíveis, offline, falha de conexão), liste-os
    brevemente num parágrafo separado — omita esta secção se não houver nenhum problema.
@@ -44,14 +44,37 @@ def vision_analysis_to_facts(analysis: CameraMosaicAnalysis | None) -> dict[str,
     }
 
 
+def vision_sections_to_facts(
+    sections: list[tuple[str, CameraMosaicAnalysis]],
+) -> dict[str, Any]:
+    if not sections:
+        return {"disponivel": False}
+    areas = []
+    for label, analysis in sections:
+        facts = vision_analysis_to_facts(analysis)
+        areas.append(
+            {
+                "area": label,
+                "cameras": facts.get("cameras", []),
+                "descricao": facts.get("descricao", ""),
+                "recomendacao": facts.get("recomendacao", ""),
+            }
+        )
+    return {"disponivel": True, "areas": areas}
+
+
 def build_house_status_prompt(
     *,
-    vision_analysis: CameraMosaicAnalysis | None,
+    vision_sections: list[tuple[str, CameraMosaicAnalysis]] | None = None,
+    vision_analysis: CameraMosaicAnalysis | None = None,
     sensor_context: str,
     problems_context: str = "",
 ) -> str:
+    sections = vision_sections or []
+    if not sections and vision_analysis:
+        sections = [("Câmeras", vision_analysis)]
     vision_facts = json.dumps(
-        vision_analysis_to_facts(vision_analysis),
+        vision_sections_to_facts(sections),
         ensure_ascii=False,
         indent=2,
     )
@@ -59,7 +82,7 @@ def build_house_status_prompt(
     problems_block = problems_context.strip() or "(Nenhum dispositivo com problema detectado.)"
     return f"""O morador pediu para saber como está a casa agora.
 
-Análise das câmeras (Gemini Vision):
+Análise das câmeras por área (Gemini Vision — Interna, Portão Social, Externas):
 {vision_facts}
 
 Estados dos sensores (chuva e alarme):

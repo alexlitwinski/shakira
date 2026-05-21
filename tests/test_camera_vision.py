@@ -14,7 +14,7 @@ from app.camera_vision import (
     should_retry_for_missing_person,
     watched_panel_names,
 )
-from app.camera_vision import _parse_analysis_payload
+from app.camera_vision import _parse_analysis_payload, _parse_house_status_mosaics_payload
 
 
 def test_grid_position_label_five_cameras():
@@ -140,3 +140,32 @@ def test_describe_camera_mosaic_compat(monkeypatch):
     )
     assert "entregador" in text
     assert "Pode atender." in text
+
+
+def test_parse_house_status_mosaics_payload():
+    raw = json.dumps(
+        {
+            "areas": [
+                {
+                    "area": "Interna",
+                    "cameras": [{"name": "Sala", "person_detected": False, "notes": "vazia"}],
+                    "description": "Sala vazia.",
+                    "recommendation": "Tranquilo.",
+                },
+                {
+                    "area": "Externas",
+                    "cameras": [{"name": "Portao lateral", "person_detected": True, "notes": "pessoa"}],
+                    "description": "Pessoa no portao.",
+                    "recommendation": "Verificar.",
+                },
+            ]
+        }
+    )
+    sections = _parse_house_status_mosaics_payload(
+        raw, ["Interna", "Portão Social", "Externas"]
+    )
+    assert sections is not None
+    assert len(sections) == 2
+    assert sections[0][0] == "Interna"
+    assert sections[1][0] == "Externas"
+    assert sections[1][1].cameras[0].person_detected is True

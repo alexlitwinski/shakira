@@ -12,9 +12,15 @@ import google.generativeai as genai
 import httpx
 
 from app.alerts_catalog import AlertsCatalog, RainDispatchConfig
+from app.alarm_dispatch_runner import resolve_camera_ids_for_partitions
 from app.amt_alarm_zones import ZONE_ENTITY_RE, zone_entities_from_catalog
 from app.camera_snapshots import send_camera_snapshots
-from app.camera_vision import CameraMosaicAnalysis, analyze_camera_mosaic
+from app.camera_vision import (
+    CameraMosaicAnalysis,
+    CameraPresence,
+    HouseStatusMosaicInput,
+    analyze_house_status_mosaics,
+)
 from app.cameras_catalog import CamerasCatalog
 from app.config import AppSettings
 from app.devices_catalog import DevicesCatalog, EntityConfig
@@ -46,6 +52,15 @@ _EXTRA_PROBLEM_ENTITY_IDS = (
     "binary_sensor.status_cameras_paradas",
     "binary_sensor.amt_8000_falha_na_conexao",
 )
+
+# Mosaicos enviados no house_status: (rotulo WhatsApp, chave do grupo no shakira_cameras.yaml)
+HOUSE_STATUS_MOSAICS: tuple[tuple[str, str], ...] = (
+    ("Interna", "Interna"),
+    ("Portão Social", "Portao Social"),
+    ("Externas", "alarm_control_panel.amt_8000_partition_1"),
+)
+
+EXTERNAL_PARTITION_ENTITY = "alarm_control_panel.amt_8000_partition_1"
 
 
 def _is_alarm_entity(ent: EntityConfig) -> bool:
@@ -88,6 +103,47 @@ def collect_house_status_entity_ids(
         add(rain_config.volume_entity)
 
     return ordered
+
+
+def resolve_house_status_camera_groups(
+    cameras: CamerasCatalog,
+) -> list[tuple[str, list[str]]]:
+    """Resolve os 3 mosaicos (Interna, Portão Social, Externas) para house_status."""
+    groups: list[tuple[str, list[str]]] = []
+    for label, group_key in HOUSE_STATUS_MOSAICS:
+        if group_key.startswith("alarm_control_panel."):
+            ids = resolve_camera_ids_for_partitions(cameras, [group_key])
+        else:
+            resolved_group = cameras.resolve_group_name(group_key)
+            if not resolved_group:
+                ids = []
+            else:
+                ids = [cam.id for cam in cameras.cameras_for_group(resolved_group)]
+        if ids:
+            groups.append((label, ids))
+    return groups
+
+
+def merge_vision_analyses(
+    sections: list[tuple[str, CameraMosaicAnalysis]],
+) -> CameraMosaicAnalysis | None:
+    """Combina analises visuais de varios mosaicos num unico objeto para o resumo."""
+    if not sections:
+        return None
+    all_cameras: list[CameraPresence] = []
+    descriptions: list[str] = []
+    recommendations: list[str] = []
+    for label, analysis in sections:
+        all_cameras.extend(analysis.cameras)
+        if analysis.description.strip():
+            descriptions.append(f"{label}:\n{analysis.description.strip()}")
+        if analysis.recommendation.strip():
+            recommendations.append(f"{label}: {analysis.recommendation.strip()}")
+    return CameraMosaicAnalysis(
+        cameras=all_cameras,
+        description="\n\n".join(descriptions),
+        recommendation=" ".join(recommendations),
+    )
 
 
 def collect_problem_entity_ids(catalog: DevicesCatalog) -> list[str]:
@@ -228,7 +284,8 @@ def build_sensor_context_block(
 def generate_house_status_summary(
     *,
     api_key: str,
-    vision_analysis: CameraMosaicAnalysis | None,
+    vision_sections: list[tuple[str, CameraMosaicAnalysis]] | None = None,
+    vision_analysis: CameraMosaicAnalysis | None = None,
     sensor_context: str,
     problems_context: str = "",
     model: str | None = None,
@@ -237,8 +294,11 @@ def generate_house_status_summary(
     if not key:
         return ""
     model_name = (model or os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")).strip()
+    sections = vision_sections or []
+    if not sections and vision_analysis:
+        sections = [("Câmeras", vision_analysis)]
     prompt = build_house_status_prompt(
-        vision_analysis=vision_analysis,
+        vision_sections=sections,
         sensor_context=sensor_context,
         problems_context=problems_context,
     )
@@ -264,17 +324,22 @@ def generate_house_status_summary(
 
 
 def _fallback_summary(
-    vision_analysis: CameraMosaicAnalysis | None,
-    sensor_context: str,
+    vision_sections: list[tuple[str, CameraMosaicAnalysis]] | None = None,
+    vision_analysis: CameraMosaicAnalysis | None = None,
+    sensor_context: str = "",
     problems_context: str = "",
 ) -> str:
     from app.camera_vision import format_analysis_message
 
     parts: list[str] = ["Situação da casa:"]
-    if vision_analysis:
-        vision_text = format_analysis_message(vision_analysis)
+    sections = vision_sections or []
+    if not sections and vision_analysis:
+        sections = [("Câmeras", vision_analysis)]
+    for label, analysis in sections:
+        vision_text = format_analysis_message(analysis)
         if vision_text:
             parts.append("")
+            parts.append(f"{label}:")
             parts.append(vision_text)
     if sensor_context.strip():
         parts.append("")
@@ -327,44 +392,82 @@ async def handle_house_status(
     if intro:
         await say(intro)
 
-    await say("Vou capturar todas as câmeras e analisar a situação da casa...")
-
-    camera_ids, _err = cameras.resolve_camera_targets(all_cameras=True)
-    snapshot_result = await send_camera_snapshots(
-        settings=settings,
-        cameras=cameras,
-        evo=evo,
-        http=http,
-        phone=phone,
-        instance=instance,
-        camera_ids=camera_ids,
-        intro="",
-        messenger=None,
-        send_progress=False,
-        send_summary=False,
-    )
-
-    if snapshot_result.sent <= 0 or not snapshot_result.image_bytes:
-        msg = snapshot_result.summary or "Não consegui capturar as câmeras agora."
+    mosaic_groups = resolve_house_status_camera_groups(cameras)
+    if not mosaic_groups:
+        msg = "Nenhuma câmera configurada para o resumo da casa."
         await say(msg, final=True)
         return msg
 
+    await say(
+        "Vou capturar as câmeras por área (Interna, Portão Social e Externas) "
+        "e analisar a situação da casa..."
+    )
+
     api_key = settings.gemini_api_key.strip()
     model = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
+    captured_mosaics: list[HouseStatusMosaicInput] = []
+    mosaics_sent = 0
 
-    vision_analysis: CameraMosaicAnalysis | None = None
+    for area_label, camera_ids in mosaic_groups:
+        snapshot_result = await send_camera_snapshots(
+            settings=settings,
+            cameras=cameras,
+            evo=evo,
+            http=http,
+            phone=phone,
+            instance=instance,
+            camera_ids=camera_ids,
+            intro="",
+            area_label=area_label,
+            messenger=None,
+            send_progress=False,
+            send_summary=False,
+            quiet_send_failure=True,
+        )
+
+        if snapshot_result.sent > 0:
+            mosaics_sent += 1
+
+        if not snapshot_result.image_bytes:
+            log.warning(
+                "house_status: sem imagem para area=%s phone=%s",
+                area_label,
+                phone,
+            )
+            continue
+
+        captured_mosaics.append(
+            HouseStatusMosaicInput(
+                area_label=area_label,
+                image_bytes=snapshot_result.image_bytes,
+                camera_panels=tuple(snapshot_result.image_panels),
+            )
+        )
+
+    if not captured_mosaics:
+        msg = "Não consegui capturar as câmeras agora."
+        await say(msg, final=True)
+        return msg
+
+    vision_sections: list[tuple[str, CameraMosaicAnalysis]] = []
     if api_key:
         try:
-            vision_analysis = await asyncio.to_thread(
-                analyze_camera_mosaic,
+            vision_sections = await asyncio.to_thread(
+                analyze_house_status_mosaics,
                 api_key=api_key,
-                image_bytes=snapshot_result.image_bytes,
-                camera_panels=snapshot_result.image_panels,
+                mosaics=captured_mosaics,
                 context="Pedido do morador: resumo da situação atual da casa.",
                 model=model,
             )
         except Exception:
             log.exception("house_status: falha analise visual phone=%s", phone)
+
+    if not vision_sections:
+        log.warning(
+            "house_status: Gemini Vision nao analisou mosaicos phone=%s capturados=%s",
+            phone,
+            len(captured_mosaics),
+        )
 
     entity_ids = collect_house_status_entity_ids(catalog, rain_config)
     states_by_id: dict[str, dict[str, Any]] = {}
@@ -403,14 +506,18 @@ async def handle_house_status(
         summary = await asyncio.to_thread(
             generate_house_status_summary,
             api_key=api_key,
-            vision_analysis=vision_analysis,
+            vision_sections=vision_sections,
             sensor_context=sensor_context,
             problems_context=problems_context,
             model=model,
         )
 
     if not summary:
-        summary = _fallback_summary(vision_analysis, sensor_context, problems_context)
+        summary = _fallback_summary(
+            vision_sections=vision_sections,
+            sensor_context=sensor_context,
+            problems_context=problems_context,
+        )
 
     if not summary:
         summary = "Capturei as câmeras, mas não consegui gerar o resumo da casa agora."

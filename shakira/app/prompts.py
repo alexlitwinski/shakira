@@ -118,9 +118,10 @@ Regras de SITUAÇÃO DA CASA (house_status):
   se está tudo tranquilo, situação geral, "como está em casa", "alguma coisa estranha", "tem alguém?", etc.
 - NUNCA use action=reply para esses pedidos — use SEMPRE action=house_status.
 - action=house_status (sem camera_id, camera_ids, camera_group nem all_cameras).
-- O sistema captura TODAS as câmeras num mosaico, analisa com Gemini Vision, consulta sensor de chuva
-  e todos os sensores do alarme, verifica dispositivos indisponíveis/offline, e envia um resumo integrado
-  gerado dinamicamente — não invente nem copie texto fixo no JSON.
+- O sistema envia 3 mosaicos separados: câmeras Interna, Portão Social e Externas
+  (grupo alarm_control_panel.amt_8000_partition_1 no shakira_cameras.yaml), analisa cada um
+  com Gemini Vision, consulta sensores de chuva/alarme e dispositivos com problema,
+  e envia um resumo integrado gerado dinamicamente — não invente nem copie texto fixo no JSON.
 - response: mensagem curta antes de iniciar (ex.: "Vou verificar como está a casa agora.").
 - Não descreva o resultado no JSON; o sistema envia mosaico + resumo automaticamente.
 

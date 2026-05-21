@@ -8,7 +8,7 @@ import math
 import os
 import re
 from dataclasses import dataclass, field
-from typing import Sequence
+from typing import Any, Sequence
 
 import google.generativeai as genai
 
@@ -59,6 +59,41 @@ class CameraMosaicAnalysis:
     cameras: list[CameraPresence] = field(default_factory=list)
     description: str = ""
     recommendation: str = ""
+
+
+@dataclass(frozen=True)
+class HouseStatusMosaicInput:
+    area_label: str
+    image_bytes: bytes
+    camera_panels: tuple[CameraPanelInfo, ...] = ()
+
+
+HOUSE_STATUS_VISION_SYSTEM = """Você analisa mosaicos de câmeras de segurança residenciais para o morador.
+Receberá até 3 imagens JPEG separadas — cada uma precedida pelo rótulo da área (Interna, Portão Social ou Externas).
+Analise TODAS as imagens fornecidas; não omita nenhuma área.
+
+Responda SOMENTE em JSON válido (sem markdown, sem texto fora do JSON).
+Use português do Brasil nos campos de texto.
+
+OBRIGATÓRIO: use EXCLUSIVAMENTE os nomes exatos das câmeras fornecidos no mapeamento de cada área.
+NUNCA use rótulos genéricos de posição como "câmera superior esquerda".
+
+Para cada câmera, indique claramente se há pessoa visível (person_detected: true/false).
+Considere pessoa: adulto, criança, entregador, visitante — qualquer ser humano visível.
+
+Formato JSON obrigatório:
+{
+  "areas": [
+    {
+      "area": "nome exato da área (Interna, Portão Social ou Externas)",
+      "cameras": [
+        {"name": "nome exato", "person_detected": true, "notes": "breve descricao do que ve"}
+      ],
+      "description": "detalhes por câmera desta área (Nome: o que vê)",
+      "recommendation": "resumo curto desta área"
+    }
+  ]
+}"""
 
 
 def grid_position_label(index: int, total: int) -> str:
@@ -209,6 +244,188 @@ def _parse_analysis_payload(raw: str) -> CameraMosaicAnalysis | None:
         description=description,
         recommendation=recommendation,
     )
+
+
+def _parse_house_status_mosaics_payload(
+    raw: str,
+    expected_areas: Sequence[str],
+) -> list[tuple[str, CameraMosaicAnalysis]] | None:
+    text = raw.strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:json)?\s*", "", text)
+        text = re.sub(r"\s*```$", "", text)
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(data, dict):
+        return None
+
+    sections: list[tuple[str, CameraMosaicAnalysis]] = []
+    for row in data.get("areas") or []:
+        if not isinstance(row, dict):
+            continue
+        area = str(row.get("area") or "").strip()
+        if not area:
+            continue
+        cameras: list[CameraPresence] = []
+        for cam_row in row.get("cameras") or []:
+            if not isinstance(cam_row, dict):
+                continue
+            name = str(cam_row.get("name") or "").strip()
+            if not name:
+                continue
+            cameras.append(
+                CameraPresence(
+                    name=name,
+                    person_detected=bool(cam_row.get("person_detected")),
+                    notes=str(cam_row.get("notes") or "").strip(),
+                )
+            )
+        description = str(row.get("description") or "").strip()
+        recommendation = str(row.get("recommendation") or "").strip()
+        if not description and not recommendation and not cameras:
+            continue
+        sections.append(
+            (
+                area,
+                CameraMosaicAnalysis(
+                    cameras=cameras,
+                    description=description,
+                    recommendation=recommendation,
+                ),
+            )
+        )
+
+    if not sections:
+        return None
+
+    if expected_areas:
+        found = {_normalize_camera_name(a) for a, _ in sections}
+        for expected in expected_areas:
+            if _normalize_camera_name(expected) not in found:
+                log.warning(
+                    "analyze_house_status_mosaics: area ausente no JSON: %s",
+                    expected,
+                )
+    return sections
+
+
+def build_house_status_mosaics_prompt(
+    mosaics: Sequence[HouseStatusMosaicInput],
+    *,
+    context: str = "",
+) -> str:
+    lines: list[str] = [
+        "Analise cada mosaico abaixo. Cada imagem JPEG corresponde a uma área da casa.",
+        "Retorne uma entrada em 'areas' para CADA área listada.",
+    ]
+    if context.strip():
+        lines.append(f"\nContexto: {context.strip()}")
+    for mosaic in mosaics:
+        panels = [p for p in mosaic.camera_panels if p.name.strip()]
+        lines.append(f"\nÁrea: {mosaic.area_label}")
+        if panels:
+            lines.append("Mapeamento deste mosaico (posição no grid → nome da câmera):")
+            for index, panel in enumerate(panels):
+                position = grid_position_label(index, len(panels))
+                line = f"  {index + 1}. Painel {position} → {panel.name.strip()}"
+                if panel.description.strip():
+                    line += f" ({panel.description.strip()})"
+                lines.append(line)
+        lines.append(f"(imagem JPEG da área {mosaic.area_label} segue abaixo)")
+    return "\n".join(lines)
+
+
+def analyze_house_status_mosaics(
+    *,
+    api_key: str,
+    mosaics: Sequence[HouseStatusMosaicInput],
+    context: str = "",
+    model: str | None = None,
+) -> list[tuple[str, CameraMosaicAnalysis]]:
+    """Analisa os mosaicos Interna, Portão Social e Externas numa única chamada Gemini Vision."""
+    key = api_key.strip()
+    valid = [m for m in mosaics if m.image_bytes and m.area_label.strip()]
+    if not key or not valid:
+        if not key:
+            log.warning("analyze_house_status_mosaics: gemini_api_key ausente")
+        return []
+
+    if len(valid) == 1:
+        single = analyze_camera_mosaic(
+            api_key=key,
+            image_bytes=valid[0].image_bytes,
+            camera_panels=list(valid[0].camera_panels),
+            context=f"{context} — área {valid[0].area_label}.".strip(" —"),
+            model=model,
+        )
+        return [(valid[0].area_label, single)] if single else []
+
+    model_name = (model or os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")).strip()
+    prompt = build_house_status_mosaics_prompt(valid, context=context)
+    content: list[Any] = [prompt]
+    for mosaic in valid:
+        content.append(f"\nImagem da área: {mosaic.area_label}\n")
+        content.append({"mime_type": "image/jpeg", "data": mosaic.image_bytes})
+
+    expected_areas = [m.area_label for m in valid]
+    try:
+        genai.configure(api_key=key)
+        vision_model = genai.GenerativeModel(
+            model_name=model_name,
+            system_instruction=HOUSE_STATUS_VISION_SYSTEM,
+        )
+        response = vision_model.generate_content(
+            content,
+            generation_config=genai.GenerationConfig(
+                response_mime_type="application/json",
+                temperature=0.2,
+            ),
+        )
+    except Exception:
+        log.exception("Gemini analyze_house_status_mosaics falhou; fallback por area")
+        return _analyze_house_status_mosaics_fallback(key, valid, context=context, model=model_name)
+
+    text = getattr(response, "text", None) or ""
+    if not text and response.candidates:
+        parts = response.candidates[0].content.parts
+        text = "".join(getattr(p, "text", "") for p in parts)
+
+    sections = _parse_house_status_mosaics_payload(text, expected_areas)
+    if sections and len(sections) >= len(valid):
+        log.info(
+            "analyze_house_status_mosaics OK areas=%s",
+            [a for a, _ in sections],
+        )
+        return sections
+
+    log.warning(
+        "analyze_house_status_mosaics: JSON incompleto (%s areas); fallback por area",
+        len(sections or []),
+    )
+    return _analyze_house_status_mosaics_fallback(key, valid, context=context, model=model_name)
+
+
+def _analyze_house_status_mosaics_fallback(
+    api_key: str,
+    mosaics: Sequence[HouseStatusMosaicInput],
+    *,
+    context: str = "",
+    model: str | None = None,
+) -> list[tuple[str, CameraMosaicAnalysis]]:
+    sections: list[tuple[str, CameraMosaicAnalysis]] = []
+    for mosaic in mosaics:
+        analysis = analyze_camera_mosaic(
+            api_key=api_key,
+            image_bytes=mosaic.image_bytes,
+            camera_panels=list(mosaic.camera_panels),
+            context=f"{context} — área {mosaic.area_label}.".strip(" —"),
+            model=model,
+        )
+        if analysis:
+            sections.append((mosaic.area_label, analysis))
+    return sections
 
 
 def format_analysis_message(analysis: CameraMosaicAnalysis) -> str:

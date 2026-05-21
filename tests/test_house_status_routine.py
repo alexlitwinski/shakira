@@ -1,16 +1,40 @@
 """Testes da rotina house_status."""
 
 from app.devices_catalog import DevicesCatalog
-from app.house_status_prompts import build_house_status_prompt, vision_analysis_to_facts
+from app.house_status_prompts import (
+    build_house_status_prompt,
+    vision_analysis_to_facts,
+    vision_sections_to_facts,
+)
 from app.house_status_routine import (
     build_problem_devices_block,
     build_sensor_context_block,
     collect_house_status_entity_ids,
     describe_entity_problem,
     humanize_zone_or_sensor_state,
+    merge_vision_analyses,
+    resolve_house_status_camera_groups,
 )
 from app.camera_vision import CameraMosaicAnalysis, CameraPresence
 from app.alerts_catalog import RainDispatchConfig
+from app.cameras_catalog import CamerasCatalog
+
+
+CAMERAS_YAML = """
+cameras:
+  - id: Sala
+    name: Sala
+    group: Interna
+  - id: Hall
+    name: Hall
+    group: Portao Social
+  - id: Portao_Lateral
+    name: Portao lateral
+    group: alarm_control_panel.amt_8000_partition_1
+  - id: Varanda_quarto
+    name: Varanda do quarto
+    group: alarm_control_panel.amt_8000_partition_1
+"""
 
 
 DEVICES_YAML = """
@@ -88,9 +112,25 @@ def test_vision_analysis_to_facts():
     facts = vision_analysis_to_facts(analysis)
     assert facts["disponivel"] is True
     assert facts["cameras"][0]["nome"] == "Sala"
-    prompt = build_house_status_prompt(vision_analysis=analysis, sensor_context="Chuva: seca.")
+    prompt = build_house_status_prompt(
+        vision_sections=[("Interna", analysis)],
+        sensor_context="Chuva: seca.",
+    )
     assert "Sala" in prompt
     assert "Chuva: seca." in prompt
+    assert "areas" in prompt
+
+
+def test_vision_sections_to_facts():
+    analysis = CameraMosaicAnalysis(
+        cameras=[CameraPresence(name="Hall", person_detected=False)],
+        description="Hall vazio.",
+        recommendation="Ok.",
+    )
+    facts = vision_sections_to_facts([("Portão Social", analysis)])
+    assert facts["disponivel"] is True
+    assert facts["areas"][0]["area"] == "Portão Social"
+    assert facts["areas"][0]["cameras"][0]["nome"] == "Hall"
 
 
 def test_describe_entity_problem():
@@ -130,3 +170,39 @@ def test_build_problem_devices_block():
     states["sensor.temperatura_boiler"] = {"state": "unavailable", "attributes": {}}
     block = build_problem_devices_block(catalog=catalog, states_by_id=states)
     assert "indisponível" in block
+
+
+def test_resolve_house_status_camera_groups():
+    cameras = CamerasCatalog.from_yaml_string(CAMERAS_YAML)
+    groups = resolve_house_status_camera_groups(cameras)
+    labels = [label for label, _ids in groups]
+    assert labels == ["Interna", "Portão Social", "Externas"]
+    externas = next(ids for label, ids in groups if label == "Externas")
+    assert "Portao_Lateral" in externas
+    assert "Varanda_quarto" in externas
+
+
+def test_merge_vision_analyses():
+    sections = [
+        (
+            "Interna",
+            CameraMosaicAnalysis(
+                cameras=[CameraPresence(name="Sala", person_detected=False)],
+                description="Sala vazia.",
+                recommendation="Tranquilo.",
+            ),
+        ),
+        (
+            "Externas",
+            CameraMosaicAnalysis(
+                cameras=[CameraPresence(name="Portao lateral", person_detected=True)],
+                description="Pessoa no portao.",
+                recommendation="Verificar.",
+            ),
+        ),
+    ]
+    merged = merge_vision_analyses(sections)
+    assert merged is not None
+    assert len(merged.cameras) == 2
+    assert "Interna:" in merged.description
+    assert "Externas:" in merged.description

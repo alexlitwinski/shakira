@@ -147,9 +147,11 @@ async def send_camera_snapshots(
     instance: str,
     camera_ids: list[str],
     intro: str = "",
+    area_label: str = "",
     messenger: StepMessenger | None = None,
     send_progress: bool = True,
     send_summary: bool = True,
+    quiet_send_failure: bool = False,
 ) -> CameraSnapshotsResult:
     """
     Obtem snapshots do Frigate e envia pelo WhatsApp.
@@ -292,7 +294,8 @@ async def send_camera_snapshots(
         CameraPanelInfo(name=label, description=description)
         for _, label, _, description in fetched
     ]
-    caption = "Câmeras: " + ", ".join(labels)
+    prefix = area_label.strip() or "Câmeras"
+    caption = f"{prefix}: " + ", ".join(labels)
     if result.failed:
         caption += f" (falharam: {', '.join(result.failed)})"
     caption = caption[:1024]
@@ -306,9 +309,13 @@ async def send_camera_snapshots(
         filename="shakira_cameras.jpg",
         caption=caption,
     )
+    result.image_bytes = collage_bytes
+    result.image_labels = labels
+    result.image_panels = panels
     if ok is None:
         result.failed.extend(camera_id for _, _, camera_id, _ in fetched)
-        await say("Capturei as câmeras mas não consegui enviar pelo WhatsApp.", final=True)
+        if not quiet_send_failure:
+            await say("Capturei as câmeras mas não consegui enviar pelo WhatsApp.", final=True)
         result.summary = "Não foi possível enviar as imagens das câmeras."
         return result
 
@@ -321,9 +328,6 @@ async def send_camera_snapshots(
     else:
         result.summary = f"{result.sent} imagem(ns) enviada(s) numa única mensagem."
 
-    result.image_bytes = collage_bytes
-    result.image_labels = labels
-    result.image_panels = panels
     if send_summary:
         await say(result.summary, final=True)
     return result
