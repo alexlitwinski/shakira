@@ -95,7 +95,7 @@ class ScheduledResponse:
 
 
 class ScheduledResponsesStore:
-    """Persiste agendamentos em /data/shakira_users/{phone}/scheduled_responses.json."""
+    """Persiste agendamentos em {USER_DATA_ROOT}/{phone}/scheduled_responses.json."""
 
     def __init__(self, phone: str) -> None:
         self.phone = sanitize_phone(phone)

@@ -27,6 +27,7 @@ def _settings(*, enabled: bool = True, api_key: str = "test-key") -> AppSettings
         frigate_url="",
         frigate_cameras_config_path="",
         alerts_config_path="",
+        user_data_path="/tmp/shakira_users",
         shakira_api_token="",
         vault_master_key="",
         apify_api_token="",

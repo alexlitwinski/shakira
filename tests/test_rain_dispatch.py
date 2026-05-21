@@ -5,10 +5,9 @@ from unittest.mock import AsyncMock, Mock
 from app.alerts_catalog import AlertsCatalog
 from app.alerts_runner import AlertsRunner
 from app.devices_catalog import DevicesCatalog
+from app.rain_message import RainStartStatus, build_rain_started_message, short_entity_label
 from app.rain_dispatch_runner import (
     RainDispatchRunner,
-    RainStartStatus,
-    build_rain_started_message,
     cover_is_closed,
     cover_is_open,
     is_raining,
@@ -58,6 +57,11 @@ def test_rain_started_transition_poll_uses_prev():
     )
 
 
+def test_short_entity_label_strips_ha_hints():
+    raw = "Toldo da area gourmet (open=aberto/recolhido, closed=fechado estendido)"
+    assert short_entity_label(raw, "Toldo") == "Toldo da area gourmet"
+
+
 def test_build_rain_started_message_all_ok():
     msg = build_rain_started_message(
         RainStartStatus(
@@ -67,9 +71,8 @@ def test_build_rain_started_message_all_ok():
         )
     )
     assert "Começou a chover" in msg
-    assert "Situação:" in msg
-    assert "nenhuma aberta" in msg
-    assert "aberto (recolhido)" in msg
+    assert "Nenhuma janela aberta" in msg
+    assert "recolhido" in msg
     assert "fechada" in msg
 
 
@@ -235,7 +238,7 @@ devices:
         )
     )
     first_msg = runner._notify.call_args_list[0][0][1]
-    assert "Situação:" in first_msg
+    assert "Começou a chover" in first_msg or "chov" in first_msg.lower()
     assert "Janela Jantar 1" in first_msg
     assert "Janela Jantar 2" not in first_msg
 

@@ -21,7 +21,7 @@ O **catálogo de dispositivos** fica em **cache de contexto Gemini** (não é re
 
 ## Memória por utilizador (WhatsApp)
 
-Cada número autorizado tem memória persistente em **`/data/shakira_users/<telefone>/`** (volume do add-on):
+Cada número autorizado tem memória persistente em **`/config/shakira_users/<telefone>/`** (File Editor / Samba; dentro do add-on o caminho é `/homeassistant/shakira_users`). Opção do add-on: `user_data_path` (predefinição `/homeassistant/shakira_users`). Na primeira arrancada após a atualização, dados antigos em `/data/shakira_users` são copiados automaticamente se a pasta nova estiver vazia.
 
 | Ficheiro / pasta | Conteúdo |
 |------------------|----------|

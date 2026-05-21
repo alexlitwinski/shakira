@@ -15,7 +15,58 @@ from typing import Any
 
 log = logging.getLogger(__name__)
 
-USER_DATA_ROOT = Path(os.environ.get("SHAKIRA_USER_DATA_ROOT", "/data/shakira_users"))
+DEFAULT_USER_DATA_PATH = "/homeassistant/shakira_users"
+FALLBACK_USER_DATA_PATHS: tuple[str, ...] = (
+    "/homeassistant/shakira_users",
+    "/config/shakira_users",
+)
+
+USER_DATA_ROOT = Path(
+    os.environ.get("SHAKIRA_USER_DATA_ROOT", DEFAULT_USER_DATA_PATH)
+)
+
+
+def resolve_user_data_root(configured: str | Path | None = None) -> Path:
+    """Resolve a pasta raiz de dados por utilizador (configurada ou fallbacks do HA)."""
+    candidates: list[Path] = []
+    if configured and str(configured).strip():
+        candidates.append(Path(str(configured).strip()))
+    env = os.environ.get("SHAKIRA_USER_DATA_PATH", "").strip()
+    if env:
+        candidates.append(Path(env))
+    for p in FALLBACK_USER_DATA_PATHS:
+        candidates.append(Path(p))
+    candidates.append(Path(DEFAULT_USER_DATA_PATH))
+
+    seen: set[str] = set()
+    for path in candidates:
+        key = str(path)
+        if key in seen:
+            continue
+        seen.add(key)
+        parent = path.parent
+        if path.is_dir() or parent.is_dir():
+            path.mkdir(parents=True, exist_ok=True)
+            if configured and key != str(Path(str(configured).strip())):
+                log.info(
+                    "Usando dados de utilizador em %s (caminho configurado indisponivel)",
+                    path,
+                )
+            return path
+
+    chosen = candidates[0] if candidates else Path(DEFAULT_USER_DATA_PATH)
+    chosen.mkdir(parents=True, exist_ok=True)
+    return chosen
+
+
+def configure_user_data_root(path: Path) -> Path:
+    """Define USER_DATA_ROOT em runtime (apos AppSettings.load)."""
+    global USER_DATA_ROOT
+    root = Path(path)
+    root.mkdir(parents=True, exist_ok=True)
+    USER_DATA_ROOT = root
+    os.environ["SHAKIRA_USER_DATA_ROOT"] = str(root)
+    return root
 MAX_MEMORIES = int(os.environ.get("SHAKIRA_MAX_MEMORIES_PER_USER", "200"))
 MAX_MEMORY_CHARS = int(os.environ.get("SHAKIRA_MAX_MEMORY_ENTRY_CHARS", "4000"))
 MAX_FILES = int(os.environ.get("SHAKIRA_MAX_FILES_PER_USER", "50"))
@@ -99,7 +150,7 @@ class InboundContent:
 
 
 class UserMemoryStore:
-    """Armazena memorias de texto e arquivos em /data/shakira_users/{phone}/."""
+    """Armazena memorias de texto e arquivos em {USER_DATA_ROOT}/{phone}/."""
 
     def __init__(self, phone: str) -> None:
         self.phone = sanitize_phone(phone)

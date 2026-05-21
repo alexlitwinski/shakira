@@ -96,6 +96,7 @@ class AppSettings:
     frigate_url: str
     frigate_cameras_config_path: str
     alerts_config_path: str
+    user_data_path: str
     shakira_api_token: str
     vault_master_key: str
     apify_api_token: str
@@ -135,6 +136,9 @@ class AppSettings:
         alerts_path = _opts_str(opts, "alerts_config_path", "SHAKIRA_ALERTS_PATH")
         if not alerts_path:
             alerts_path = "/homeassistant/shakira_alerts.yaml"
+        user_data_path = _opts_str(opts, "user_data_path", "SHAKIRA_USER_DATA_PATH")
+        if not user_data_path:
+            user_data_path = "/homeassistant/shakira_users"
 
         ha_states_cache_sec = max(
             0, _opts_int(opts, "ha_states_cache_sec", 30, env_fallback="SHAKIRA_HA_STATES_CACHE_SEC")
@@ -158,6 +162,7 @@ class AppSettings:
             frigate_url=_opts_str(opts, "frigate_url", "FRIGATE_URL").rstrip("/"),
             frigate_cameras_config_path=cameras_path,
             alerts_config_path=alerts_path,
+            user_data_path=user_data_path,
             shakira_api_token=_opts_str(opts, "shakira_api_token", "SHAKIRA_API_TOKEN"),
             vault_master_key=_opts_str(opts, "vault_master_key", "SHAKIRA_VAULT_MASTER_KEY"),
             apify_api_token=_opts_str(opts, "apify_api_token", "APIFY_API_TOKEN"),

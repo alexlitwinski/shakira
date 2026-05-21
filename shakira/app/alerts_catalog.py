@@ -141,6 +141,7 @@ class RainDispatchConfig:
     enabled: bool = False
     cooldown_seconds: int = DEFAULT_RAIN_COOLDOWN_SECONDS
     heavy_rain_mm: float = DEFAULT_HEAVY_RAIN_MM
+    format_message_with_gemini: bool = True
     notify: AlertNotifyConfig = field(default_factory=AlertNotifyConfig)
     rain_entity: str = DEFAULT_RAIN_ENTITY
     volume_entity: str = DEFAULT_RAIN_VOLUME_ENTITY
@@ -364,6 +365,7 @@ class AlertsCatalog:
             enabled=bool(block.get("enabled", False)),
             cooldown_seconds=cooldown,
             heavy_rain_mm=heavy,
+            format_message_with_gemini=bool(block.get("format_message_with_gemini", True)),
             notify=AlertNotifyConfig(phones=cls._parse_notify_phones(block.get("notify"))),
             rain_entity=ent_map.get("rain", DEFAULT_RAIN_ENTITY),
             volume_entity=ent_map.get("volume_15m", DEFAULT_RAIN_VOLUME_ENTITY),
@@ -448,6 +450,7 @@ class AlertsCatalog:
                     "cooldown",
                     "cooldown_seconds",
                     "heavy_rain_mm",
+                    "format_message_with_gemini",
                     "notify",
                     "entities",
                 }
@@ -458,6 +461,11 @@ class AlertsCatalog:
                 heavy = rain_block.get("heavy_rain_mm")
                 if heavy is not None and not isinstance(heavy, (int, float)):
                     errors.append("rain_dispatch.heavy_rain_mm deve ser numero.")
+                fmt_gemini = rain_block.get("format_message_with_gemini")
+                if fmt_gemini is not None and not isinstance(fmt_gemini, bool):
+                    errors.append(
+                        "rain_dispatch.format_message_with_gemini deve ser true ou false."
+                    )
                 for cooldown_key in ("cooldown", "cooldown_seconds"):
                     if cooldown_key in rain_block:
                         parsed = parse_interval_seconds(rain_block[cooldown_key])

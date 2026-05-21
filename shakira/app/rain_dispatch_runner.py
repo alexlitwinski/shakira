@@ -13,6 +13,14 @@ from app.config import AppSettings
 from app.devices_catalog import DevicesCatalog
 from app.evolution import EvolutionClient
 from app.homeassistant import HomeAssistantClient
+from app.rain_message import (
+    DEFAULT_PORTA_VIDRO_LABEL,
+    DEFAULT_TOLDO_LABEL,
+    RainStartStatus,
+    build_rain_started_message,
+    generate_rain_started_whatsapp,
+    short_entity_label,
+)
 from app.whatsapp_phones import (
     fetch_permitted_phones_raw,
     normalize_phone_digits,
@@ -21,9 +29,6 @@ from app.whatsapp_phones import (
 from app.whatsapp_outbound import WhatsAppSendError, send_whatsapp_text
 
 log = logging.getLogger(__name__)
-
-DEFAULT_PORTA_VIDRO_LABEL = "Porta de vidro da cozinha gourmet"
-DEFAULT_TOLDO_LABEL = "Toldo da área gourmet"
 
 POLL_TICK_SECONDS = 60
 STATE_ON = "on"
@@ -78,44 +83,6 @@ def rain_started_transition(
     if prev_rain_on is None:
         return False
     return not prev_rain_on and rain_on
-
-
-@dataclass(frozen=True)
-class RainStartStatus:
-    open_windows: list[str]
-    porta_vidro_open: bool
-    toldo_closed: bool
-    porta_label: str = DEFAULT_PORTA_VIDRO_LABEL
-    toldo_label: str = DEFAULT_TOLDO_LABEL
-
-
-def build_rain_started_message(status: RainStartStatus) -> str:
-    """Resumo ao iniciar chuva: alertas e confirmacao quando tudo estiver ok."""
-    lines = ["Começou a chover.", "", "Situação:"]
-
-    if status.open_windows:
-        lines.append("• Janelas abertas:")
-        for label in status.open_windows:
-            lines.append(f"  - {label}")
-        lines.append("  Feche as janelas.")
-    else:
-        lines.append("• Janelas: nenhuma aberta.")
-
-    if status.toldo_closed:
-        lines.append(
-            f"• {status.toldo_label}: fechado — abra o toldo para proteger o espaço."
-        )
-    else:
-        lines.append(f"• {status.toldo_label}: aberto (recolhido).")
-
-    if status.porta_vidro_open:
-        lines.append(
-            f"• {status.porta_label}: aberta — considere fechar."
-        )
-    else:
-        lines.append(f"• {status.porta_label}: fechada.")
-
-    return "\n".join(lines)
 
 
 @dataclass
@@ -270,7 +237,7 @@ class RainDispatchRunner:
             )
             await self._notify(
                 "rain_started",
-                build_rain_started_message(status),
+                await self._compose_rain_started_message(status),
             )
 
         if prev_volume > 0 and volume_mm == 0:
@@ -330,7 +297,7 @@ class RainDispatchRunner:
         if self.devices:
             ent = self.devices.get_entity(entity_id)
             if ent and ent.description.strip():
-                return ent.description.strip()
+                return short_entity_label(ent.description, default)
         return default
 
     async def _fetch_open_window_labels(self) -> list[str]:
@@ -339,8 +306,25 @@ class RainDispatchRunner:
         open_labels: list[str] = []
         for entity_id, label in self.devices.entities_by_opening_kind("window"):
             if window_is_open(await self._get_state(entity_id)):
-                open_labels.append(label)
+                open_labels.append(short_entity_label(label, label))
         return open_labels
+
+    async def _compose_rain_started_message(self, status: RainStartStatus) -> str:
+        if self.config.format_message_with_gemini:
+            api_key = (self.settings.gemini_api_key or "").strip()
+            if api_key:
+                try:
+                    text = await asyncio.to_thread(
+                        generate_rain_started_whatsapp,
+                        api_key,
+                        status,
+                    )
+                    if text:
+                        log.info("Chuva: mensagem gerada pelo Gemini (%s chars)", len(text))
+                        return text
+                except Exception:
+                    log.exception("Chuva: falha ao gerar mensagem com Gemini")
+        return build_rain_started_message(status)
 
     async def _gather_rain_start_status(
         self,
