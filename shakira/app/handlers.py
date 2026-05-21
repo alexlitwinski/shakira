@@ -126,7 +126,10 @@ from app.portao_social_routine import (
     try_handle_portao_servico_inbound,
     try_handle_portao_social_inbound,
 )
+from app.audio_transcription import resolve_inbound_audio_as_text
 from app.pending_media import (
+    is_inbound_audio,
+    is_storable_file_media,
     build_media_choice_prompt,
     build_pending_clarification,
     build_pending_collecting_wait,
@@ -473,7 +476,10 @@ def extract_inbound_content(record: dict[str, Any]) -> InboundContent | None:
         return None
 
     if not text and media:
-        text = "[usuario enviou um arquivo]"
+        if is_inbound_audio(media.mediatype, media.mimetype):
+            text = ""
+        else:
+            text = "[usuario enviou um arquivo]"
 
     return InboundContent(phone=digits, text=text, media=media, record=record)
 
@@ -1485,6 +1491,12 @@ async def handle_ambiguous_inbound_media(
     """
     if not inbound.media:
         return None
+    if not is_storable_file_media(inbound.media.mediatype, inbound.media.mimetype):
+        log.debug(
+            "Midia tipo=%s ignorada no fluxo de arquivo pessoal (ex.: audio)",
+            inbound.media.mediatype,
+        )
+        return None
     if media_has_explicit_intent(inbound):
         return None
 
@@ -1563,6 +1575,8 @@ async def route_explicit_inbound_media(
 ) -> str | None:
     """Executa pedido explicito na legenda/texto (guardar ou PhotoPrism)."""
     if not inbound.media or not media_has_explicit_intent(inbound):
+        return None
+    if not is_storable_file_media(inbound.media.mediatype, inbound.media.mimetype):
         return None
 
     downloaded = await download_inbound_media_bytes(
@@ -2896,16 +2910,60 @@ async def handle_evolution_payload(
             instance=send_instance,
             phone=phone_norm,
         ):
-            if not inbound.media and not is_placeholder_user_text(user_text or ""):
-                messenger: StepMessenger | None = None
+            messenger: StepMessenger | None = None
+            if evo_base and evo_key and send_instance:
+                messenger = StepMessenger(
+                    evo=evo,
+                    evo_base=evo_base,
+                    evo_key=evo_key,
+                    instance=send_instance,
+                    phone=phone_norm,
+                )
+
+            inbound_resolved, audio_error = await resolve_inbound_audio_as_text(
+                inbound,
+                settings=settings,
+                evo=evo,
+                instance=send_instance,
+            )
+            if audio_error:
+                reply_text = _truncate_whatsapp(polish_user_message(audio_error))
                 if evo_base and evo_key and send_instance:
-                    messenger = StepMessenger(
-                        evo=evo,
-                        evo_base=evo_base,
-                        evo_key=evo_key,
+                    await pulse_whatsapp_typing()
+                    await evo.send_text(
+                        base_url=evo_base,
+                        api_key=evo_key,
                         instance=send_instance,
-                        phone=phone_norm,
+                        number=phone_norm,
+                        text=reply_text,
                     )
+                    record_exchange(phone_norm, user_text or "[audio]", reply_text)
+                continue
+            if inbound_resolved is not None:
+                inbound = inbound_resolved
+                user_text = inbound.text
+            elif inbound.media and is_inbound_audio(
+                inbound.media.mediatype, inbound.media.mimetype
+            ):
+                reply_text = _truncate_whatsapp(
+                    polish_user_message(
+                        "Nao trato mensagens de voz como arquivo. "
+                        "Verifique a chave Gemini ou envie em texto."
+                    )
+                )
+                if evo_base and evo_key and send_instance:
+                    await pulse_whatsapp_typing()
+                    await evo.send_text(
+                        base_url=evo_base,
+                        api_key=evo_key,
+                        instance=send_instance,
+                        number=phone_norm,
+                        text=reply_text,
+                    )
+                    record_exchange(phone_norm, "[audio]", reply_text)
+                continue
+
+            if not inbound.media and not is_placeholder_user_text(user_text or ""):
                 pending_media_reply = await try_handle_pending_media_reply(
                     phone_norm,
                     user_text or "",
@@ -2939,6 +2997,16 @@ async def handle_evolution_payload(
                     continue
 
             if inbound.media:
+                if not is_storable_file_media(
+                    inbound.media.mediatype, inbound.media.mimetype
+                ):
+                    log.warning(
+                        "Midia nao-arquivavel no fluxo de ficheiros phone=%s tipo=%s",
+                        phone_norm,
+                        inbound.media.mediatype,
+                    )
+                    continue
+
                 log.info(
                     "Midia recebida phone=%s tipo=%s arquivo=%s",
                     phone_norm,

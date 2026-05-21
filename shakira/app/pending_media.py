@@ -116,6 +116,19 @@ _DESTINATION_PREFIX_RE = re.compile(
 )
 
 
+def is_inbound_audio(mediatype: str, mime_type: str = "") -> bool:
+    """Nota de voz / audio WhatsApp — nao deve ir para registro pessoal nem PhotoPrism."""
+    if (mediatype or "").strip().lower() == "audio":
+        return True
+    mime = (mime_type or "").split(";", 1)[0].strip().lower()
+    return mime.startswith("audio/")
+
+
+def is_storable_file_media(mediatype: str, mime_type: str = "") -> bool:
+    """Midia que pode ser guardada como arquivo (exclui audio)."""
+    return not is_inbound_audio(mediatype, mime_type)
+
+
 def is_placeholder_user_text(text: str) -> bool:
     return text.strip().startswith(_PLACEHOLDER_PREFIX)
 

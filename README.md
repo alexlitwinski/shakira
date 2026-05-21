@@ -17,6 +17,8 @@ Os ficheiros do add-on estão em [`shakira/`](shakira/). Na loja: **`https://git
 
 O **catálogo de dispositivos** fica em **cache de contexto Gemini** (não é reenviado a cada WhatsApp). A cada mensagem só vão os **estados atuais** + o texto do utilizador.
 
+**Mensagens de voz (áudio):** o add-on baixa o áudio do WhatsApp, transcreve com Gemini e trata o texto como uma mensagem escrita normal (comandos, memória, aniversários, etc.). Requer `gemini_api_key` configurada. Para desativar: variável de ambiente `SHAKIRA_AUDIO_TRANSCRIPTION_ENABLED=false`.
+
 ---
 
 ## Memória por utilizador (WhatsApp)
