@@ -10,6 +10,7 @@ from typing import Any
 
 import google.generativeai as genai
 
+from app.gemini_parse import parse_gemini_response_text, wrap_decisions_for_handler
 from app.prompts import SYSTEM_INSTRUCTION
 from app.scheduled_response_prompts import SCHEDULED_REPLY_SYSTEM, build_scheduled_reply_prompt
 
@@ -132,20 +133,24 @@ Mensagem atual do usuario:
             parts = response.candidates[0].content.parts
             text = "".join(getattr(p, "text", "") for p in parts)
 
-        raw = _strip_code_fence(text)
-        try:
-            data = json.loads(raw)
-            if not isinstance(data, dict):
-                raise ValueError("not a dict")
-            action = str(data.get("action") or "reply")
-            log.info("Gemini JSON action=%s entity_id=%s domain=%s service=%s", action, data.get("entity_id"), data.get("domain"), data.get("service"))
-            return data
-        except (json.JSONDecodeError, ValueError):
-            log.warning("Resposta Gemini nao-JSON: %s", raw[:300])
-            return {
-                "action": "reply",
-                "response": raw[:2000] if raw else "Sem resposta do modelo.",
-            }
+        decisions = parse_gemini_response_text(text)
+        wrapped = wrap_decisions_for_handler(decisions)
+        action = str(wrapped.get("action") or "reply")
+        if action == "_batch":
+            batch = wrapped.get("batch") or []
+            actions = [
+                str(d.get("action") or "?") for d in batch if isinstance(d, dict)
+            ]
+            log.info("Gemini JSON batch count=%s actions=%s", len(batch), actions[:12])
+        else:
+            log.info(
+                "Gemini JSON action=%s entity_id=%s domain=%s service=%s",
+                action,
+                wrapped.get("entity_id"),
+                wrapped.get("domain"),
+                wrapped.get("service"),
+            )
+        return wrapped
 
     def generate_scheduled_reply(
         self,

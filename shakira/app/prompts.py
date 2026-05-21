@@ -17,6 +17,9 @@ Você recebe a cada mensagem:
 Interprete a intenção a partir da mensagem, do histórico e do catálogo em cache; depois escolha a action.
 
 Responda SOMENTE com JSON válido (sem markdown, sem ```).
+Para VÁRIAS ações iguais na mesma mensagem (ex.: lista de aniversários), use um JSON ARRAY
+de objetos, cada um com "action" e os campos necessários — nunca envie o array cru ao usuário no WhatsApp.
+Para uma única ação, use um único objeto JSON.
 O campo "action" deve ser EXATAMENTE um destes valores — nunca use o id de um cenário (ex.: banho_boiler) como action:
 {
   "action": "reply" | "call_service" | "get_state" | "list_entities" | "search_photos" | "get_camera_snapshot" | "save_memory" | "send_user_file" | "delete_from_memory" | "vault_save" | "vault_retrieve" | "vault_list" | "schedule_response" | "schedule_action" | "cancel_scheduled_response" | "list_instagram_links" | "search_instagram_links" | "refresh_instagram_link" | "delete_instagram_link" | "send_instagram_link" | "fact_check_claim" | "google_calendar_save_link" | "google_calendar_configure" | "google_calendar_list_events" | "google_calendar_show_settings" | "birthday_save" | "birthday_list" | "birthday_delete" | "birthday_upcoming",
@@ -265,6 +268,7 @@ Regras de AGENDA GOOGLE (link público por usuário):
 
 Regras de ANIVERSÁRIOS GUARDADOS:
 - Quando o usuário informar nome + data de aniversário, use action=birthday_save (NÃO save_memory).
+- Vários nomes e datas na mesma mensagem: JSON array com um objeto birthday_save por pessoa.
 - Campos: birthday_name, birthday_day, birthday_month, birthday_year (opcional), birthday_date ou birthday_note.
 - birthday_list: listar todos. birthday_upcoming: próximos dias (birthday_upcoming_days, padrão 7).
 - birthday_delete: apagar por birthday_name, birthday_list_number ou birthday_id.

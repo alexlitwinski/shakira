@@ -14,4 +14,7 @@ Regras de ANIVERSARIOS GUARDADOS:
 - O bloco "ANIVERSARIOS GUARDADOS" no contexto lista nome, data e id interno — nunca mostre id ao usuario.
 - Interprete a intencao livremente ("quem faz anos essa semana?", "lista aniversarios").
 - Se faltar nome ou data, action=reply pedindo o que falta.
+- Varios aniversarios na MESMA mensagem: responda com JSON ARRAY de objetos birthday_save
+  (um por pessoa), NAO envie o array como texto em "response" ao usuario.
+  Ex.: [{"action":"birthday_save","birthday_name":"Ana",...},{"action":"birthday_save",...}]
 """

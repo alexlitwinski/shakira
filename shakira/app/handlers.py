@@ -89,6 +89,7 @@ from app.google_calendar_routine import try_handle_google_calendar_link_inbound
 from app.google_calendar_overrides import try_google_calendar_decision_override
 from app.birthday_prompts import BIRTHDAY_ACTIONS_INSTRUCTION
 from app.birthday_actions import (
+    execute_birthday_save_batch,
     handle_birthday_delete,
     handle_birthday_list,
     handle_birthday_save,
@@ -763,11 +764,24 @@ def _messages_are_redundant(a: str, b: str) -> bool:
     return na in nb or nb in na
 
 
+def split_gemini_decisions(decision: dict[str, Any]) -> list[dict[str, Any]]:
+    """Expande decisao com action=_batch (varias acoes Gemini numa mensagem)."""
+    if _normalize_action_name(decision.get("action")) == "_batch":
+        batch = decision.get("batch")
+        if isinstance(batch, list):
+            out = [row for row in batch if isinstance(row, dict) and row.get("action")]
+            if out:
+                return out
+    return [decision]
+
+
 def normalize_gemini_action(
     decision: dict[str, Any], catalog: DevicesCatalog
 ) -> tuple[dict[str, Any], str | None]:
     """Corrige action invalida (ex.: id de cenario). Retorna (decision, scenario_id para retry)."""
     action = _normalize_action_name(decision.get("action"))
+    if action == "_batch":
+        return decision, None
     if action in VALID_GEMINI_ACTIONS:
         if action != str(decision.get("action") or "reply").strip().lower():
             fixed = dict(decision)
@@ -1041,6 +1055,16 @@ def _build_catalog_fallback_text(
 
 
 def _decision_is_complete(decision: dict[str, Any]) -> bool:
+    if _normalize_action_name(decision.get("action")) == "_batch":
+        batch = decision.get("batch")
+        if not isinstance(batch, list) or not batch:
+            return False
+        return all(
+            _normalize_action_name(row.get("action")) in VALID_GEMINI_ACTIONS
+            for row in batch
+            if isinstance(row, dict)
+        )
+
     action = _normalize_action_name(decision.get("action"))
     reply = str(decision.get("response") or "").strip()
     if action in _SINGLE_USER_MESSAGE_ACTIONS and reply:
@@ -2099,6 +2123,64 @@ def handle_cancel_scheduled_response(decision: dict[str, Any], phone: str) -> st
         return confirm
     desc = target.label or target.context[:60]
     return f"Cancelado o agendamento: {desc}."
+
+
+async def execute_decision_batch(
+    decisions: list[dict[str, Any]],
+    *,
+    phone: str,
+    messenger: StepMessenger | None = None,
+    ha: HomeAssistantClient | None = None,
+    catalog: DevicesCatalog | None = None,
+    user_text: str = "",
+    entities_context_used: bool = True,
+    message_record: dict[str, Any] | None = None,
+    evo: EvolutionClient | None = None,
+    evo_base: str = "",
+    evo_key: str = "",
+    instance: str = "",
+    settings: AppSettings | None = None,
+) -> str:
+    """Executa varias decisoes Gemini da mesma mensagem (ex.: lista de aniversarios)."""
+    if not decisions:
+        return "Nao entendi o pedido."
+
+    actions = {_normalize_action_name(d.get("action")) for d in decisions}
+    if actions == {"birthday_save"}:
+        text = execute_birthday_save_batch(decisions, phone)
+        out = polish_user_message(text) or "Feito."
+        if messenger:
+            await messenger.step(out, final=True)
+            return ""
+        return out
+
+    parts: list[str] = []
+    for item in decisions:
+        if ha is None or catalog is None:
+            break
+        part = await execute_decision(
+            item,
+            ha=ha,
+            catalog=catalog,
+            phone=phone,
+            user_text=user_text,
+            entities_context_used=entities_context_used,
+            messenger=None,
+            message_record=message_record,
+            evo=evo,
+            evo_base=evo_base,
+            evo_key=evo_key,
+            instance=instance,
+            settings=settings,
+        )
+        if part and part.strip():
+            parts.append(part.strip())
+
+    out = polish_user_message("\n\n".join(parts)) or "Feito."
+    if messenger:
+        await messenger.step(out, final=True)
+        return ""
+    return out
 
 
 async def execute_decision(
@@ -3356,6 +3438,37 @@ async def _process_inbound_message(
             states_map=states_map,
         )
 
+        decision_list = split_gemini_decisions(decision)
+        if len(decision_list) > 1:
+            _log_gemini_decision(phone_norm, decision)
+            reply_text = await execute_decision_batch(
+                decision_list,
+                phone=phone_norm,
+                messenger=messenger,
+                ha=ha,
+                catalog=catalog,
+                user_text=user_text or "",
+                message_record=inbound.record,
+                evo=evo,
+                evo_base=evo_base,
+                evo_key=evo_key,
+                instance=send_instance,
+                settings=settings,
+            )
+            await _finish_whatsapp_exchange(
+                phone=phone_norm,
+                user_text=user_text or "",
+                messenger=messenger,
+                reply_text=reply_text,
+                evo=evo,
+                evo_base=evo_base,
+                evo_key=evo_key,
+                instance=send_instance,
+            )
+            _log_message_timings(timings, messenger)
+            return
+
+        decision = decision_list[0]
         _log_gemini_decision(phone_norm, decision)
 
         action = _normalize_action_name(decision.get("action"))

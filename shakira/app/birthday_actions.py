@@ -187,6 +187,43 @@ def format_upcoming_birthdays(phone: str, days: int = 7) -> str:
     return "\n".join(lines)
 
 
+def execute_birthday_save_batch(decisions: list[dict[str, Any]], phone: str) -> str:
+    """Guarda varios aniversarios e devolve um unico texto para WhatsApp."""
+    saved: list[str] = []
+    errors: list[str] = []
+    for decision in decisions:
+        reply = handle_birthday_save(decision, phone)
+        name = str(decision.get("birthday_name") or "").strip()
+        low = reply.lower()
+        if any(w in low for w in ("salvo", "guardado", "registrado")):
+            if name:
+                day = decision.get("birthday_day")
+                month = decision.get("birthday_month")
+                if isinstance(day, int) and isinstance(month, int):
+                    saved.append(f"{name} ({day:02d}/{month:02d})")
+                else:
+                    saved.append(name)
+            else:
+                saved.append(reply.strip()[:80])
+        else:
+            errors.append(reply)
+
+    if errors and not saved:
+        return errors[0]
+
+    lines: list[str] = []
+    if saved:
+        lines.append(
+            f"Guardei {len(saved)} aniversario(s):"
+            if len(saved) != 1
+            else "Aniversario guardado:"
+        )
+        lines.extend(f"- {line}" for line in saved)
+    for err in errors:
+        lines.append(err)
+    return "\n".join(lines)
+
+
 def handle_birthday_save(decision: dict[str, Any], phone: str) -> str:
     parsed = parse_birthday_from_decision(decision)
     if isinstance(parsed, str):

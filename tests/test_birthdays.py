@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import date
 
 from app.birthday_actions import (
+    execute_birthday_save_batch,
     handle_birthday_delete,
     handle_birthday_list,
     handle_birthday_save,
@@ -43,6 +44,22 @@ def test_save_and_list(monkeypatch, tmp_path):
     listed = handle_birthday_list(phone)
     assert "Maria" in listed
     assert "15/03" in listed
+
+
+def test_batch_save(monkeypatch, tmp_path):
+    monkeypatch.setenv("SHAKIRA_USER_DATA_ROOT", str(tmp_path))
+    phone = "5511222222222"
+    decisions = [
+        {"action": "birthday_save", "birthday_name": "Nico", "birthday_day": 3, "birthday_month": 1},
+        {"action": "birthday_save", "birthday_name": "Belinha", "birthday_day": 17, "birthday_month": 4},
+    ]
+    reply = execute_birthday_save_batch(decisions, phone)
+    assert "2 aniversario" in reply.lower()
+    assert "Nico" in reply
+    assert "Belinha" in reply
+    listed = handle_birthday_list(phone)
+    assert "Nico" in listed
+    assert "Belinha" in listed
 
 
 def test_duplicate_rejected(monkeypatch, tmp_path):
