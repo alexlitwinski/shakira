@@ -190,7 +190,12 @@ def format_upload_user_message(result: UploadResult, *, album: str = "") -> str:
             else:
                 noun = f"{count} fotos enviadas"
         elif result.has_video:
-            noun = "Vídeo enviado"
+            if album.strip():
+                return (
+                    "Conferi e o vídeo foi salvo corretamente na galeria da casa"
+                    f", no álbum *{album.strip()}*."
+                )
+            return "Conferi e o vídeo foi salvo corretamente na galeria da casa."
         else:
             noun = "Foto enviada"
         return f"{noun} ao PhotoPrism{album_bit}."

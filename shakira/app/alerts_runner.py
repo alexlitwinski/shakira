@@ -30,12 +30,7 @@ from app.cameras_catalog import CamerasCatalog
 from app.config import AppSettings
 from app.evolution import EvolutionClient
 from app.ha_websocket import HaWebSocketListener
-from app.whatsapp_phones import (
-    ENTITY_PERMITTED,
-    fetch_permitted_phones_raw,
-    normalize_phone_digits,
-    parse_allowed_numbers,
-)
+from app.alert_notify import permitted_entity_hint, resolve_notify_phones
 from app.homeassistant import HomeAssistantClient
 from app.state_conditions import state_matches
 from app.whatsapp_outbound import WhatsAppSendError, send_whatsapp_text
@@ -230,16 +225,11 @@ class AlertsRunner:
         return self._runtimes[alert_id]
 
     async def _resolve_phones(self, alert: AlertConfig) -> list[str]:
-        configured = [
-            normalize_phone_digits(p)
-            for p in alert.notify.phones
-            if normalize_phone_digits(p)
-        ]
-        if configured:
-            return configured
-
-        raw = await fetch_permitted_phones_raw(self.ha)
-        return sorted(parse_allowed_numbers(raw))
+        return await resolve_notify_phones(
+            self.ha,
+            phones=alert.notify.phones,
+            default_phones=self.catalog.default_notify.phones,
+        )
 
     def _resolve_alert_camera_ids(self, alert: AlertConfig) -> list[str]:
         group = alert.camera_group.strip()
@@ -542,9 +532,9 @@ class AlertsRunner:
         phones = await self._resolve_phones(alert)
         if not phones:
             log.warning(
-                "Alerta %s: nenhum destino (configure notify.phones ou %s)",
+                "Alerta %s: nenhum destino (configure default_notify/notify.phones ou %s)",
                 alert.id,
-                ENTITY_PERMITTED,
+                permitted_entity_hint(),
             )
             return
 

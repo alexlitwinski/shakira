@@ -84,6 +84,11 @@ Copie o exemplo [`shakira/shakira_alerts.example.yaml`](shakira/shakira_alerts.e
 O add-on verifica cada regra no intervalo configurado. Se o estado da entidade coincidir com `when_state`, envia a mensagem via WhatsApp (Evolution API).
 
 ```yaml
+default_notify:
+  phones:
+    - "5531991119016"
+    - "553198946418"
+
 alerts:
   - id: cameras_paradas
     enabled: true
@@ -93,12 +98,13 @@ alerts:
     message: "Atenção: existem câmeras do sistema com problema."
     cooldown: 1h                # evita repetir o aviso enquanto continuar "on"
     notify:
-      phones: []                # vazio = números em input_text.whatsapp_bot_permitidos
+      phones: []                # vazio = usa default_notify (ou whatsapp_bot_permitidos)
 ```
 
+- **default_notify.phones** — destinos padrão para alertas periódicos, `alarm_dispatch` e `rain_dispatch` (união com `notify.phones` de cada bloco).
 - **check_interval** — periodicidade da verificação (`30s`, `5m`, `1h`; mínimo 60s).
 - **cooldown** — tempo mínimo entre avisos da mesma regra enquanto a condição permanece ativa.
-- **notify.phones** — lista opcional de destinos (DDI+DDD+número, só dígitos).
+- **notify.phones** — destinos extra por regra (DDI+DDD+número, só dígitos).
 
 Também é possível editar o arquivo na aba **shakira_alerts.yaml** do painel Ingress do add-on.
 

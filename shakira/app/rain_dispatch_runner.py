@@ -21,11 +21,7 @@ from app.rain_message import (
     generate_rain_started_whatsapp,
     short_entity_label,
 )
-from app.whatsapp_phones import (
-    fetch_permitted_phones_raw,
-    normalize_phone_digits,
-    parse_allowed_numbers,
-)
+from app.alert_notify import resolve_notify_phones
 from app.whatsapp_outbound import WhatsAppSendError, send_whatsapp_text
 
 log = logging.getLogger(__name__)
@@ -91,6 +87,7 @@ class RainDispatchRunner:
     ha: HomeAssistantClient
     evo: EvolutionClient
     config: RainDispatchConfig
+    default_notify_phones: list[str] = field(default_factory=list)
     devices: DevicesCatalog | None = None
     _poll_task: asyncio.Task[None] | None = None
     _poll_stop: asyncio.Event = field(default_factory=asyncio.Event)
@@ -352,15 +349,11 @@ class RainDispatchRunner:
         return str(data.get("state", "")).strip()
 
     async def _resolve_phones(self) -> list[str]:
-        configured = [
-            normalize_phone_digits(p)
-            for p in self.config.notify.phones
-            if normalize_phone_digits(p)
-        ]
-        if configured:
-            return configured
-        raw = await fetch_permitted_phones_raw(self.ha)
-        return sorted(parse_allowed_numbers(raw))
+        return await resolve_notify_phones(
+            self.ha,
+            phones=self.config.notify.phones,
+            default_phones=self.default_notify_phones,
+        )
 
     def _cooldown_ok(self, key: str) -> bool:
         now = time.monotonic()

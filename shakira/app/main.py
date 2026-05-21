@@ -124,6 +124,7 @@ async def lifespan(app: FastAPI):
         evo=app.state.evo,
         cameras=cameras,
         config=alerts.alarm_dispatch,
+        default_notify_phones=list(alerts.default_notify.phones),
         devices=catalog,
         http=client,
     )
@@ -133,6 +134,7 @@ async def lifespan(app: FastAPI):
         ha=app.state.ha,
         evo=app.state.evo,
         config=alerts.rain_dispatch,
+        default_notify_phones=list(alerts.default_notify.phones),
         devices=catalog,
     )
     app.state.rain_runner = rain_runner
@@ -429,7 +431,9 @@ async def put_alerts_yaml(request: Request, body: AlertsYamlBody) -> dict[str, A
         cameras=request.app.state.cameras,
         devices=request.app.state.catalog,
     )
+    alarm_runner.default_notify_phones = list(catalog.default_notify.phones)
     rain_runner.reload(catalog.rain_dispatch, devices=request.app.state.catalog)
+    rain_runner.default_notify_phones = list(catalog.default_notify.phones)
     runner.reload(catalog)
     runner.attach_alarm_dispatch(alarm_runner)
     runner.attach_rain_dispatch(rain_runner)

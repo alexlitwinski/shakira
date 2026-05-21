@@ -20,7 +20,9 @@ FALLBACK_ALERTS_PATHS = (
     "/config/shakira_alerts.yaml",
 )
 
-ALLOWED_ROOT_KEYS = frozenset({"alerts", "alarm_dispatch", "rain_dispatch"})
+ALLOWED_ROOT_KEYS = frozenset(
+    {"alerts", "alarm_dispatch", "rain_dispatch", "default_notify"}
+)
 ALERT_ID_RE = re.compile(r"^[a-z][a-z0-9_]+$", re.IGNORECASE)
 ENTITY_ID_RE = re.compile(r"^[a-z][a-z0-9_]+\.[a-z0-9_]+$", re.IGNORECASE)
 INTERVAL_RE = re.compile(r"^(\d+)\s*([smhd])?$", re.IGNORECASE)
@@ -182,6 +184,7 @@ class AlertsCatalog:
     alerts: list[AlertConfig] = field(default_factory=list)
     alarm_dispatch: AlarmDispatchConfig = field(default_factory=AlarmDispatchConfig)
     rain_dispatch: RainDispatchConfig = field(default_factory=RainDispatchConfig)
+    default_notify: AlertNotifyConfig = field(default_factory=AlertNotifyConfig)
     source_path: Path | None = None
     content_hash: str = ""
 
@@ -220,23 +223,33 @@ class AlertsCatalog:
         alerts = cls._parse_data(data)
         alarm_dispatch = cls._parse_alarm_dispatch(data)
         rain_dispatch = cls._parse_rain_dispatch(data)
+        default_notify = cls._parse_default_notify(data)
         enabled = sum(1 for a in alerts if a.enabled)
         if source_path:
             log.info(
-                "Alertas carregados: %s (%s regra(s), %s ativa(s), alarm_dispatch=%s, rain_dispatch=%s)",
+                "Alertas carregados: %s (%s regra(s), %s ativa(s), alarm_dispatch=%s, "
+                "rain_dispatch=%s, default_notify=%s telefone(s))",
                 source_path,
                 len(alerts),
                 enabled,
                 alarm_dispatch.enabled,
                 rain_dispatch.enabled,
+                len(default_notify.phones),
             )
         return cls(
             alerts=alerts,
             alarm_dispatch=alarm_dispatch,
             rain_dispatch=rain_dispatch,
+            default_notify=default_notify,
             source_path=source_path,
             content_hash=h,
         )
+
+    @classmethod
+    def _parse_default_notify(cls, data: Any) -> AlertNotifyConfig:
+        if not isinstance(data, dict):
+            return AlertNotifyConfig()
+        return AlertNotifyConfig(phones=cls._parse_notify_phones(data.get("default_notify")))
 
     @staticmethod
     def _parse_row(row: dict[str, Any]) -> AlertConfig | None:
@@ -400,8 +413,18 @@ class AlertsCatalog:
 
         for key in sorted(set(data.keys()) - ALLOWED_ROOT_KEYS):
             errors.append(
-                f"Chave invalida na raiz: '{key}' (permitido: alerts, alarm_dispatch, rain_dispatch)."
+                f"Chave invalida na raiz: '{key}' "
+                "(permitido: alerts, alarm_dispatch, rain_dispatch, default_notify)."
             )
+
+        default_notify = data.get("default_notify")
+        if default_notify is not None:
+            if not isinstance(default_notify, dict):
+                errors.append("default_notify deve ser um mapa.")
+            elif default_notify.get("phones") is not None and not isinstance(
+                default_notify.get("phones"), list
+            ):
+                errors.append("default_notify.phones deve ser uma lista.")
 
         alarm_block = data.get("alarm_dispatch")
         if alarm_block is not None:

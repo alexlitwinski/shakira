@@ -21,11 +21,7 @@ from app.config import AppSettings
 from app.devices_catalog import DevicesCatalog
 from app.evolution import EvolutionClient
 from app.homeassistant import HomeAssistantClient
-from app.whatsapp_phones import (
-    fetch_permitted_phones_raw,
-    normalize_phone_digits,
-    parse_allowed_numbers,
-)
+from app.alert_notify import resolve_notify_phones
 from app.whatsapp_outbound import WhatsAppSendError, send_whatsapp_text
 
 log = logging.getLogger(__name__)
@@ -64,6 +60,7 @@ class AlarmDispatchRunner:
     evo: EvolutionClient
     cameras: CamerasCatalog
     config: AlarmDispatchConfig
+    default_notify_phones: list[str] = field(default_factory=list)
     devices: DevicesCatalog | None = None
     http: httpx.AsyncClient | None = None
     _debounce_task: asyncio.Task[None] | None = None
@@ -119,15 +116,11 @@ class AlarmDispatchRunner:
         return entity_id
 
     async def _resolve_phones(self) -> list[str]:
-        configured = [
-            normalize_phone_digits(p)
-            for p in self.config.notify.phones
-            if normalize_phone_digits(p)
-        ]
-        if configured:
-            return configured
-        raw = await fetch_permitted_phones_raw(self.ha)
-        return sorted(parse_allowed_numbers(raw))
+        return await resolve_notify_phones(
+            self.ha,
+            phones=self.config.notify.phones,
+            default_phones=self.default_notify_phones,
+        )
 
     async def _fetch_triggered_partitions(self) -> list[tuple[str, str]]:
         triggered: list[tuple[str, str]] = []
