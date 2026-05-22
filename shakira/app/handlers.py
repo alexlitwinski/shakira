@@ -3203,7 +3203,7 @@ async def handle_evolution_payload(
                     instance=send_instance_early,
                     phone=phone_norm,
                 )
-                await handle_interfone_list(
+                ok = await handle_interfone_list(
                     {"action": "interfone_list", "interfone_list_limit": 5},
                     settings=settings,
                     evo=evo,
@@ -3216,7 +3216,7 @@ async def handle_evolution_payload(
                     phone=phone_norm,
                     user_text=user_text or "",
                     messenger=messenger_if,
-                    reply_text="Histórico do interfone enviado.",
+                    reply_text="Histórico do interfone enviado." if ok else "",
                     evo=evo,
                     evo_base=evo_base,
                     evo_key=evo_key,
@@ -3701,7 +3701,7 @@ async def _process_inbound_message(
             from app.alerts_catalog import AlertsCatalog
 
             alerts_cfg = AlertsCatalog.load(settings.alerts_config_path)
-            await handle_interfone_list(
+            ok = await handle_interfone_list(
                 decision,
                 settings=settings,
                 evo=evo,
@@ -3714,8 +3714,7 @@ async def _process_inbound_message(
                 phone=phone_norm,
                 user_text=user_text or "",
                 messenger=messenger,
-                reply_text=str(decision.get("response") or "").strip()
-                or "Histórico do interfone enviado.",
+                reply_text=(str(decision.get("response") or "").strip() or "Histórico do interfone enviado.") if ok else "",
                 evo=evo,
                 evo_base=evo_base,
                 evo_key=evo_key,

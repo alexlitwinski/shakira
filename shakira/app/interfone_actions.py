@@ -65,7 +65,7 @@ async def handle_interfone_list(
         msg = "Ainda não há chamadas do interfone registadas."
         if messenger:
             await messenger.step(msg, final=True)
-            return ""
+            return False
         return msg
 
     evo_base = settings.evolution_base_url.strip()
@@ -74,7 +74,7 @@ async def handle_interfone_list(
         msg = "Não consigo enviar o histórico: Evolution não configurado."
         if messenger:
             await messenger.step(msg, final=True)
-            return ""
+            return False
         return msg
 
     intro = truncate_whatsapp(
@@ -142,9 +142,9 @@ async def handle_interfone_list(
         msg = "Encontrei chamadas registadas mas não consegui enviá-las."
         if messenger:
             await messenger.step(msg, final=True)
-            return ""
+            return False
         return msg
 
     if messenger:
-        return ""
+        return True
     return f"Enviei {sent} chamada(s) do interfone."

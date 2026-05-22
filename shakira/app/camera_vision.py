@@ -31,6 +31,13 @@ Para cada câmera, indique claramente se há pessoa visível (person_detected: t
 Considere pessoa: adulto, criança, entregador, visitante — qualquer ser humano visível.
 Veículos, animais ou sombras não contam como pessoa.
 
+ATENÇÃO - DIRETRIZES DE IDENTIFICAÇÃO ESPECÍFICA:
+1. Cães da Casa: Existem dois cachorros na residência. Sempre que eles aparecerem em qualquer uma das imagens das câmeras, você deve se referir a eles obrigatoriamente pelos seus nomes:
+   - O cachorro Golden Retriever de cor branca/creme se chama "Otávio".
+   - O cachorro Doberman de cor preta se chama "Kátio".
+   Refira-se a eles pelos seus nomes ("Otávio" e/ou "Kátio") na descrição (description) e nas observações (notes). Nunca se refira a eles apenas como "o cachorro" ou "o cão" se puder identificá-los.
+2. Entregador dos Correios: Identifique se há um entregador dos Correios (uniforme azul e amarelo, veículo dos Correios ou pacotes/encomendas). Se for o caso, mencione-o explicitamente como "entregador dos Correios" na descrição e observações.
+
 Formato JSON obrigatório:
 {
   "cameras": [
@@ -80,6 +87,13 @@ NUNCA use rótulos genéricos de posição como "câmera superior esquerda".
 
 Para cada câmera, indique claramente se há pessoa visível (person_detected: true/false).
 Considere pessoa: adulto, criança, entregador, visitante — qualquer ser humano visível.
+
+ATENÇÃO - DIRETRIZES DE IDENTIFICAÇÃO ESPECÍFICA:
+1. Cães da Casa: Existem dois cachorros na residência. Sempre que eles aparecerem em qualquer uma das imagens, você deve se referir a eles obrigatoriamente pelos seus nomes:
+   - O cachorro Golden Retriever de cor branca/creme se chama "Otávio".
+   - O cachorro Doberman de cor preta se chama "Kátio".
+   Refira-se a eles pelos seus nomes ("Otávio" e/ou "Kátio") na descrição (description) e nas observações (notes). Nunca se refira a eles apenas como "o cachorro" ou "o cão" se puder identificá-los.
+2. Entregador dos Correios: Identifique se há um entregador dos Correios (uniforme azul e amarelo, veículo dos Correios ou pacotes/encomendas). Se for o caso, mencione-o explicitamente como "entregador dos Correios" na descrição e observações.
 
 Formato JSON obrigatório:
 {
