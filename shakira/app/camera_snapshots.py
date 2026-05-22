@@ -493,14 +493,26 @@ async def handle_camera_snapshot_decision(
 
                     is_match = False
                     if target_dog == "Kátio":
-                        if "kátio" in notes_lower or "katio" in notes_lower:
-                            is_match = True
+                        is_match = cam_presence.katio_detected
                     elif target_dog == "Otávio":
-                        if "otávio" in notes_lower or "otavio" in notes_lower:
-                            is_match = True
+                        is_match = cam_presence.otavio_detected
                     else:  # "cachorro" ou plural
-                        if any(x in notes_lower for x in ["kátio", "katio", "otávio", "otavio", "cachorro", "cão"]):
-                            is_match = True
+                        is_match = cam_presence.katio_detected or cam_presence.otavio_detected
+
+                    # Fallback seguro de texto se o boolean falhar, excluindo negações
+                    if not is_match:
+                        negatives = ["não", "sem", "não permite", "impossível", "invisível", "escura", "escuro", "vazio", "vazia", "ausente", "ausência"]
+                        has_negative = any(neg in notes_lower for neg in negatives)
+                        if not has_negative:
+                            if target_dog == "Kátio":
+                                if "kátio" in notes_lower or "katio" in notes_lower:
+                                    is_match = True
+                            elif target_dog == "Otávio":
+                                if "otávio" in notes_lower or "otavio" in notes_lower:
+                                    is_match = True
+                            else:
+                                if any(x in notes_lower for x in ["kátio", "katio", "otávio", "otavio", "cachorro", "cão"]):
+                                    is_match = True
 
                     if is_match:
                         for img_bytes, label, cid, desc in chunk:

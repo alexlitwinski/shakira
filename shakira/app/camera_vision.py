@@ -27,9 +27,10 @@ Use português do Brasil nos campos de texto.
 OBRIGATÓRIO: use EXCLUSIVAMENTE os nomes exatos das câmeras fornecidos no mapeamento.
 NUNCA use rótulos genéricos de posição como "câmera superior esquerda".
 
-Para cada câmera, indique claramente se há pessoa visível (person_detected: true/false).
-Considere pessoa: adulto, criança, entregador, visitante — qualquer ser humano visível.
-Veículos, animais ou sombras não contam como pessoa.
+Para cada câmera, indique claramente:
+- Se há pessoa visível (person_detected: true/false). Considere pessoa: adulto, criança, entregador, visitante — qualquer ser humano visível. Veículos, animais ou sombras não contam como pessoa.
+- Se o cachorro Kátio (Doberman preto) está claramente visível (katio_detected: true/false).
+- Se o cachorro Otávio (Golden Retriever branco/creme) está claramente visível (otavio_detected: true/false).
 
 ATENÇÃO - DIRETRIZES DE IDENTIFICAÇÃO ESPECÍFICA:
 1. Cães da Casa: Existem dois cachorros na residência. Sempre que eles aparecerem em qualquer uma das imagens das câmeras, você deve se referir a eles obrigatoriamente pelos seus nomes:
@@ -42,7 +43,13 @@ ATENÇÃO - DIRETRIZES DE IDENTIFICAÇÃO ESPECÍFICA:
 Formato JSON obrigatório:
 {
   "cameras": [
-    {"name": "nome exato", "person_detected": true, "notes": "breve descricao do que ve"}
+    {
+      "name": "nome exato",
+      "person_detected": true,
+      "katio_detected": false,
+      "otavio_detected": false,
+      "notes": "breve descricao do que ve"
+    }
   ],
   "description": "detalhes por camera (Nome: o que ve em cada uma), texto corrido para WhatsApp",
   "recommendation": "resumo curto e direto para o morador (ex.: se ha pessoa, o que fazer)"
@@ -59,6 +66,8 @@ class CameraPanelInfo:
 class CameraPresence:
     name: str
     person_detected: bool = False
+    katio_detected: bool = False
+    otavio_detected: bool = False
     notes: str = ""
 
 
@@ -246,6 +255,8 @@ def _parse_analysis_payload(raw: str) -> CameraMosaicAnalysis | None:
             CameraPresence(
                 name=name,
                 person_detected=bool(row.get("person_detected")),
+                katio_detected=bool(row.get("katio_detected")),
+                otavio_detected=bool(row.get("otavio_detected")),
                 notes=str(row.get("notes") or "").strip(),
             )
         )
