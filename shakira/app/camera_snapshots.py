@@ -431,71 +431,88 @@ async def handle_camera_snapshot_decision(
             await say("Não consegui obter imagens das câmeras.", final=True)
             return CameraSnapshotsResult(summary="Nenhuma imagem obtida.")
 
-        # Constrói o mosaico em memória apenas para a visão do Gemini
-        collage_items = [(img_bytes, label) for img_bytes, label, _cid, _desc in fetched]
-        try:
-            collage_bytes = build_image_grid(collage_items)
-        except Exception:
-            log.exception("Falha ao montar collage em memoria para localizacao do cao")
-            await say("Não consegui processar as imagens das câmeras.", final=True)
-            return CameraSnapshotsResult(summary="Falha ao montar collage.")
-
-        # Aciona o Gemini Vision no mosaico em memória
-        panels = [
-            CameraPanelInfo(name=label, description=description)
-            for _, label, _, description in fetched
-        ]
-        vision_context = f"Procurando o {target_dog} no mosaico."
-        api_key = settings.gemini_api_key.strip()
-        model = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
-
-        try:
-            analysis = await asyncio.to_thread(
-                analyze_camera_mosaic,
-                api_key=api_key,
-                image_bytes=collage_bytes,
-                camera_panels=panels,
-                context=vision_context,
-                model=model,
-            )
-        except Exception:
-            log.exception("Descricao de cameras falhou para localizacao do cao")
-            analysis = None
-
-        if not analysis:
-            await say("Não consegui analisar as imagens das câmeras no momento.", final=True)
-            return CameraSnapshotsResult(summary="Falha na analise do Gemini.")
-
-        # Mapeia qual câmera possui o cachorro com base nas observações/notas
+        # Envia as câmeras em lotes de 6 para a IA analisar
+        batch_size = 6
         found_cameras = []
-        if analysis.cameras:
-            for cam_presence in analysis.cameras:
-                cam_name = cam_presence.name
-                notes = cam_presence.notes or ""
-                notes_lower = notes.lower()
+        summaries = []
 
-                # Busca robusta
-                is_match = False
-                if target_dog == "Kátio":
-                    if "kátio" in notes_lower or "katio" in notes_lower:
-                        is_match = True
-                elif target_dog == "Otávio":
-                    if "otávio" in notes_lower or "otavio" in notes_lower:
-                        is_match = True
-                else:  # "cachorro" ou plural
-                    if any(x in notes_lower for x in ["kátio", "katio", "otávio", "otavio", "cachorro", "cão"]):
-                        is_match = True
+        for i in range(0, len(fetched), batch_size):
+            chunk = fetched[i : i + batch_size]
+            log.info(
+                "Processando lote de câmeras para busca do cão: %s a %s de %s",
+                i + 1,
+                i + len(chunk),
+                len(fetched),
+            )
 
-                if is_match:
-                    for img_bytes, label, cid, desc in fetched:
-                        if label.lower().strip() == cam_name.lower().strip() or cid.lower().strip() == cam_name.lower().strip():
-                            found_cameras.append({
-                                "cam_name": label,
-                                "notes": notes,
-                                "image_bytes": img_bytes,
-                                "camera_id": cid
-                            })
-                            break
+            # Constrói o mosaico em memória apenas para a visão do Gemini para este lote
+            collage_items = [(img_bytes, label) for img_bytes, label, _cid, _desc in chunk]
+            try:
+                collage_bytes = build_image_grid(collage_items)
+            except Exception:
+                log.exception("Falha ao montar collage do lote em memória")
+                continue
+
+            panels = [
+                CameraPanelInfo(name=label, description=description)
+                for _, label, _, description in chunk
+            ]
+            vision_context = f"Procurando o {target_dog} neste lote de câmeras."
+            api_key = settings.gemini_api_key.strip()
+            model = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
+
+            try:
+                analysis = await asyncio.to_thread(
+                    analyze_camera_mosaic,
+                    api_key=api_key,
+                    image_bytes=collage_bytes,
+                    camera_panels=panels,
+                    context=vision_context,
+                    model=model,
+                )
+            except Exception:
+                log.exception("Descrição de câmeras falhou para lote")
+                analysis = None
+
+            if not analysis:
+                continue
+
+            if analysis.description:
+                summaries.append(analysis.description)
+
+            # Procura pelo cachorro nas notas deste lote
+            if analysis.cameras:
+                for cam_presence in analysis.cameras:
+                    cam_name = cam_presence.name
+                    notes = cam_presence.notes or ""
+                    notes_lower = notes.lower()
+
+                    is_match = False
+                    if target_dog == "Kátio":
+                        if "kátio" in notes_lower or "katio" in notes_lower:
+                            is_match = True
+                    elif target_dog == "Otávio":
+                        if "otávio" in notes_lower or "otavio" in notes_lower:
+                            is_match = True
+                    else:  # "cachorro" ou plural
+                        if any(x in notes_lower for x in ["kátio", "katio", "otávio", "otavio", "cachorro", "cão"]):
+                            is_match = True
+
+                    if is_match:
+                        for img_bytes, label, cid, desc in chunk:
+                            if label.lower().strip() == cam_name.lower().strip() or cid.lower().strip() == cam_name.lower().strip():
+                                found_cameras.append({
+                                    "cam_name": label,
+                                    "notes": notes,
+                                    "image_bytes": img_bytes,
+                                    "camera_id": cid
+                                })
+                                break
+
+            # Se encontrou o cachorro neste lote, interrompe a busca nos próximos lotes (short-circuit)
+            if found_cameras:
+                log.info("Cão localizado no lote! Interrompendo busca subsequente.")
+                break
 
         if found_cameras:
             # Cachorro localizado! Envia apenas a(s) câmera(s) correspondente(s)
@@ -510,7 +527,7 @@ async def handle_camera_snapshot_decision(
                     filename=f"shakira_search_{item['camera_id']}.jpg",
                     caption=caption[:1024],
                 )
-            
+
             return CameraSnapshotsResult(
                 sent=len(found_cameras),
                 summary=f"Cachorro localizado e enviado em {len(found_cameras)} imagem(ns)."
@@ -518,9 +535,9 @@ async def handle_camera_snapshot_decision(
         else:
             # Não localizado
             no_dog_msg = f"Não consegui localizar o {target_dog} em nenhuma das câmeras."
-            if analysis.description:
-                no_dog_msg += f"\n\nResumo das câmeras analisadas:\n{analysis.description}"
-            
+            if summaries:
+                no_dog_msg += f"\n\nResumo das câmeras analisadas:\n" + "\n".join(summaries)
+
             await say(no_dog_msg, final=True)
             return CameraSnapshotsResult(
                 sent=0,
