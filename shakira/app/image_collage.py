@@ -6,12 +6,31 @@ import math
 import os
 from io import BytesIO
 
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 
 _CELL_MAX_PX = int(os.environ.get("COLLAGE_CELL_MAX_PX", "1280"))
 _GAP_PX = 8
 _BG_RGB = (24, 24, 24)
 _JPEG_QUALITY = int(os.environ.get("COLLAGE_JPEG_QUALITY", "90"))
+
+
+def _load_font(size: int = 24) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
+    """Carrega fonte DejaVu ou Arial se disponivel, caso contrario usa default."""
+    for path in [
+        "DejaVuSans-Bold.ttf",
+        "DejaVuSans.ttf",
+        "arial.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/TTF/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/freefont/FreeSans.ttf",
+        "C:\\Windows\\Fonts\\arial.ttf",
+    ]:
+        try:
+            return ImageFont.truetype(path, size)
+        except IOError:
+            continue
+    return ImageFont.load_default()
 
 
 def build_image_grid(items: list[tuple[bytes, str]]) -> bytes:
@@ -25,13 +44,33 @@ def build_image_grid(items: list[tuple[bytes, str]]) -> bytes:
         return items[0][0]
 
     cells: list[Image.Image] = []
-    for img_bytes, _label in items:
+    for img_bytes, label in items:
         img = Image.open(BytesIO(img_bytes))
         if img.mode not in ("RGB", "L"):
             img = img.convert("RGB")
         elif img.mode == "L":
             img = img.convert("RGB")
         img.thumbnail((_CELL_MAX_PX, _CELL_MAX_PX), Image.Resampling.LANCZOS)
+
+        # Desenha o nome da câmera diretamente no painel para orientação perfeita da IA e do usuário
+        if label:
+            draw = ImageDraw.Draw(img)
+            font = _load_font(28) # Tamanho ideal para células de 1280px
+            try:
+                bbox = draw.textbbox((0, 0), label, font=font)
+                tw = bbox[2] - bbox[0]
+                th = bbox[3] - bbox[1]
+            except AttributeError:
+                tw, th = draw.textsize(label, font=font)
+            
+            padx, pady = 12, 8
+            box_w = tw + padx * 2
+            box_h = th + pady * 2
+            
+            # Caixa preta sólida e texto amarelo para contraste máximo
+            draw.rectangle([0, 0, box_w, box_h], fill=(0, 0, 0))
+            draw.text((padx, pady), label, fill=(255, 255, 0), font=font)
+
         cells.append(img)
 
     count = len(cells)

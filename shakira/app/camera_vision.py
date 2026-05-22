@@ -25,6 +25,7 @@ Responda SOMENTE em JSON válido (sem markdown, sem texto fora do JSON).
 Use português do Brasil nos campos de texto.
 
 OBRIGATÓRIO: use EXCLUSIVAMENTE os nomes exatos das câmeras fornecidos no mapeamento.
+Cada painel no mosaico possui o seu nome correspondente desenhado em amarelo sobre fundo preto no canto superior esquerdo da própria imagem. Use esses nomes escritos diretamente sobre cada painel para se orientar com precisão absoluta!
 NUNCA use rótulos genéricos de posição como "câmera superior esquerda".
 
 Para cada câmera, indique claramente:
@@ -93,6 +94,7 @@ Responda SOMENTE em JSON válido (sem markdown, sem texto fora do JSON).
 Use português do Brasil nos campos de texto.
 
 OBRIGATÓRIO: use EXCLUSIVAMENTE os nomes exatos das câmeras fornecidos no mapeamento de cada área.
+Cada painel no mosaico possui o seu nome correspondente desenhado em amarelo sobre fundo preto no canto superior esquerdo da própria imagem. Use esses nomes escritos diretamente sobre cada painel para se orientar com precisão absoluta!
 NUNCA use rótulos genéricos de posição como "câmera superior esquerda".
 
 Para cada câmera, indique claramente se há pessoa visível (person_detected: true/false).

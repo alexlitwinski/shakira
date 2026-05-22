@@ -459,6 +459,7 @@ async def handle_camera_snapshot_decision(
             ]
             vision_context = (
                 f"Você está procurando ativamente por **{target_dog}** (ou qualquer pessoa) nas imagens das câmeras. "
+                "Cada painel no mosaico possui o seu nome correspondente desenhado em amarelo sobre fundo preto no canto superior esquerdo da própria imagem. Use esses nomes escritos diretamente sobre cada painel para se orientar com precisão absoluta! "
                 "Por favor, seja extremamente rigoroso e adote um comportamento cético. "
                 "Só afirme que o cão está presente se você puder ver claramente o contorno nítido de um cachorro (Doberman preto para Kátio, Golden Retriever branco/creme para Otávio). "
                 "Se a área estiver na penumbra, escura, com sombras, ou se você apenas suspeitar mas não puder confirmar com 100% de certeza absoluta, "
