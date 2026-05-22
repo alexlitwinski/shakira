@@ -2670,6 +2670,7 @@ async def handle_get_camera_snapshot(
     http: httpx.AsyncClient,
     phone: str,
     instance: str,
+    user_text: str = "",
     messenger: StepMessenger | None = None,
 ) -> None:
     """Obtem snapshot(s) do Frigate e envia pelo WhatsApp."""
@@ -2681,6 +2682,7 @@ async def handle_get_camera_snapshot(
         http=http,
         phone=phone,
         instance=instance,
+        user_text=user_text,
         messenger=messenger,
     )
 
@@ -3650,6 +3652,7 @@ async def _process_inbound_message(
                 http=http,
                 phone=phone_norm,
                 instance=send_instance,
+                user_text=user_text or "",
                 messenger=messenger,
             )
             await _finish_whatsapp_exchange(

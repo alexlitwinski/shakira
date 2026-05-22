@@ -342,6 +342,7 @@ async def handle_camera_snapshot_decision(
     http: httpx.AsyncClient,
     phone: str,
     instance: str,
+    user_text: str = "",
     messenger: StepMessenger | None = None,
 ) -> CameraSnapshotsResult:
     """Interpreta decisao Gemini e envia snapshots."""
@@ -363,6 +364,171 @@ async def handle_camera_snapshot_decision(
                 text=truncate_whatsapp(msg),
             )
         return CameraSnapshotsResult(summary=error)
+
+    # Detecção de busca de cão
+    user_text_lower = user_text.lower().strip() if user_text else ""
+    is_dog_search = False
+    target_dog = None
+
+    if "katio" in user_text_lower or "kátio" in user_text_lower:
+        is_dog_search = True
+        target_dog = "Kátio"
+    elif "otavio" in user_text_lower or "otávio" in user_text_lower:
+        is_dog_search = True
+        target_dog = "Otávio"
+    elif any(x in user_text_lower for x in ["cachorro", "cachorros", "cão", "cães"]):
+        is_dog_search = True
+        target_dog = "cachorro"
+
+    # Interceptamos apenas se for busca por cão e o alvo for múltiplas câmeras (ex.: todas as câmeras)
+    if is_dog_search and camera_ids and len(camera_ids) > 2:
+        log.info("Iniciando busca inteligente do cao '%s' nas cameras phone=%s", target_dog, phone)
+        evo_base = settings.evolution_base_url.strip()
+        evo_key = settings.evolution_api_key.strip()
+
+        async def say(text: str, *, final: bool = False) -> None:
+            msg = truncate_whatsapp(text)
+            if not msg:
+                return
+            if messenger:
+                await messenger.step(msg, final=final)
+            elif evo_base and evo_key and instance:
+                await pulse_whatsapp_typing()
+                await evo.send_text(
+                    base_url=evo_base,
+                    api_key=evo_key,
+                    instance=instance,
+                    number=phone,
+                    text=msg,
+                )
+
+        if intro:
+            await say(intro)
+        await say(f"Vou buscar as imagens das câmeras para tentar localizar o {target_dog}...")
+
+        if not settings.frigate_url:
+            await say("Frigate não está configurado nas opções.", final=True)
+            return CameraSnapshotsResult(summary="Frigate nao configurado.")
+
+        frigate = FrigateClient(http, base_url=settings.frigate_url)
+        cam_map = cameras.camera_map()
+
+        # Busca todos os snapshots
+        fetched: list[tuple[bytes, str, str, str]] = []
+        failed = []
+        for index, camera_id in enumerate(camera_ids, start=1):
+            cam = cam_map.get(camera_id)
+            label = cam.name if cam else camera_id
+            description = cam.description if cam else ""
+            try:
+                image_bytes = await frigate.get_latest_snapshot(camera_id)
+                fetched.append((image_bytes, label, camera_id, description))
+            except Exception as e:
+                log.error("Frigate falhou camera=%s: %s", camera_id, e)
+                failed.append(camera_id)
+
+        if not fetched:
+            await say("Não consegui obter imagens das câmeras.", final=True)
+            return CameraSnapshotsResult(summary="Nenhuma imagem obtida.")
+
+        # Constrói o mosaico em memória apenas para a visão do Gemini
+        collage_items = [(img_bytes, label) for img_bytes, label, _cid, _desc in fetched]
+        try:
+            collage_bytes = build_image_grid(collage_items)
+        except Exception:
+            log.exception("Falha ao montar collage em memoria para localizacao do cao")
+            await say("Não consegui processar as imagens das câmeras.", final=True)
+            return CameraSnapshotsResult(summary="Falha ao montar collage.")
+
+        # Aciona o Gemini Vision no mosaico em memória
+        panels = [
+            CameraPanelInfo(name=label, description=description)
+            for _, label, _, description in fetched
+        ]
+        vision_context = f"Procurando o {target_dog} no mosaico."
+        api_key = settings.gemini_api_key.strip()
+        model = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
+
+        try:
+            analysis = await asyncio.to_thread(
+                analyze_camera_mosaic,
+                api_key=api_key,
+                image_bytes=collage_bytes,
+                camera_panels=panels,
+                context=vision_context,
+                model=model,
+            )
+        except Exception:
+            log.exception("Descricao de cameras falhou para localizacao do cao")
+            analysis = None
+
+        if not analysis:
+            await say("Não consegui analisar as imagens das câmeras no momento.", final=True)
+            return CameraSnapshotsResult(summary="Falha na analise do Gemini.")
+
+        # Mapeia qual câmera possui o cachorro com base nas observações/notas
+        found_cameras = []
+        if analysis.cameras:
+            for cam_presence in analysis.cameras:
+                cam_name = cam_presence.name
+                notes = cam_presence.notes or ""
+                notes_lower = notes.lower()
+
+                # Busca robusta
+                is_match = False
+                if target_dog == "Kátio":
+                    if "kátio" in notes_lower or "katio" in notes_lower:
+                        is_match = True
+                elif target_dog == "Otávio":
+                    if "otávio" in notes_lower or "otavio" in notes_lower:
+                        is_match = True
+                else:  # "cachorro" ou plural
+                    if any(x in notes_lower for x in ["kátio", "katio", "otávio", "otavio", "cachorro", "cão"]):
+                        is_match = True
+
+                if is_match:
+                    for img_bytes, label, cid, desc in fetched:
+                        if label.lower().strip() == cam_name.lower().strip() or cid.lower().strip() == cam_name.lower().strip():
+                            found_cameras.append({
+                                "cam_name": label,
+                                "notes": notes,
+                                "image_bytes": img_bytes,
+                                "camera_id": cid
+                            })
+                            break
+
+        if found_cameras:
+            # Cachorro localizado! Envia apenas a(s) câmera(s) correspondente(s)
+            for item in found_cameras[:2]:
+                caption = f"Câmera: {item['cam_name']}\n\nLocalizado: {item['notes']}"
+                await evo.send_image_bytes(
+                    base_url=evo_base,
+                    api_key=evo_key,
+                    instance=instance,
+                    number=phone,
+                    image_bytes=item["image_bytes"],
+                    filename=f"shakira_search_{item['camera_id']}.jpg",
+                    caption=caption[:1024],
+                )
+            
+            # Envia a descrição textual gerada pelo Gemini
+            description_msg = format_analysis_message(analysis)
+            await say(description_msg, final=True)
+            return CameraSnapshotsResult(
+                sent=len(found_cameras),
+                summary=f"Cachorro localizado e enviado em {len(found_cameras)} imagem(ns)."
+            )
+        else:
+            # Não localizado
+            no_dog_msg = f"Não consegui localizar o {target_dog} em nenhuma das câmeras."
+            if analysis.description:
+                no_dog_msg += f"\n\nResumo das câmeras analisadas:\n{analysis.description}"
+            
+            await say(no_dog_msg, final=True)
+            return CameraSnapshotsResult(
+                sent=0,
+                summary="Cachorro nao localizado nas cameras."
+            )
 
     result = await send_camera_snapshots(
         settings=settings,
