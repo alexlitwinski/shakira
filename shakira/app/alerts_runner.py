@@ -133,6 +133,9 @@ class AlertsRunner:
 
     def _live_entity_ids(self) -> set[str]:
         ids = {a.entity_id for a in self.catalog.enabled_live_alerts()}
+        if any(a.id == "presenca_portao_parado" and a.enabled for a in self.catalog.alerts):
+            ids.add("sensor.presenca_porta_vidro_target_distance")
+            ids.add("binary_sensor.presenca_porta_vidro_presence")
         if self._alarm_dispatch_active():
             ids |= self._alarm_dispatch.partition_entity_ids  # type: ignore[union-attr]
         if self._rain_dispatch_active():
@@ -227,6 +230,7 @@ class AlertsRunner:
         while not self._poll_stop.is_set():
             try:
                 await self._run_due_checks()
+                await self._check_presenca_portao_tick()
             except Exception:
                 log.exception("Erro no ciclo de alertas polling")
             try:
@@ -234,6 +238,14 @@ class AlertsRunner:
                 break
             except asyncio.TimeoutError:
                 continue
+
+    async def _check_presenca_portao_tick(self) -> None:
+        alert = next((a for a in self.catalog.alerts if a.id == "presenca_portao_parado" and a.enabled), None)
+        if not alert:
+            return
+        rt = self._runtime(alert.id)
+        now = time.monotonic()
+        await self._evaluate_alert(alert, rt, now)
 
     def _runtime(self, alert_id: str) -> _AlertRuntime:
         if alert_id not in self._runtimes:
@@ -467,7 +479,15 @@ class AlertsRunner:
     ) -> None:
         """Dispara alertas live apenas em transicao real para o estado de alerta."""
         now = time.monotonic()
+        if entity_id in ("binary_sensor.presenca_porta_vidro_presence", "sensor.presenca_porta_vidro_target_distance"):
+            alert = next((a for a in self.catalog.alerts if a.id == "presenca_portao_parado" and a.enabled), None)
+            if alert:
+                rt = self._runtime(alert.id)
+                await self._evaluate_alert(alert, rt, now)
+
         for alert in self.catalog.enabled_live_alerts():
+            if alert.id == "presenca_portao_parado":
+                continue
             if alert.entity_id != entity_id:
                 continue
             rt = self._runtime(alert.id)
@@ -522,20 +542,52 @@ class AlertsRunner:
         *,
         state_override: str | None = None,
     ) -> None:
-        if state_override is not None:
-            state = state_override
+        if alert.id == "presenca_portao_parado":
+            presence_state_data = await self.ha.get_state("binary_sensor.presenca_porta_vidro_presence")
+            distance_state_data = await self.ha.get_state("sensor.presenca_porta_vidro_target_distance")
+            
+            presence = presence_state_data.get("state") if presence_state_data else "off"
+            distance_str = distance_state_data.get("state") if distance_state_data else None
+            
+            distance_ok = False
+            if distance_str is not None:
+                try:
+                    distance_val = float(str(distance_str).replace(",", "."))
+                    distance_ok = distance_val <= 2.0
+                except ValueError:
+                    pass
+            
+            is_present_close = (presence == "on" and distance_ok)
+            
+            if is_present_close:
+                if not hasattr(rt, "first_matched_at") or rt.first_matched_at is None:
+                    rt.first_matched_at = now  # type: ignore[attr-defined]
+                    log.info("Alerta presenca_portao_parado: presenca e proximidade detectadas. Iniciando temporizador.")
+                
+                elapsed = now - rt.first_matched_at  # type: ignore[attr-defined]
+                matched = elapsed >= 120.0
+            else:
+                if hasattr(rt, "first_matched_at") and rt.first_matched_at is not None:
+                    log.info("Alerta presenca_portao_parado: alvo ausente ou afastou-se. Resetando temporizador.")
+                rt.first_matched_at = None  # type: ignore[attr-defined]
+                matched = False
+                
+            state = f"{presence} (distancia: {distance_str}m)"
         else:
-            state_data = await self.ha.get_state(alert.entity_id)
-            if not state_data:
-                log.warning(
-                    "Alerta %s: entidade %s nao encontrada no HA",
-                    alert.id,
-                    alert.entity_id,
-                )
-                return
-            state = str(state_data.get("state", ""))
+            if state_override is not None:
+                state = state_override
+            else:
+                state_data = await self.ha.get_state(alert.entity_id)
+                if not state_data:
+                    log.warning(
+                        "Alerta %s: entidade %s nao encontrada no HA",
+                        alert.id,
+                        alert.entity_id,
+                    )
+                    return
+                state = str(state_data.get("state", ""))
 
-        matched = state_matches(state, alert.when_state)
+            matched = state_matches(state, alert.when_state)
 
         if not matched:
             if rt.last_matched:
