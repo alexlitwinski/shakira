@@ -189,6 +189,11 @@ def format_action_in_progress(
     if domain == "lock" and service == "lock":
         return f"Vou trancar {label}..."
 
+    if domain == "scene" and service == "turn_on":
+        if "limpar" in entity_id.lower() or "limpar" in label.lower():
+            return "Vou iniciar a limpeza..."
+        return f"Vou acionar a cena {label}..."
+
     return f"Um momento, estou a tratar de {label}..."
 
 
@@ -247,6 +252,11 @@ def format_action_success(
         return f"Pronto! {label} destrancada."
     if domain == "lock" and service == "lock":
         return f"Pronto! {label} trancada."
+
+    if domain == "scene" and service == "turn_on":
+        if "limpar" in entity_id.lower() or "limpar" in label.lower():
+            return "Pronto! Limpeza iniciada."
+        return f"Pronto! Cena {label} ativada."
 
     return f"Pronto! Alteração feita em {label}."
 
