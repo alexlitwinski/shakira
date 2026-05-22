@@ -458,9 +458,13 @@ async def handle_camera_snapshot_decision(
                 for _, label, _, description in chunk
             ]
             vision_context = (
-                f"Analise se o {target_dog} (ou qualquer pessoa) está visível em alguma destas câmeras. "
-                "Seja extremamente criterioso e rigoroso: se ele não estiver claramente presente na imagem, "
-                "diga nas observações que ele não está presente. NUNCA invente ou alucine a presença dele ou de pessoas."
+                f"Você está procurando ativamente por **{target_dog}** (ou qualquer pessoa) nas imagens das câmeras. "
+                "Por favor, seja extremamente rigoroso e adote um comportamento cético. "
+                "Só afirme que o cão está presente se você puder ver claramente o contorno nítido de um cachorro (Doberman preto para Kátio, Golden Retriever branco/creme para Otávio). "
+                "Se a área estiver na penumbra, escura, com sombras, ou se você apenas suspeitar mas não puder confirmar com 100% de certeza absoluta, "
+                "defina obrigatoriamente a respectiva flag correspondente como `false` (ex: katio_detected ou otavio_detected) e declare nas notas (notes) "
+                "que não foi possível confirmar a presença dele por falta de clareza ou escuridão. "
+                "É crucial evitar falsos positivos para não confundir o morador. NUNCA invente ou alucine a presença dele ou de pessoas."
             )
             api_key = settings.gemini_api_key.strip()
             model = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")

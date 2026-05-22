@@ -3,14 +3,15 @@
 from __future__ import annotations
 
 import math
+import os
 from io import BytesIO
 
 from PIL import Image
 
-_CELL_MAX_PX = 720
+_CELL_MAX_PX = int(os.environ.get("COLLAGE_CELL_MAX_PX", "1280"))
 _GAP_PX = 8
 _BG_RGB = (24, 24, 24)
-_JPEG_QUALITY = 85
+_JPEG_QUALITY = int(os.environ.get("COLLAGE_JPEG_QUALITY", "90"))
 
 
 def build_image_grid(items: list[tuple[bytes, str]]) -> bytes:
