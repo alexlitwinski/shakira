@@ -76,6 +76,8 @@ _DIGITS_RE = re.compile(r"\b(\d{4,8})\b")
 
 _INTENT_PATTERNS = (
     re.compile(r"entrar\s+(em\s+)?casa", re.I),
+    re.compile(r"abr[ae]\s+(o\s+)?port[aã]o\s+social\b", re.I),
+    re.compile(r"abr[ae]\s+(o\s+)?port[aã]o(?!\s+(?:de\s+)?servi)", re.I),
     re.compile(r"abrir\s+(o\s+)?port[aã]o\s+social\b", re.I),
     re.compile(r"abre\s+(o\s+)?port[aã]o\s+social\b", re.I),
     re.compile(r"abrir\s+(o\s+)?port[aã]o(?!\s+(?:de\s+)?servi)", re.I),
@@ -84,6 +86,7 @@ _INTENT_PATTERNS = (
     re.compile(r"deixa(r)?(-me)?\s+entrar", re.I),
     re.compile(r"preciso\s+entrar(\s+em\s+casa)?", re.I),
     re.compile(r"abrir\s+(a\s+)?(porta|entrada)\s+(social|principal)", re.I),
+    re.compile(r"abr[ae]\s+(a\s+)?(porta|entrada)\s+(social|principal)", re.I),
 )
 
 _FALLBACK_CHOICE_RE = {

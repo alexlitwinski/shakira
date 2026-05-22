@@ -91,6 +91,10 @@ from app.house_status_overrides import try_house_status_decision_override
 from app.birthday_prompts import BIRTHDAY_ACTIONS_INSTRUCTION
 from app.interfone_prompts import INTERFONE_ACTIONS_INSTRUCTION
 from app.interfone_actions import handle_interfone_list
+from app.interfone_overrides import (
+    looks_like_interfone_list_request,
+    try_interfone_list_decision_override,
+)
 from app.house_status_routine import handle_house_status
 from app.birthday_actions import (
     execute_birthday_save_batch,
@@ -3187,6 +3191,44 @@ async def handle_evolution_payload(
                 evo_base
                 and evo_key
                 and send_instance_early
+                and looks_like_interfone_list_request(user_text or "")
+            ):
+                from app.alerts_catalog import AlertsCatalog
+
+                alerts_cfg = AlertsCatalog.load(settings.alerts_config_path)
+                messenger_if = StepMessenger(
+                    evo=evo,
+                    evo_base=evo_base,
+                    evo_key=evo_key,
+                    instance=send_instance_early,
+                    phone=phone_norm,
+                )
+                await handle_interfone_list(
+                    {"action": "interfone_list", "interfone_list_limit": 5},
+                    settings=settings,
+                    evo=evo,
+                    phone=phone_norm,
+                    instance=send_instance_early,
+                    messenger=messenger_if,
+                    data_path=alerts_cfg.interfone_dispatch.data_path,
+                )
+                await _finish_whatsapp_exchange(
+                    phone=phone_norm,
+                    user_text=user_text or "",
+                    messenger=messenger_if,
+                    reply_text="Histórico do interfone enviado.",
+                    evo=evo,
+                    evo_base=evo_base,
+                    evo_key=evo_key,
+                    instance=send_instance_early,
+                )
+                log.info("Historico interfone (direto) phone=%s", phone_norm)
+                continue
+
+            if (
+                evo_base
+                and evo_key
+                and send_instance_early
                 and http is not None
                 and await try_handle_google_calendar_link_inbound(
                     phone_norm,
@@ -3491,6 +3533,10 @@ async def _process_inbound_message(
             user_text=user_text or "",
         )
         decision = try_house_status_decision_override(
+            decision,
+            user_text=user_text or "",
+        )
+        decision = try_interfone_list_decision_override(
             decision,
             user_text=user_text or "",
         )

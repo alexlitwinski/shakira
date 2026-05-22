@@ -16,6 +16,7 @@ def test_servico_not_social():
 
 def test_social_intent():
     assert detect_portao_social_intent("Abrir o portão social")
+    assert detect_portao_social_intent("Abra o portão social")
     assert detect_portao_social_intent("Quero entrar em casa")
     assert not detect_portao_social_intent("Abrir o portão de serviço")
 
