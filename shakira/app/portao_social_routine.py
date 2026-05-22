@@ -65,11 +65,7 @@ _FOLLOWUP_PROMPT = (
 
 _CANCEL_RE = re.compile(r"^\s*(cancelar|cancela|nao|não|desistir)\s*[.!?]?\s*$", re.I)
 _PORTAO_SERVICO_RE = re.compile(
-    r"(?:"
-    r"\b(?:abrir?|abre|abra|acione|aciona|activ|ativa)\b.*\bport[aã]o\s+(?:de\s+)?servi"
-    r"|"
-    r"\bport[aã]o\s+(?:de\s+)?servi[cç]o\b"
-    r")",
+    r"\b(?:abrir?|abre|abra|acione|aciona|activ|ativa|destranc?a|destranque|liber[ae]|comandar?|destrancar?)\b.*\bport[aã]o\s+(?:de\s+)?servi",
     re.I,
 )
 _DIGITS_RE = re.compile(r"\b(\d{4,8})\b")
