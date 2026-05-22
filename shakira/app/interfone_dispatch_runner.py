@@ -36,17 +36,6 @@ def interfone_ringing(old_state: str | None, new_state: str | None) -> bool:
     return not old_on and new_on
 
 
-def gate_opened(old_state: str | None, new_state: str | None) -> bool:
-    was_open = (old_state or "").strip().lower() == GATE_OPEN
-    is_open = (new_state or "").strip().lower() == GATE_OPEN
-    return is_open and not was_open
-
-
-def person_detected(old_state: str | None, new_state: str | None) -> bool:
-    was_on = (old_state or "").strip().lower() in PERSON_ON
-    is_on = (new_state or "").strip().lower() in PERSON_ON
-    return is_on and not was_on
-
 
 @dataclass
 class _ActiveCall:
@@ -111,13 +100,15 @@ class InterfoneDispatchRunner:
         if not active:
             return
 
-        if entity_id == self.config.portao_social_entity and gate_opened(old_state, new_state):
+        state_norm = (new_state or "").strip().lower()
+
+        if entity_id == self.config.portao_social_entity and state_norm == GATE_OPEN:
             active.portao_social_opened = True
             log.info("Interfone %s: portao social aberto na janela", active.call_id)
-        elif entity_id == self.config.portao_servico_entity and gate_opened(old_state, new_state):
+        elif entity_id == self.config.portao_servico_entity and state_norm == GATE_OPEN:
             active.portao_servico_opened = True
             log.info("Interfone %s: portao servico aberto na janela", active.call_id)
-        elif entity_id == self.config.hall_person_entity and person_detected(old_state, new_state):
+        elif entity_id == self.config.hall_person_entity and state_norm in PERSON_ON:
             active.hall_person_detected = True
             log.info("Interfone %s: pessoa no hall na janela", active.call_id)
 

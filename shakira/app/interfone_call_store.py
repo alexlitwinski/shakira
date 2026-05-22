@@ -111,7 +111,7 @@ class InterfoneCallRecord:
         if self.hall_person_detected:
             parts.append("pessoa no hall interno")
         if not parts:
-            return "Nenhum sinal de atendimento na janela."
+            return "Parece que ninguém atendeu o interfone."
         return "Sinais: " + "; ".join(parts) + "."
 
 
