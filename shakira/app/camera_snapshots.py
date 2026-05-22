@@ -457,7 +457,11 @@ async def handle_camera_snapshot_decision(
                 CameraPanelInfo(name=label, description=description)
                 for _, label, _, description in chunk
             ]
-            vision_context = f"Procurando o {target_dog} neste lote de câmeras."
+            vision_context = (
+                f"Analise se o {target_dog} (ou qualquer pessoa) está visível em alguma destas câmeras. "
+                "Seja extremamente criterioso e rigoroso: se ele não estiver claramente presente na imagem, "
+                "diga nas observações que ele não está presente. NUNCA invente ou alucine a presença dele ou de pessoas."
+            )
             api_key = settings.gemini_api_key.strip()
             model = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
 

@@ -36,7 +36,8 @@ ATENÇÃO - DIRETRIZES DE IDENTIFICAÇÃO ESPECÍFICA:
    - O cachorro Golden Retriever de cor branca/creme se chama "Otávio".
    - O cachorro Doberman de cor preta se chama "Kátio".
    Refira-se a eles pelos seus nomes ("Otávio" e/ou "Kátio") na descrição (description) e nas observações (notes). Nunca se refira a eles apenas como "o cachorro" ou "o cão" se puder identificá-los.
-2. Entregador dos Correios: Identifique se há um entregador dos Correios (uniforme azul e amarelo, veículo dos Correios ou pacotes/encomendas). Se for o caso, mencione-o explicitamente como "entregador dos Correios" na descrição e observações.
+2. EVITE ALUCINAÇÕES E FALSOS POSITIVOS: Seja extremamente rigoroso e cético. Se um cachorro ("Otávio" ou "Kátio") ou qualquer pessoa NÃO estiver claramente visível e identificável na imagem, NUNCA afirme que está lá. É muito melhor dizer que a câmera está vazia ou sem detecção do que gerar um falso positivo. Não se deixe influenciar por expectativas de encontrar o cão ou pessoa; relate apenas o que é 100% visível de fato.
+3. Entregador dos Correios: Identifique se há um entregador dos Correios (uniforme azul e amarelo, veículo dos Correios ou pacotes/encomendas). Se for o caso, mencione-o explicitamente como "entregador dos Correios" na descrição e observações.
 
 Formato JSON obrigatório:
 {
@@ -93,7 +94,8 @@ ATENÇÃO - DIRETRIZES DE IDENTIFICAÇÃO ESPECÍFICA:
    - O cachorro Golden Retriever de cor branca/creme se chama "Otávio".
    - O cachorro Doberman de cor preta se chama "Kátio".
    Refira-se a eles pelos seus nomes ("Otávio" e/ou "Kátio") na descrição (description) e nas observações (notes). Nunca se refira a eles apenas como "o cachorro" ou "o cão" se puder identificá-los.
-2. Entregador dos Correios: Identifique se há um entregador dos Correios (uniforme azul e amarelo, veículo dos Correios ou pacotes/encomendas). Se for o caso, mencione-o explicitamente como "entregador dos Correios" na descrição e observações.
+2. EVITE ALUCINAÇÕES E FALSOS POSITIVOS: Seja extremamente rigoroso e cético. Se um cachorro ("Otávio" ou "Kátio") ou qualquer pessoa NÃO estiver claramente visível e identificável na imagem, NUNCA afirme que está lá. É muito melhor dizer que a câmera está vazia ou sem detecção do que gerar um falso positivo. Relate apenas o que é 100% visível de fato.
+3. Entregador dos Correios: Identifique se há um entregador dos Correios (uniforme azul e amarelo, veículo dos Correios ou pacotes/encomendas). Se for o caso, mencione-o explicitamente como "entregador dos Correios" na descrição e observações.
 
 Formato JSON obrigatório:
 {
