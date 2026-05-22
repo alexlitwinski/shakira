@@ -542,3 +542,84 @@ def describe_camera_mosaic(
     if analysis is None:
         return ""
     return format_analysis_message(analysis)
+
+
+def verify_dog_presence(
+    *,
+    api_key: str,
+    image_bytes: bytes,
+    target_dog: str,
+    camera_name: str,
+    model: str | None = None,
+) -> tuple[bool, str]:
+    """
+    Validador de detecção de cão (Double-Pass Verification Gate) para evitar falsos positivos.
+    Analisa a imagem individual de alta resolução da câmera indicada e responde se o cão está REALMENTE presente.
+    Retorna (confirmed, reason).
+    """
+    key = api_key.strip()
+    if not key or not image_bytes:
+        log.warning("verify_dog_presence: key ou image_bytes vazios")
+        return False, "Dados insuficientes para validação."
+
+    model_name = (model or os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")).strip()
+
+    system_prompt = (
+        "Você é um validador de visão computacional de alta segurança residencial.\n"
+        "Sua única tarefa é auditar e validar detecções suspeitas de cachorros em imagens individuais de alta resolução.\n"
+        "Você deve agir com ceticismo absoluto. Na dúvida ou se a imagem estiver muito escura/incompreensível, retorne confirmed=false.\n"
+        "Um modelo anterior que analisou um mosaico de baixa resolução suspeita que o cão indicado está na imagem. No entanto, mosaicos causam distorções visuais e falsos positivos frequentes com objetos domésticos (ex.: eletrodomésticos retangulares pretos/brancos, baldes de jardim, plantas, sombras, cadeiras de piscina, etc.).\n\n"
+        "Sua missão é olhar cuidadosamente para esta única imagem de alta resolução e confirmar se o cão específico está de fato visível na cena.\n\n"
+        "Diretrizes para os cachorros:\n"
+        "1. Kátio: É um cão Doberman de cor preta (ou marrom muito escuro), de porte médio/grande. Ele só está presente se você vir claramente as feições ou a silhueta nítida de um cachorro preto. Se for apenas um objeto retangular preto ou branco (como um ar condicionado portátil ou balde no chão), sombras escuras ou plantas, retorne false.\n"
+        "2. Otávio: É um cão Golden Retriever de cor branca/creme (pelagem clara e felpuda). Ele só está presente se você vir claramente a silhueta ou pelagem de um cachorro claro/dourado. Se for uma cadeira clara, balde claro ou reflexo de luz, retorne false.\n"
+        "3. Se o alvo for 'cachorro' ou 'cão' genérico, verifique se Kátio ou Otávio está nitidamente presente.\n\n"
+        "Responda SOMENTE em JSON válido com a seguinte estrutura:\n"
+        "{\n"
+        '  "confirmed": true ou false,\n'
+        '  "reason": "Explique detalhadamente em português o que você vê e por que tomou essa decisão (ex: \'É apenas um ar condicionado portátil retangular e branco no canto inferior\' ou \'O cão Doberman Kátio está nitidamente visível deitado no chão do alpendre\')"\n'
+        "}"
+    )
+
+    prompt = (
+        f"Analise esta imagem individual da câmera '{camera_name}'.\n"
+        f"O cão procurado é: '{target_dog}'.\n"
+        f"Verifique com extremo rigor e ceticismo se o cão '{target_dog}' está REALMENTE visível na imagem de alta resolução. Ele está presente?"
+    )
+
+    try:
+        genai.configure(api_key=key)
+        vision_model = genai.GenerativeModel(
+            model_name=model_name,
+            system_instruction=system_prompt,
+        )
+        response = vision_model.generate_content(
+            [
+                prompt,
+                {"mime_type": "image/jpeg", "data": image_bytes},
+            ],
+            generation_config=genai.GenerationConfig(
+                response_mime_type="application/json",
+                temperature=0.1,
+            ),
+        )
+        text = getattr(response, "text", None) or ""
+        if not text and response.candidates:
+            parts = response.candidates[0].content.parts
+            text = "".join(getattr(p, "text", "") for p in parts)
+
+        text_clean = text.strip()
+        if text_clean.startswith("```"):
+            text_clean = re.sub(r"^```(?:json)?\s*", "", text_clean)
+            text_clean = re.sub(r"\s*```$", "", text_clean)
+
+        data = json.loads(text_clean)
+        confirmed = bool(data.get("confirmed"))
+        reason = str(data.get("reason") or "").strip()
+        if not reason:
+            reason = "Sem justificativa fornecida."
+        return confirmed, reason
+
+    except Exception as e:
+        log.exception("Falha na validação em segunda passagem (Double-Pass) da camera=%s", camera_name)
+        return False, f"Erro ao processar validação individual: {e}"

@@ -18,6 +18,7 @@ from app.camera_vision import (
     CameraPanelInfo,
     analyze_camera_mosaic,
     format_analysis_message,
+    verify_dog_presence,
 )
 from app.image_collage import build_image_grid
 from app.whatsapp_steps import StepMessenger, pulse_whatsapp_typing, truncate_whatsapp
@@ -522,12 +523,25 @@ async def handle_camera_snapshot_decision(
                     if is_match:
                         for img_bytes, label, cid, desc in chunk:
                             if label.lower().strip() == cam_name.lower().strip() or cid.lower().strip() == cam_name.lower().strip():
-                                found_cameras.append({
-                                    "cam_name": label,
-                                    "notes": notes,
-                                    "image_bytes": img_bytes,
-                                    "camera_id": cid
-                                })
+                                log.info("Double-pass verification iniciado para camera=%s cao=%s", label, target_dog)
+                                confirmed, verification_reason = await asyncio.to_thread(
+                                    verify_dog_presence,
+                                    api_key=api_key,
+                                    image_bytes=img_bytes,
+                                    target_dog=target_dog or "cachorro",
+                                    camera_name=label,
+                                    model=model,
+                                )
+                                if confirmed:
+                                    log.info("Double-pass VERIFICADO com sucesso para camera=%s: %s", label, verification_reason)
+                                    found_cameras.append({
+                                        "cam_name": label,
+                                        "notes": verification_reason,
+                                        "image_bytes": img_bytes,
+                                        "camera_id": cid
+                                    })
+                                else:
+                                    log.warning("Double-pass REJEITOU detecção na camera=%s: %s", label, verification_reason)
                                 break
 
             # Se encontrou o cachorro neste lote, interrompe a busca nos próximos lotes (short-circuit)
