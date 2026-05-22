@@ -45,6 +45,7 @@ class _ActiveCall:
     portao_servico_opened: bool = False
     hall_person_detected: bool = False
     finalize_task: asyncio.Task[None] | None = None
+    notified_attendance: bool = False
 
 
 @dataclass
@@ -128,6 +129,10 @@ class InterfoneDispatchRunner:
                 portao_servico_opened=active.portao_servico_opened,
                 hall_person_detected=active.hall_person_detected,
             )
+            asyncio.create_task(
+                self._check_and_notify_attendance(active),
+                name=f"shakira-interfone-attend-notify-{active.call_id}",
+            )
 
     async def _on_interfone_ring(self) -> None:
         now = time.monotonic()
@@ -156,6 +161,10 @@ class InterfoneDispatchRunner:
 
         # Começa a monitorar e faz o bootstrap de sinais imediatamente!
         await self._bootstrap_attend_signals(active)
+        asyncio.create_task(
+            self._check_and_notify_attendance(active),
+            name=f"shakira-interfone-attend-notify-{call_id}",
+        )
         active.finalize_task = asyncio.create_task(
             self._finalize_after_window(active),
             name=f"shakira-interfone-window-{call_id}",
@@ -241,6 +250,91 @@ class InterfoneDispatchRunner:
                     active.portao_servico_opened = True
             elif kind == "hall" and state.strip().lower() in PERSON_ON:
                 active.hall_person_detected = True
+
+    async def _check_and_notify_attendance(self, active: _ActiveCall) -> None:
+        if active.notified_attendance:
+            return
+
+        is_attended = (
+            active.portao_social_opened
+            or active.portao_servico_opened
+            or active.hall_person_detected
+        )
+        if not is_attended:
+            return
+
+        active.notified_attendance = True
+        log.info("Interfone %s: Atendimento detectado! Enviando notificacoes...", active.call_id)
+
+        # Obter o ID da camera do Hall no catalogo de cameras (usando "Hall" como ID/nome amigavel)
+        hall_cam_id = self.cameras.resolve_camera_id("Hall") or "Hall"
+        hall_image_bytes: bytes | None = None
+        if self.settings.frigate_url and self.http:
+            try:
+                frigate = FrigateClient(self.http, base_url=self.settings.frigate_url)
+                hall_image_bytes = await frigate.get_latest_snapshot(hall_cam_id)
+            except Exception as e:
+                log.error("Interfone: Falha ao obter snapshot do Hall (%s): %s", hall_cam_id, e)
+
+        # Resolver os telefones para notificacao
+        from app.alerts_catalog import AlertsCatalog
+        from app.alert_notify import resolve_notify_phones
+        try:
+            catalog = AlertsCatalog.load(self.settings.alerts_config_path)
+            phones = await resolve_notify_phones(self.ha, default_phones=catalog.default_notify.phones)
+        except Exception as e:
+            log.error("Interfone: Erro ao resolver telefones para notificacao: %s", e)
+            phones = []
+
+        if not phones:
+            log.warning("Interfone: Nenhum telefone configurado/permitido para envio de notificacao.")
+            return
+
+        from app.evolution import EvolutionClient
+        evo = EvolutionClient(self.http) if self.http else None
+
+        evo_base = self.settings.evolution_base_url.strip()
+        evo_key = self.settings.evolution_api_key.strip()
+        instance = self.settings.evolution_instance.strip()
+
+        if not (evo and evo_base and evo_key and instance):
+            log.warning("Interfone: Evolution API nao configurada corretamente.")
+            return
+
+        signals = []
+        if active.portao_social_opened:
+            signals.append("portão social aberto")
+        if active.portao_servico_opened:
+            signals.append("portão de serviço aberto")
+        if active.hall_person_detected:
+            signals.append("pessoa no hall interno")
+
+        signals_str = ", ".join(signals)
+        caption = f"Parece que o interfone foi atendido! ({signals_str})"
+
+        for phone in phones:
+            try:
+                if hall_image_bytes:
+                    await evo.send_image_bytes(
+                        base_url=evo_base,
+                        api_key=evo_key,
+                        instance=instance,
+                        number=phone,
+                        image_bytes=hall_image_bytes,
+                        filename="hall_atendimento.jpg",
+                        caption=caption,
+                    )
+                else:
+                    await evo.send_text(
+                        base_url=evo_base,
+                        api_key=evo_key,
+                        instance=instance,
+                        number=phone,
+                        text=f"{caption}\n(Imagem do hall indisponível)",
+                    )
+                log.info("Interfone: Notificacao de atendimento enviada com sucesso para %s", phone)
+            except Exception as e:
+                log.error("Interfone: Erro ao enviar notificacao para %s: %s", phone, e)
 
     async def _finalize_after_window(self, active: _ActiveCall) -> None:
         try:
