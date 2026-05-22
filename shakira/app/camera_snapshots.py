@@ -511,9 +511,6 @@ async def handle_camera_snapshot_decision(
                     caption=caption[:1024],
                 )
             
-            # Envia a descrição textual gerada pelo Gemini
-            description_msg = format_analysis_message(analysis)
-            await say(description_msg, final=True)
             return CameraSnapshotsResult(
                 sent=len(found_cameras),
                 summary=f"Cachorro localizado e enviado em {len(found_cameras)} imagem(ns)."
