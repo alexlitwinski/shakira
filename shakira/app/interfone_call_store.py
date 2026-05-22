@@ -205,15 +205,16 @@ class InterfoneCallStore:
         gemini_summary: str,
         gemini_description: str,
         attend_window_seconds: int,
+        call_id: str | None = None,
     ) -> InterfoneCallRecord:
-        call_id = uuid.uuid4().hex[:12]
+        cid = call_id or uuid.uuid4().hex[:12]
         image_name = ""
         if image_bytes:
-            image_name = f"{call_id}.jpg"
+            image_name = f"{cid}.jpg"
             (self._images_dir / image_name).write_bytes(image_bytes)
 
         record = InterfoneCallRecord(
-            id=call_id,
+            id=cid,
             started_at=_now_iso(),
             camera_id=camera_id,
             gemini_summary=gemini_summary.strip(),
@@ -228,7 +229,7 @@ class InterfoneCallStore:
             data["calls"] = calls
         calls.append(asdict(record))
         self._save_raw(data)
-        log.info("Chamada interfone registada id=%s camera=%s", call_id, camera_id)
+        log.info("Chamada interfone registada id=%s camera=%s", cid, camera_id)
         return record
 
     def update_call(self, record: InterfoneCallRecord) -> None:

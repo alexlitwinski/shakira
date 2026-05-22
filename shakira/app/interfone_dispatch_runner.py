@@ -101,16 +101,33 @@ class InterfoneDispatchRunner:
             return
 
         state_norm = (new_state or "").strip().lower()
+        updated = False
 
         if entity_id == self.config.portao_social_entity and state_norm == GATE_OPEN:
-            active.portao_social_opened = True
-            log.info("Interfone %s: portao social aberto na janela", active.call_id)
+            if not active.portao_social_opened:
+                active.portao_social_opened = True
+                updated = True
+                log.info("Interfone %s: portao social aberto na janela", active.call_id)
         elif entity_id == self.config.portao_servico_entity and state_norm == GATE_OPEN:
-            active.portao_servico_opened = True
-            log.info("Interfone %s: portao servico aberto na janela", active.call_id)
+            if not active.portao_servico_opened:
+                active.portao_servico_opened = True
+                updated = True
+                log.info("Interfone %s: portao servico aberto na janela", active.call_id)
         elif entity_id == self.config.hall_person_entity and state_norm in PERSON_ON:
-            active.hall_person_detected = True
-            log.info("Interfone %s: pessoa no hall na janela", active.call_id)
+            if not active.hall_person_detected:
+                active.hall_person_detected = True
+                updated = True
+                log.info("Interfone %s: pessoa no hall na janela", active.call_id)
+
+        if updated:
+            # Sync the signals to store immediately so list_calls gets it in real-time
+            store = self._store_instance()
+            store.finalize_call(
+                active.call_id,
+                portao_social_opened=active.portao_social_opened,
+                portao_servico_opened=active.portao_servico_opened,
+                hall_person_detected=active.hall_person_detected,
+            )
 
     async def _on_interfone_ring(self) -> None:
         now = time.monotonic()
@@ -125,9 +142,25 @@ class InterfoneDispatchRunner:
         asyncio.create_task(self._process_call(), name="shakira-interfone-call")
 
     async def _process_call(self) -> None:
+        import uuid
+        call_id = uuid.uuid4().hex[:12]
+        active = _ActiveCall(
+            call_id=call_id,
+            started_monotonic=time.monotonic(),
+        )
+
         async with self._lock:
             if self._active is not None:
                 return
+            self._active = active
+
+        # Começa a monitorar e faz o bootstrap de sinais imediatamente!
+        await self._bootstrap_attend_signals(active)
+        active.finalize_task = asyncio.create_task(
+            self._finalize_after_window(active),
+            name=f"shakira-interfone-window-{call_id}",
+        )
+        log.info("Interfone: chamada %s iniciada (janela %ss)", call_id, self.config.attend_window_seconds)
 
         cfg = self.config
         camera_id = cfg.camera_id.strip()
@@ -166,6 +199,7 @@ class InterfoneDispatchRunner:
                 gemini_summary=summary,
                 gemini_description=description,
                 attend_window_seconds=cfg.attend_window_seconds,
+                call_id=call_id,
             )
         else:
             record = store.create_call(
@@ -174,19 +208,18 @@ class InterfoneDispatchRunner:
                 gemini_summary=summary,
                 gemini_description=description,
                 attend_window_seconds=cfg.attend_window_seconds,
+                call_id=call_id,
             )
 
-        active = _ActiveCall(
-            call_id=record.id,
-            started_monotonic=time.monotonic(),
-        )
-        await self._bootstrap_attend_signals(active)
-        self._active = active
-        active.finalize_task = asyncio.create_task(
-            self._finalize_after_window(active),
-            name=f"shakira-interfone-window-{record.id}",
-        )
-        log.info("Interfone: chamada %s iniciada (janela %ss)", record.id, cfg.attend_window_seconds)
+        # Se algum sinal já tiver sido detectado live enquanto o Frigate/Gemini rodava,
+        # persistimos imediatamente no banco de dados!
+        if active.portao_social_opened or active.portao_servico_opened or active.hall_person_detected:
+            store.finalize_call(
+                call_id,
+                portao_social_opened=active.portao_social_opened,
+                portao_servico_opened=active.portao_servico_opened,
+                hall_person_detected=active.hall_person_detected,
+            )
 
     async def _bootstrap_attend_signals(self, active: _ActiveCall) -> None:
         """Marca sinais ja ativos no momento da chamada."""
