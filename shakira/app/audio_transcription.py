@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 
 import google.generativeai as genai
 
@@ -139,8 +140,10 @@ async def resolve_inbound_audio_as_text(
         )
 
     user_text = merge_audio_text_with_caption(inbound.text, transcription)
-    if user_text.startswith("[usuario enviou"):
-        user_text = transcription
+    # Remove qualquer marcador de mídia do WhatsApp no início (ex.: [usuario enviou audio], [Usuário enviou mensagem de voz])
+    user_text_cleaned = re.sub(r"^\[[^\]]+\]\s*", "", user_text)
+    if user_text_cleaned != user_text:
+        user_text = user_text_cleaned.strip() or transcription
 
     log.info(
         "Audio transcrito phone=%s chars=%s",

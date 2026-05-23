@@ -366,18 +366,40 @@ async def handle_camera_snapshot_decision(
             )
         return CameraSnapshotsResult(summary=error)
 
-    # Detecção de busca de cão
+    # Detecção de busca de cão (com tolerância a erros de transcrição de áudio e digitação)
     user_text_lower = user_text.lower().strip() if user_text else ""
     is_dog_search = False
     target_dog = None
 
-    if "katio" in user_text_lower or "kátio" in user_text_lower:
+    # Termos comuns e erros de transcrição/digitação/acentuação para Kátio
+    katio_keywords = [
+        "katio", "kátio", "catio", "cátio", "kacio", "kácio", "cacio", "cácio",
+        "tacio", "tácio", "cássio", "cassio", "cátia", "catia", "kátia", "katia",
+        "kàtio", "kâtio", "càtio", "câtio", "tasso", "kaso"
+    ]
+    
+    # Termos comuns e erros de transcrição/digitação/acentuação para Otávio
+    otavio_keywords = [
+        "otavio", "otávio", "oitavio", "oitávio", "tavio", "távio", "octavio", "octávio",
+        "otàvio", "otâvio"
+    ]
+    
+    # Termos genéricos para cão
+    dog_keywords = [
+        "cachorro", "cachorros", "cão", "cães", "cao", "caes", "animal", "animais", "pet", "pets"
+    ]
+
+    katio_matched = any(k in user_text_lower for k in katio_keywords)
+    otavio_matched = any(o in user_text_lower for o in otavio_keywords)
+    dog_matched = any(d in user_text_lower for d in dog_keywords)
+
+    if katio_matched:
         is_dog_search = True
         target_dog = "Kátio"
-    elif "otavio" in user_text_lower or "otávio" in user_text_lower:
+    elif otavio_matched:
         is_dog_search = True
         target_dog = "Otávio"
-    elif any(x in user_text_lower for x in ["cachorro", "cachorros", "cão", "cães"]):
+    elif dog_matched:
         is_dog_search = True
         target_dog = "cachorro"
 
