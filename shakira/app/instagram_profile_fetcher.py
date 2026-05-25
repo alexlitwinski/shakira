@@ -147,9 +147,9 @@ async def notify_profile_fetched(
 
     if entry.fetch_status == "failed":
         text = (
-            f"Nao consegui obter os dados do perfil "
+            f"Não consegui obter os dados do perfil "
             f"@{entry.handle or 'Instagram'}. "
-            f"O link ficou guardado na mesma."
+            f"O link ficou guardado de qualquer forma."
         )
         if entry.fetch_error:
             text += f" ({entry.fetch_error[:80]})"

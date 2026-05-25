@@ -26,11 +26,11 @@ _MONTH_NAMES = {
 
 _WEEKDAY_NAMES = (
     "segunda-feira",
-    "terca-feira",
+    "terça-feira",
     "quarta-feira",
     "quinta-feira",
     "sexta-feira",
-    "sabado",
+    "sábado",
     "domingo",
 )
 
@@ -62,11 +62,11 @@ def parse_birthday_from_decision(decision: dict[str, Any]) -> tuple[str, int, in
     if not name:
         return "Informe o nome da pessoa."
     if month is None or day is None:
-        return "Informe a data do aniversario (dia e mes)."
+        return "Informe a data do aniversário (dia e mês)."
     if not (1 <= month <= 12 and 1 <= day <= 31):
-        return "Data invalida."
+        return "Data inválida."
     if year is not None and not (1900 <= year <= 2100):
-        return "Ano de nascimento invalido."
+        return "Ano de nascimento inválido."
     return name, month, day, year
 
 
@@ -98,11 +98,11 @@ def parse_birthday_date_text(text: str) -> tuple[int, int, int | None] | str:
         month_name = m.group(2).casefold().replace("ç", "c")
         month = _MONTH_NAMES.get(month_name)
         if not month:
-            return f"Mes desconhecido: {m.group(2)}"
+            return f"Mês desconhecido: {m.group(2)}"
         year = int(m.group(3)) if m.group(3) else None
         return day, month, year
 
-    return f"Nao reconheci a data: {text}"
+    return f"Não reconheci a data: {text}"
 
 
 def format_birthday_entry_line(
@@ -123,7 +123,7 @@ def format_birthday_entry_line(
         if days == 0:
             extras.append("hoje")
         elif days == 1:
-            extras.append("amanha")
+            extras.append("amanhã")
 
     age = entry.age_on(when)
     if age is not None:
@@ -157,8 +157,8 @@ def format_birthdays_list(phone: str) -> str:
     store = get_birthday_store(phone)
     items = store.entries_by_proximity()
     if not items:
-        return "Voce ainda nao tem aniversarios guardados."
-    lines = ["Aniversarios guardados:", ""]
+        return "Você ainda não tem aniversários guardados."
+    lines = ["Aniversários guardados:", ""]
     for entry, when, _ in items:
         lines.append(format_birthday_entry_line(entry, when=when))
     return "\n".join(lines)
@@ -170,10 +170,10 @@ def format_upcoming_birthdays(phone: str, days: int = 7) -> str:
     upcoming = store.upcoming(days, ref=ref)
     if not upcoming:
         if days == 7:
-            return "Nenhum aniversario nos proximos 7 dias."
-        return f"Nenhum aniversario nos proximos {days} dias."
+            return "Nenhum aniversário nos próximos 7 dias."
+        return f"Nenhum aniversário nos próximos {days} dias."
 
-    lines = [f"Aniversarios nos proximos {days} dias:", ""]
+    lines = [f"Aniversários nos próximos {days} dias:", ""]
     for entry, when, _ in upcoming:
         lines.append(
             format_birthday_entry_line(
@@ -214,9 +214,9 @@ def execute_birthday_save_batch(decisions: list[dict[str, Any]], phone: str) -> 
     lines: list[str] = []
     if saved:
         lines.append(
-            f"Guardei {len(saved)} aniversario(s):"
+            f"Guardei {len(saved)} aniversário(s):"
             if len(saved) != 1
-            else "Aniversario guardado:"
+            else "Aniversário guardado:"
         )
         lines.extend(f"- {line}" for line in saved)
     for err in errors:
@@ -242,10 +242,10 @@ def handle_birthday_save(decision: dict[str, Any], phone: str) -> str:
     yr_bit = f" (nascido em {year})" if year else ""
     note_bit = f"\nNota: {note}" if note else ""
     return (
-        f"Aniversario de {result.name} guardado: {result.display_date()}{yr_bit}."
+        f"Aniversário de {result.name} guardado: {result.display_date()}{yr_bit}."
         f"{note_bit}\n\n"
-        "Vou avisar toda segunda sobre os aniversarios da semana "
-        "e no dia do aniversario."
+        "Vou avisar toda segunda sobre os aniversários da semana "
+        "e no dia do aniversário."
     )
 
 

@@ -1767,7 +1767,7 @@ async def handle_send_instagram_link(
                 )
 
     if not ent:
-        msg = intro or "Nao encontrei esse perfil Instagram guardado."
+        msg = intro or "Não encontrei esse perfil Instagram guardado."
         await say(msg)
         return msg
 
@@ -1776,7 +1776,7 @@ async def handle_send_instagram_link(
     evo_base = settings.evolution_base_url.strip()
     evo_key = settings.evolution_api_key.strip()
     if not evo_base or not evo_key or not instance:
-        return "Evolution nao configurado para enviar o perfil."
+        return "Evolution não configurado para enviar o perfil."
 
     if intro:
         await say(intro)
@@ -1801,7 +1801,7 @@ async def handle_send_instagram_link(
             mimetype=mime,
         )
         if ok is None:
-            msg = "Encontrei o perfil mas nao consegui enviar a foto."
+            msg = "Encontrei o perfil mas não consegui enviar a foto."
             await say(msg)
             return msg
         return intro or f"Enviei o perfil @{ent.handle}."
@@ -1842,7 +1842,7 @@ async def handle_refresh_instagram_link(
     ent = resolve_entry_for_reference(phone, link_id=link_id, handle=handle, list_number=num)
     if not ent:
         reply = str(decision.get("response") or "").strip()
-        return reply or "Nao encontrei esse perfil Instagram guardado."
+        return reply or "Não encontrei esse perfil Instagram guardado."
 
     store = get_instagram_store(phone)
     ent.fetch_status = "pending"
@@ -2062,7 +2062,7 @@ async def handle_schedule_action(
             return "Para agendar ação, preciso de fire_after_seconds ou fire_at."
         if fire_after_seconds is not None and fire_after_seconds < MIN_ACTION_DELAY_SECONDS:
             mins = max(1, MIN_ACTION_DELAY_SECONDS // 60)
-            return f"Agendamento minimo de {mins} minuto(s)."
+            return f"Agendamento mínimo de {mins} minuto(s)."
 
     try:
         entry = store.add(
@@ -2123,7 +2123,7 @@ async def _maybe_auto_schedule_boiler_ready(
     try:
         store.add(
             context=(
-                "Usuario pediu aquecer a agua do boiler para banho; "
+                "Usuário pediu aquecer a água do boiler para banho; "
                 "avisar quando atingir 42 graus C ou mais."
             ),
             trigger_type="entity",
@@ -2138,7 +2138,7 @@ async def _maybe_auto_schedule_boiler_ready(
         return None
 
     ensure_runner_started()
-    return "Te aviso quando a agua chegar a 42 graus."
+    return "Te aviso quando a água chegar a 42 graus."
 
 
 def handle_cancel_scheduled_response(decision: dict[str, Any], phone: str) -> str:
@@ -2180,7 +2180,7 @@ async def execute_decision_batch(
 ) -> str:
     """Executa varias decisoes Gemini da mesma mensagem (ex.: lista de aniversarios)."""
     if not decisions:
-        return "Nao entendi o pedido."
+        return "Não entendi o pedido."
 
     actions = {_normalize_action_name(d.get("action")) for d in decisions}
     if actions == {"birthday_save"}:
@@ -2497,7 +2497,7 @@ async def execute_decision(
 
     if action == "send_user_file":
         return await finalize(
-            "Arquivo solicitado. Se nada chegar, verifique se o id ou nome estao corretos."
+            "Arquivo solicitado. Se nada chegar, verifique se o id ou nome estão corretos."
         )
 
     if action == "delete_from_memory":

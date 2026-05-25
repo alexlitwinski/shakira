@@ -197,20 +197,20 @@ class BirthdayStore:
         if not name:
             return "Informe o nome da pessoa."
         if not (1 <= month <= 12 and 1 <= day <= 31):
-            return "Data invalida."
+            return "Data inválida."
         try:
             date(2000, month, day)
         except ValueError:
-            return f"Dia {day} invalido para o mes {month}."
+            return f"Dia {day} inválido para o mês {month}."
 
         cfg = self.load()
         if len(cfg.entries) >= MAX_ENTRIES:
-            return f"Limite de {MAX_ENTRIES} aniversarios atingido."
+            return f"Limite de {MAX_ENTRIES} aniversários atingido."
 
         key = name.casefold()
         for existing in cfg.entries:
             if existing.name.casefold() == key and existing.month == month and existing.day == day:
-                return f"Ja tenho aniversario de {existing.name} em {existing.display_date()}."
+                return f"Já tenho aniversário de {existing.name} em {existing.display_date()}."
 
         entry = BirthdayEntry(
             id=str(uuid.uuid4()),
@@ -246,7 +246,7 @@ class BirthdayStore:
     def delete(self, *, entry_id: str = "", name: str = "", list_number: int = 0) -> str:
         cfg = self.load()
         if not cfg.entries:
-            return "Nenhum aniversario guardado."
+            return "Nenhum aniversário guardado."
 
         sorted_entries = [e for e, _, _ in self.entries_by_proximity()]
         target: BirthdayEntry | None = None
@@ -264,7 +264,7 @@ class BirthdayStore:
             elif len(matches) > 1:
                 ref = self.reference_date()
                 match_ids = {e.id for e in matches}
-                lines = [f"Encontrei {len(matches)} aniversarios com esse nome:"]
+                lines = [f"Encontrei {len(matches)} aniversários com esse nome:"]
                 num = 1
                 for entry, when, _ in self.entries_by_proximity(ref):
                     if entry.id not in match_ids:
@@ -273,16 +273,16 @@ class BirthdayStore:
                         f"{num}. {when.strftime('%d/%m')} — {entry.name}"
                     )
                     num += 1
-                lines.append("Diga o numero da lista para apagar.")
+                lines.append("Diga o número da lista para apagar.")
                 return "\n".join(lines)
 
         if not target:
-            return "Nao encontrei esse aniversario."
+            return "Não encontrei esse aniversário."
 
         cfg.entries = [e for e in cfg.entries if e.id != target.id]
         cfg.last_daily_notified.pop(target.id, None)
         self.save(cfg)
-        return f"Apaguei o aniversario de {target.name} ({target.display_date()})."
+        return f"Apaguei o aniversário de {target.name} ({target.display_date()})."
 
     def upcoming(self, days: int = 7, *, ref: date | None = None) -> list[tuple[BirthdayEntry, date, int]]:
         if ref is None:

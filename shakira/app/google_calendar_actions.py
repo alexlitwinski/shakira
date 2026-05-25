@@ -22,9 +22,9 @@ from app.google_calendar_store import (
 log = logging.getLogger(__name__)
 
 _MISSING_LINK_MSG = (
-    "Ainda nao tenho o link publico da sua agenda Google.\n\n"
-    "No Google Calendar: Configuracoes do calendario > Integrar calendario > "
-    "copie o *endereco publico* (link com cid=...) e envie aqui.\n\n"
+    "Ainda não tenho o link público da sua agenda Google.\n\n"
+    "No Google Calendar: Configurações do calendário > Integrar calendário > "
+    "copie o *endereço público* (link com cid=...) e envie aqui.\n\n"
     "Exemplo:\n"
     "https://calendar.google.com/calendar/u/0?cid=..."
 )
@@ -69,16 +69,16 @@ def handle_google_calendar_show_settings(phone: str) -> str:
     if not cfg.is_configured():
         return _MISSING_LINK_MSG
     lines = [
-        "Configuracao da agenda Google:",
+        "Configuração da agenda Google:",
         "",
-        f"• Calendario: {cfg.calendar_id or '(link configurado)'}",
+        f"• Calendário: {cfg.calendar_id or '(link configurado)'}",
         f"• Alertas de eventos: {cfg.alert_advance_minutes} min antes"
         + (" (ativo)" if cfg.alerts_enabled else " (desativado)"),
-        f"• Resumo diario: {cfg.daily_summary_time} horario {cfg.timezone}"
+        f"• Resumo diário: {cfg.daily_summary_time} horário {cfg.timezone}"
         + (" (ativo)" if cfg.daily_summary_enabled else " (desativado)"),
         "",
         "Para alterar, diga por exemplo: "
-        "'avise 15 minutos antes' ou 'resumo diario as 8h'.",
+        "'avise 15 minutos antes' ou 'resumo diário as 8h'.",
     ]
     return "\n".join(lines)
 
@@ -91,7 +91,7 @@ def handle_google_calendar_save_link(
     if not url:
         return (
             str(decision.get("response") or "").strip()
-            or "Envie o link publico do Google Calendar (com cid= ou src=)."
+            or "Envie o link público do Google Calendar (com cid= ou src=)."
         )
     from app.google_calendar_routine import save_google_calendar_link
 
@@ -117,7 +117,7 @@ def handle_google_calendar_configure(
     raw_time = decision.get("calendar_daily_summary_time")
     if isinstance(raw_time, str) and raw_time.strip():
         cfg.daily_summary_time = normalize_hhmm(raw_time.strip())
-        changed.append(f"resumo diario as {cfg.daily_summary_time}")
+        changed.append(f"resumo diário as {cfg.daily_summary_time}")
 
     tz = str(decision.get("calendar_timezone") or "").strip()
     if tz:
@@ -126,7 +126,7 @@ def handle_google_calendar_configure(
             cfg.timezone = tz
             changed.append(f"fuso {tz}")
         except Exception:
-            return f"Fuso horario invalido: {tz}"
+            return f"Fuso horário inválido: {tz}"
 
     if decision.get("calendar_alert_advance_minutes") is not None:
         cfg.alert_advance_minutes = _parse_advance_minutes(decision, cfg)
@@ -141,7 +141,7 @@ def handle_google_calendar_configure(
             decision.get("calendar_daily_summary_enabled"),
             cfg.daily_summary_enabled,
         )
-        changed.append("resumo diario " + ("ativado" if cfg.daily_summary_enabled else "desativado"))
+        changed.append("resumo diário " + ("ativado" if cfg.daily_summary_enabled else "desativado"))
 
     if not changed:
         return handle_google_calendar_show_settings(phone)
@@ -180,7 +180,7 @@ async def handle_google_calendar_list_events(
         try:
             start_day = datetime.fromisoformat(list_date).date()
         except ValueError:
-            return "Data invalida. Use YYYY-MM-DD."
+            return "Data inválida. Use YYYY-MM-DD."
         window_start = datetime.combine(start_day, datetime.min.time(), tzinfo=tz)
         window_end = window_start + timedelta(days=1)
         title = f"Agenda — {start_day.strftime('%d/%m/%Y')}"
@@ -190,7 +190,7 @@ async def handle_google_calendar_list_events(
         if days == 1:
             title = f"Agenda — hoje ({now.strftime('%d/%m/%Y')})"
         else:
-            title = f"Agenda — proximos {days} dias"
+            title = f"Agenda — próximos {days} dias"
 
     try:
         events = await fetch_calendar_events(
@@ -202,11 +202,11 @@ async def handle_google_calendar_list_events(
         )
     except httpx.HTTPStatusError:
         return (
-            "Nao consegui ler a agenda. Verifique se o calendario esta publico "
-            "e se o link ainda e valido."
+            "Não consegui ler a agenda. Verifique se o calendário está público "
+            "e se o link ainda é válido."
         )
     except Exception:
         log.exception("Falha ao listar agenda phone=%s", phone)
-        return "Nao consegui consultar a agenda agora. Tente de novo em instantes."
+        return "Não consegui consultar a agenda agora. Tente de novo em instantes."
 
     return format_events_list(events, title=title, tz_name=tz_name)

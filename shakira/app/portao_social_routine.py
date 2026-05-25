@@ -411,7 +411,7 @@ async def _run_followup_actions(
         await messenger.step(f"Pronto: {', '.join(ok_labels)}.", final=True)
     elif ok_labels:
         await messenger.step(
-            f"Concluido parcialmente — ok: {', '.join(ok_labels)}; "
+            f"Concluído parcialmente — ok: {', '.join(ok_labels)}; "
             f"falhou: {', '.join(fail_labels)}.",
             final=True,
         )

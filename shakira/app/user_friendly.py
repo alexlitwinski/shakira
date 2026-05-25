@@ -146,7 +146,7 @@ def format_checking(entity_id: str, catalog: DevicesCatalog | None, state: dict[
     label = entity_display_name(entity_id, catalog, state)
     domain = entity_id.split(".", 1)[0] if "." in entity_id else ""
     if domain == "sensor" and "temp" in entity_id.lower():
-        return "Vou verificar a temperatura da agua..."
+        return "Vou verificar a temperatura da água..."
     return f"Vou verificar {label}..."
 
 

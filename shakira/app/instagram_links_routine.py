@@ -67,8 +67,8 @@ def _ask_description_message(handle: str) -> str:
     disp = _handle_display(handle)
     return (
         f"Recebi o link de {disp}.\n\n"
-        "Quer adicionar uma descricao? Responda *sim* (e envie o texto na proxima mensagem) "
-        "ou *nao* para guardar sem descricao."
+        "Quer adicionar uma descrição? Responda *sim* (e envie o texto na próxima mensagem) "
+        "ou *não* para guardar sem descrição."
     )
 
 
@@ -76,8 +76,8 @@ def _confirm_saved(handle: str, note: str) -> str:
     disp = _handle_display(handle)
     if note.strip():
         short = note if len(note) <= 120 else note[:117] + "..."
-        return f"Guardei {disp} com a descricao: «{short}»."
-    return f"Guardei {disp} no seu registro Instagram (sem descricao)."
+        return f"Guardei {disp} com a descrição: «{short}»."
+    return f"Guardei {disp} no seu registro Instagram (sem descrição)."
 
 
 async def _send_text(
@@ -155,7 +155,7 @@ async def _finalize_save(
     ent = store.mark_saved(entry_id, user_note=note)
     _clear_pending(phone)
     if not ent:
-        return "Nao encontrei o registro para guardar."
+        return "Não encontrei o registro para guardar."
     invalidate_user_memory_cache(get_store(phone))
     msg = _confirm_saved(ent.handle, note)
     await _send_text(
@@ -193,7 +193,7 @@ async def _begin_instagram_link_flow(
             evo_key=evo_key,
             instance=instance,
             phone=phone,
-            text=f"Link Instagram invalido: {e}",
+            text=f"Link Instagram inválido: {e}",
         )
         return True
 
@@ -313,7 +313,7 @@ async def try_handle_instagram_link_pending(
             evo_key=evo_key,
             instance=instance,
             phone=phone,
-            text="Cancelado. O link nao foi guardado.",
+            text="Cancelado. O link não foi guardado.",
         )
         return True
 
@@ -326,7 +326,7 @@ async def try_handle_instagram_link_pending(
                 evo_key=evo_key,
                 instance=instance,
                 phone=phone,
-                text="Envie a descricao que quer associar a este perfil.",
+                text="Envie a descrição que quer associar a este perfil.",
             )
             return True
         if _NO_RE.match(t):
@@ -357,7 +357,7 @@ async def try_handle_instagram_link_pending(
             evo_key=evo_key,
             instance=instance,
             phone=phone,
-            text="Responda *sim* ou *nao*, ou envie a descricao diretamente.",
+            text="Responda *sim* ou *não*, ou envie a descrição diretamente.",
         )
         return True
 
@@ -390,7 +390,7 @@ async def try_handle_instagram_link_pending(
             evo_key=evo_key,
             instance=instance,
             phone=phone,
-            text="Envie um texto para a descricao ou *nao* para guardar sem.",
+            text="Envie um texto para a descrição ou *não* para guardar sem.",
         )
         return True
 

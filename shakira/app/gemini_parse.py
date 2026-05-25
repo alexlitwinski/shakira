@@ -27,7 +27,7 @@ def parse_gemini_decision_payload(data: Any) -> list[dict[str, Any]]:
     """Normaliza resposta Gemini para lista de decisoes (>=1)."""
     if isinstance(data, list):
         out = [row for row in data if isinstance(row, dict) and row.get("action")]
-        return out or [{"action": "reply", "response": "Nao entendi a resposta."}]
+        return out or [{"action": "reply", "response": "Não entendi a resposta."}]
 
     if isinstance(data, dict):
         for key in _BATCH_KEYS:
@@ -39,7 +39,7 @@ def parse_gemini_decision_payload(data: Any) -> list[dict[str, Any]]:
         if data.get("action"):
             return [data]
 
-    return [{"action": "reply", "response": "Nao entendi a resposta."}]
+    return [{"action": "reply", "response": "Não entendi a resposta."}]
 
 
 def parse_gemini_response_text(text: str) -> list[dict[str, Any]]:

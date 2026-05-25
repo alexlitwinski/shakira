@@ -57,12 +57,12 @@ class GoogleCalendarConfig:
 
     def summary_line(self) -> str:
         if not self.is_configured():
-            return "Agenda Google: link publico ainda nao configurado."
+            return "Agenda Google: link público ainda não configurado."
         parts = [
-            f"Agenda Google: link configurado ({self.calendar_id or 'calendario'}).",
+            f"Agenda Google: link configurado ({self.calendar_id or 'calendário'}).",
             f"Alertas: {self.alert_advance_minutes} min antes"
             + (" (ativo)" if self.alerts_enabled else " (desativado)"),
-            f"Resumo diario: {self.daily_summary_time} ({self.timezone})"
+            f"Resumo diário: {self.daily_summary_time} ({self.timezone})"
             + (" (ativo)" if self.daily_summary_enabled else " (desativado)"),
         ]
         return " ".join(parts)

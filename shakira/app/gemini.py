@@ -27,6 +27,48 @@ def _strip_code_fence(text: str) -> str:
     return t.strip()
 
 
+def invalidate_any_matching_cache(cache_name: str) -> None:
+    """Procura e remove qualquer arquivo de metadados de cache (catalog ou usuario) associado ao cache_name."""
+    if not cache_name:
+        return
+    log.warning("Invalidando cache expirado ou corrompido: %s", cache_name)
+
+    # 1. Tentar invalidar o cache de catálogo estático
+    try:
+        from app.gemini_cache import CACHE_META_PATH, _delete_cache
+        if CACHE_META_PATH.is_file():
+            try:
+                data = json.loads(CACHE_META_PATH.read_text(encoding="utf-8"))
+            except Exception:
+                data = {}
+            if isinstance(data, dict) and data.get("cache_name") == cache_name:
+                _delete_cache(cache_name)
+                CACHE_META_PATH.unlink(missing_ok=True)
+                log.info("Cache de catálogo '%s' removido do disco com sucesso.", cache_name)
+    except Exception as e:
+        log.debug("Erro ao invalidar cache de catálogo: %s", e)
+
+    # 2. Tentar invalidar cache de memória de qualquer usuário
+    try:
+        from app.user_memory import USER_DATA_ROOT
+        from app.user_memory_cache import _delete_cache
+        if USER_DATA_ROOT.is_dir():
+            for p in USER_DATA_ROOT.glob("*/gemini_memory_cache.json"):
+                try:
+                    try:
+                        data = json.loads(p.read_text(encoding="utf-8"))
+                    except Exception:
+                        data = {}
+                    if isinstance(data, dict) and data.get("cache_name") == cache_name:
+                        _delete_cache(cache_name)
+                        p.unlink(missing_ok=True)
+                        log.info("Cache de memória de usuário '%s' em %s removido com sucesso.", cache_name, p)
+                except Exception as p_err:
+                    log.debug("Erro ao verificar arquivo de cache de usuário %s: %s", p, p_err)
+    except Exception as e:
+        log.debug("Erro ao invalidar caches de usuários: %s", e)
+
+
 class GeminiAssistant:
     def __init__(
         self,
@@ -120,12 +162,49 @@ Mensagem atual do usuario:
                     temperature=0.2,
                 ),
             )
-        except Exception:
-            log.exception("Gemini generate_content falhou")
-            return {
-                "action": "reply",
-                "response": "Não consegui processar agora. Tente de novo em instantes.",
-            }
+        except Exception as e:
+            err_str = str(e).lower()
+            is_cache_err = self._cache_name and (
+                "cachedcontent not found" in err_str
+                or "permission_denied" in err_str
+                or "permission denied" in err_str
+                or "403" in err_str
+                or "404" in err_str
+            )
+            if is_cache_err:
+                log.warning("Cache '%s' falhou (%s). Reconstruindo modelo inline e tentando novamente...", self._cache_name, e)
+                # Invalida dos caches em runtime da própria instância
+                cache_key = (self._cache_name, self._model_name)
+                _model_instance_cache.pop(cache_key, None)
+                
+                # Invalida os arquivos de metadados persistentes de cache
+                invalidate_any_matching_cache(self._cache_name)
+                
+                # Reconstrói modelo sem o cache
+                self._cache_name = None
+                self._model = self._build_model()
+                
+                # Tenta geração novamente com o modelo inline fallback
+                try:
+                    response = self._model.generate_content(
+                        prompt,
+                        generation_config=genai.GenerationConfig(
+                            response_mime_type="application/json",
+                            temperature=0.2,
+                        ),
+                    )
+                except Exception as retry_err:
+                    log.exception("Gemini generate_content falhou mesmo no fallback inline")
+                    return {
+                        "action": "reply",
+                        "response": "Não consegui processar agora. Tente de novo em instantes.",
+                    }
+            else:
+                log.exception("Gemini generate_content falhou")
+                return {
+                    "action": "reply",
+                    "response": "Não consegui processar agora. Tente de novo em instantes.",
+                }
         log.debug("Gemini decide OK (%.0fms)", (time.monotonic() - t0) * 1000.0)
 
         text = getattr(response, "text", None) or ""

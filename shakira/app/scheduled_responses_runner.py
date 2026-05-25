@@ -329,12 +329,12 @@ class ScheduledResponsesRunner:
     def _trigger_summary(self, entry: ScheduledResponse) -> str:
         if entry.trigger_type == "time":
             fire = entry.effective_fire_at()
-            when = fire.isoformat() if fire else "horario agendado"
+            when = fire.isoformat() if fire else "horário agendado"
             return f"Lembrete temporal disparado ({when})"
         state = entry.last_known_state or "?"
         return (
-            f"Entidade {entry.entity_id} satisfez condicao {entry.when_state} "
-            f"(estado actual: {state})"
+            f"Entidade {entry.entity_id} satisfez condição {entry.when_state} "
+            f"(estado atual: {state})"
         )
 
     async def _build_entity_states_block(self, entry: ScheduledResponse) -> str:

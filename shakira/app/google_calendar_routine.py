@@ -34,7 +34,7 @@ def save_google_calendar_link(phone: str, url: str) -> tuple[str, bool]:
     try:
         cal_id, ics_url, normalized = parse_google_calendar_public_url(url)
     except ValueError as e:
-        return f"Nao consegui usar esse link: {e}", False
+        return f"Não consegui usar esse link: {e}", False
 
     store = get_google_calendar_store(phone)
     cfg = store.load()
@@ -49,10 +49,10 @@ def save_google_calendar_link(phone: str, url: str) -> tuple[str, bool]:
         "",
         f"• Alertas: {cfg.alert_advance_minutes} min antes"
         + (" (ativo)" if cfg.alerts_enabled else " (desativado)"),
-        f"• Resumo diario: {cfg.daily_summary_time} ({cfg.timezone})"
+        f"• Resumo diário: {cfg.daily_summary_time} ({cfg.timezone})"
         + (" (ativo)" if cfg.daily_summary_enabled else " (desativado)"),
         "",
-        "Pode pedir para mudar a antecedencia ou o horario do resumo.",
+        "Pode pedir para mudar a antecedência ou o horário do resumo.",
     ]
     return "\n".join(lines), True
 
@@ -90,14 +90,14 @@ async def verify_calendar_feed(
             cfg.ics_url[:80],
         )
         return (
-            "\n\nNao consegui ler os eventos. Confirme que o calendario esta *publico* "
-            "em Configuracoes do calendario > Integrar calendario."
+            "\n\nNão consegui ler os eventos. Confirme que o calendário está *público* "
+            "em Configurações do calendário > Integrar calendário."
         )
     except Exception:
         log.exception("Falha ao validar ICS phone=%s", phone)
         return (
-            "\n\nNao consegui validar a leitura da agenda agora. "
-            "Verifique se o calendario esta publico."
+            "\n\nNão consegui validar a leitura da agenda agora. "
+            "Verifique se o calendário está público."
         )
 
     if not preview_today:

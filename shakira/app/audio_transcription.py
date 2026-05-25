@@ -113,19 +113,19 @@ async def resolve_inbound_audio_as_text(
 
     if not audio_transcription_enabled():
         return None, (
-            "Transcricao de mensagens de voz esta desativada. Envie em texto."
+            "Transcrição de mensagens de voz está desativada. Envie em texto."
         )
 
     if not (settings.gemini_api_key or "").strip():
         return None, (
-            "Para usar mensagens de voz, configure a chave da API Gemini nas opcoes do add-on."
+            "Para usar mensagens de voz, configure a chave da API Gemini nas opções do add-on."
         )
 
     downloaded = await download_inbound_media_bytes(
         inbound, settings=settings, evo=evo, instance=instance
     )
     if not downloaded:
-        return None, "Recebi o audio, mas nao consegui baixa-lo. Tente enviar de novo."
+        return None, "Recebi o áudio, mas não consegui baixá-lo. Tente enviar de novo."
 
     raw, mimetype, fname = downloaded
     transcription = transcribe_audio_bytes(
@@ -136,7 +136,7 @@ async def resolve_inbound_audio_as_text(
     )
     if not transcription:
         return None, (
-            "Nao consegui entender o audio. Pode repetir ou escrever em texto?"
+            "Não consegui entender o áudio. Pode repetir ou escrever em texto?"
         )
 
     user_text = merge_audio_text_with_caption(inbound.text, transcription)
