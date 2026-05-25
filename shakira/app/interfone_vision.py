@@ -114,3 +114,86 @@ def analyze_interfone_visitor(
     if analysis is None:
         log.warning("Gemini interfone: JSON invalido: %s", text[:300])
     return analysis
+
+
+HALL_INVASION_VISION_SYSTEM = """Você é um especialista em segurança residencial e analisa imagens em tempo real da câmera do hall de entrada (hall interno) após a abertura do portão social.
+Sua missão é identificar de forma extremamente precisa se há qualquer risco de invasão da casa (roubo/assalto) ou comportamento suspeito.
+
+Considere as seguintes diretrizes:
+1. Pessoas comuns: Moradores, visitantes conhecidos ou convidados autorizados entrando calmamente NÃO representam risco.
+2. Riscos de invasão/roubo (Comportamento Suspeito/Ameaçador):
+   - Pessoas armadas (com arma de fogo, faca, barra de ferro ou qualquer objeto usado como arma).
+   - Pessoas com rostos cobertos por balaclava, máscara (que não seja cirúrgica), capuz cobrindo totalmente o rosto, capacete dentro de casa de forma suspeita.
+   - Pessoas tentando forçar portas/janelas internas, arrombamento, escalando ou correndo de forma agressiva/ameaçadora.
+   - Indivíduos em luta corporal ou rendendo alguém sob ameaça.
+3. Se houver apenas moradores, convidados entrando normalmente ou se a área estiver vazia (apenas os cachorros Otávio e Kátio, por exemplo), classifique como SEM RISCO (has_risk: false).
+
+Responda APENAS em JSON válido no formato abaixo:
+{
+  "has_risk": true/false,
+  "description": "Explicação detalhada e direta do risco identificado em português. Se não houver risco, deixe em branco ou descreva brevemente que está tudo normal."
+}"""
+
+
+@dataclass
+class HallInvasionAnalysis:
+    has_risk: bool = False
+    description: str = ""
+
+
+def analyze_hall_invasion_risk(
+    *,
+    api_key: str,
+    image_bytes: bytes,
+    model: str | None = None,
+) -> HallInvasionAnalysis:
+    key = api_key.strip()
+    if not key or not image_bytes:
+        return HallInvasionAnalysis(has_risk=False, description="Sem chave API ou imagem vazia")
+
+    model_name = (model or os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")).strip()
+    prompt = (
+        "Analise a imagem da câmera do hall interno. Identifique se há qualquer ameaça iminente de roubo, "
+        "assalto ou invasão de domicílio em andamento. Responda estritamente no formato JSON definido."
+    )
+
+    try:
+        genai.configure(api_key=key)
+        vision_model = genai.GenerativeModel(
+            model_name=model_name,
+            system_instruction=HALL_INVASION_VISION_SYSTEM,
+        )
+        response = vision_model.generate_content(
+            [
+                prompt,
+                {"mime_type": "image/jpeg", "data": image_bytes},
+            ],
+            generation_config=genai.GenerationConfig(
+                response_mime_type="application/json",
+                temperature=0.1,
+            ),
+        )
+    except Exception as e:
+        log.exception("Gemini analyze_hall_invasion_risk falhou")
+        return HallInvasionAnalysis(has_risk=False, description=f"Erro na análise: {e}")
+
+    text = getattr(response, "text", None) or ""
+    if not text and response.candidates:
+        parts = response.candidates[0].content.parts
+        text = "".join(getattr(p, "text", "") for p in parts)
+
+    # Parse JSON
+    text = text.strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:json)?\s*", "", text)
+        text = re.sub(r"\s*```$", "", text)
+    try:
+        data = json.loads(text)
+        return HallInvasionAnalysis(
+            has_risk=bool(data.get("has_risk")),
+            description=str(data.get("description") or "").strip(),
+        )
+    except Exception:
+        log.warning("Gemini hall invasion: JSON inválido: %s", text[:300])
+        return HallInvasionAnalysis(has_risk=False, description="Erro ao decodificar resposta JSON")
+
