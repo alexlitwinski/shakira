@@ -14,10 +14,7 @@ from app.config import AppSettings
 from app.devices_catalog import DevicesCatalog
 from app.homeassistant import HomeAssistantClient
 
-log = logging.getLogger(__name__)
-
-
-@dataclass
+log = logging.getLogger(__name__)@dataclass
 class PresenceSimulatorRunner:
     settings: AppSettings
     ha: HomeAssistantClient
@@ -29,12 +26,27 @@ class PresenceSimulatorRunner:
     _active_until: float | None = None
     _next_action_at: float | None = None
     _bootstrapped: bool = False
+    _history: list[dict[str, Any]] = field(default_factory=list)
+    _last_control_state: bool | None = None
+
+    def _log_action(self, action_type: str, entity_id: str | None, details: str) -> None:
+        from datetime import datetime
+        now_str = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
+        self._history.append({
+            "timestamp": now_str,
+            "action": action_type,
+            "entity_id": entity_id,
+            "details": details
+        })
+        if len(self._history) > 15:
+            self._history.pop(0)
 
     def reload(self, config: PresenceSimulatorConfig, *, devices: DevicesCatalog | None = None) -> None:
         self.config = config
         if devices is not None:
             self.devices = devices
         log.info("Rotina de simulação de presença recarregada.")
+        self._log_action("Recarregar", None, "Configuração do simulador recarregada.")
 
     async def ensure_running(self) -> None:
         if self.config.enabled:
@@ -58,6 +70,7 @@ class PresenceSimulatorRunner:
             self.config.min_off_minutes,
             self.config.max_off_minutes,
         )
+        self._log_action("Iniciar", None, "Serviço de simulação de presença iniciado em segundo plano.")
 
     async def stop(self) -> None:
         self._stop_event.set()
@@ -68,8 +81,9 @@ class PresenceSimulatorRunner:
             except asyncio.CancelledError:
                 pass
             self._loop_task = None
-        await self._turn_off_active_light()
+        await self._turn_off_active_light("simulador parado")
         self._next_action_at = None
+        self._log_action("Parar", None, "Serviço de simulação de presença parado.")
 
     def is_running(self) -> bool:
         return bool(self.config.enabled and self._loop_task and not self._loop_task.done())
@@ -88,7 +102,7 @@ class PresenceSimulatorRunner:
         log.info("Simulação de presença (live): %s alterou %s -> %s", entity_id, old_state or "(vazio)", new_state)
 
         if state_norm == "off":
-            await self._turn_off_active_light()
+            await self._turn_off_active_light("botão de controle desligado (live)")
             self._next_action_at = None
 
     def _get_eligible_entities(self) -> list[str]:
@@ -101,14 +115,16 @@ class PresenceSimulatorRunner:
                     eligible.append(ent.entity_id)
         return eligible
 
-    async def _turn_off_active_light(self) -> None:
+    async def _turn_off_active_light(self, reason: str = "expiração de tempo") -> None:
         if self._active_light:
             try:
                 domain = self._active_light.split(".")[0]
                 await self.ha.call_service(domain, "turn_off", {"entity_id": self._active_light})
-                log.info("Simulação de presença: %s desligado com sucesso.", self._active_light)
+                log.info("Simulação de presença: %s desligado com sucesso. Razão: %s", self._active_light, reason)
+                self._log_action("Desligar", self._active_light, f"Desligou {self._active_light} (razão: {reason}).")
             except Exception as e:
                 log.error("Simulação de presença: falha ao desligar %s: %s", self._active_light, e)
+                self._log_action("Erro", self._active_light, f"Falha ao desligar {self._active_light}: {e}")
             finally:
                 self._active_light = None
                 self._active_until = None
@@ -120,9 +136,18 @@ class PresenceSimulatorRunner:
                 control_state_data = await self.ha.get_state(self.config.control_entity)
                 is_active = control_state_data.get("state") == "on" if control_state_data else False
 
+                if self._last_control_state is None:
+                    self._last_control_state = is_active
+                    state_desc = "Ativo" if is_active else "Inativo"
+                    self._log_action("Inicializado", None, f"Simulador de presença inicializado como {state_desc}.")
+                elif self._last_control_state != is_active:
+                    state_desc = "Ativado" if is_active else "Desativado"
+                    self._log_action("Mudança de Estado", None, f"O simulador foi {state_desc} pelo Home Assistant.")
+                    self._last_control_state = is_active
+
                 if not is_active:
                     # Simulação inativa. Garante que tudo esteja desligado.
-                    await self._turn_off_active_light()
+                    await self._turn_off_active_light("botão de controle desligado")
                     self._next_action_at = None
                     await asyncio.sleep(10)
                     continue
@@ -133,7 +158,7 @@ class PresenceSimulatorRunner:
                 if self._active_light and self._active_until:
                     if now >= self._active_until:
                         log.info("Simulação de presença: tempo ativo expirado para %s. Desligando.", self._active_light)
-                        await self._turn_off_active_light()
+                        await self._turn_off_active_light("fim do tempo ativo")
                         
                         # Calcula próximo tempo de acionamento (OFF)
                         off_sec = random.uniform(self.config.min_off_minutes * 60, self.config.max_off_minutes * 60)
@@ -143,6 +168,7 @@ class PresenceSimulatorRunner:
                             off_sec / 60.0,
                             time.strftime("%H:%M:%S", time.localtime(self._next_action_at)),
                         )
+                        self._log_action("Agendar", None, f"Aguardando {off_sec / 60.0:.1f} minutos para a próxima luz.")
                     else:
                         await asyncio.sleep(5)
                         continue
@@ -169,8 +195,10 @@ class PresenceSimulatorRunner:
                         self._active_light = selected
                         self._active_until = now + on_sec
                         self._next_action_at = None
+                        self._log_action("Ligar", selected, f"Acionou {selected} por {on_sec / 60.0:.1f} minutos.")
                     except Exception as e:
                         log.error("Simulação de presença: falha ao acionar %s: %s", selected, e)
+                        self._log_action("Erro", selected, f"Falha ao ligar {selected}: {e}")
                         self._next_action_at = now + 30  # Tenta novamente em 30 segundos
             except Exception:
                 log.exception("Erro no ciclo da simulação de presença")
@@ -193,4 +221,5 @@ class PresenceSimulatorRunner:
             "active_light": self._active_light,
             "active_until_in_s": round(self._active_until - now, 1) if self._active_until else None,
             "next_action_in_s": round(self._next_action_at - now, 1) if self._next_action_at else None,
+            "history": self._history,
         }

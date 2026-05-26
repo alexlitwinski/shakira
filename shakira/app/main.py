@@ -297,6 +297,12 @@ async def _status_payload(request: Request) -> dict[str, Any]:
         request.app.state, "scheduled_runner", None
     )
     scheduled_status = scheduled_runner.status_snapshot() if scheduled_runner else None
+    
+    presence_simulator_runner = getattr(
+        request.app.state, "presence_simulator_runner", None
+    )
+    presence_status = presence_simulator_runner.status_snapshot() if presence_simulator_runner else None
+
     return await build_status_report(
         settings=settings,
         http=http,
@@ -309,6 +315,7 @@ async def _status_payload(request: Request) -> dict[str, Any]:
         user_data_migrated_phones=getattr(
             request.app.state, "user_data_migrated_phones", None
         ),
+        presence_simulator_status=presence_status,
     )
 
 
@@ -549,6 +556,17 @@ async def get_scheduled_responses_status(request: Request) -> dict[str, Any]:
     """Estado do executor de respostas agendadas (painel / diagnostico)."""
     runner: ScheduledResponsesRunner = request.app.state.scheduled_runner
     return runner.status_snapshot()
+
+
+@app.delete("/api/scheduled-responses/{phone}/{schedule_id}")
+async def cancel_scheduled_response_api(request: Request, phone: str, schedule_id: str) -> dict[str, Any]:
+    """Cancela um agendamento pendente a partir do painel."""
+    from app.scheduled_responses import get_scheduled_store
+    store = get_scheduled_store(phone)
+    success = store.cancel(schedule_id)
+    if not success:
+        raise HTTPException(status_code=404, detail="Agendamento não encontrado ou não pendente")
+    return {"success": True, "message": f"Agendamento {schedule_id} cancelado com sucesso."}
 
 
 @app.get("/api/entities")

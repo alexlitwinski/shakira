@@ -460,12 +460,39 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 
     function renderCard(svc) {
       const st = svc.status || "disabled";
-      const details = JSON.stringify(svc.details || {}, null, 2);
+      let detailsHtml = '';
+      
+      if (svc.id === "presence_simulator" && svc.details) {
+        const hist = svc.details.history || [];
+        const histHtml = hist.length > 0 
+          ? '<ul style="padding-left: 1.2rem; margin: 0.5rem 0 0; color: var(--muted); font-size: 0.75rem; list-style-type: disc;">' +
+            hist.map(function(act) {
+              return '<li style="margin-bottom: 0.35rem;"><strong>[' + esc(act.timestamp) + '] ' + esc(act.action) + ':</strong> ' + esc(act.details) + '</li>';
+            }).join("") + '</ul>'
+          : '<p style="margin: 0.5rem 0 0; color: var(--muted); font-size: 0.75rem;">Nenhuma ação registrada ainda.</p>';
+          
+        const activeLight = svc.details.active_light ? '<li><strong>Luz Ativa:</strong> <span class="mono" style="color: var(--accent);">' + esc(svc.details.active_light) + '</span></li>' : '<li><strong>Luz Ativa:</strong> nenhuma</li>';
+        const controlEntity = '<li><strong>Botão de Controle:</strong> <span class="mono" style="color: var(--accent);">' + esc(svc.details.control_entity) + '</span></li>';
+        const nextAction = svc.details.next_action_in_s ? '<li><strong>Próximo acionamento em:</strong> ' + esc(Math.round(svc.details.next_action_in_s)) + 's</li>' : '';
+        const activeUntil = svc.details.active_until_in_s ? '<li><strong>Desliga em:</strong> ' + esc(Math.round(svc.details.active_until_in_s)) + 's</li>' : '';
+        
+        detailsHtml = '<div style="margin-top: 0.5rem; font-size: 0.78rem; border-top: 1px solid var(--border); padding-top: 0.5rem;">' +
+          '<ul style="padding-left: 1.2rem; margin: 0; color: var(--text); list-style-type: square;">' +
+            controlEntity + activeLight + nextAction + activeUntil +
+          '</ul>' +
+          '<h3 style="font-size: 0.8rem; margin: 0.75rem 0 0.25rem; font-weight: 600; color: var(--accent);">Últimas 15 ações da simulação:</h3>' +
+          histHtml +
+          '</div>';
+      } else {
+        const details = JSON.stringify(svc.details || {}, null, 2);
+        detailsHtml = '<pre>' + esc(details) + '</pre>';
+      }
+      
       return '<article class="card ' + esc(st) + '"><div class="card-head"><h2>' +
         esc(svc.name || svc.id) + '</h2><span class="pill ' + esc(st) + '">' +
         esc(STATUS_LABELS[st] || st) + '</span></div><p class="summary">' +
-        esc(svc.summary || "") + '</p><details><summary>Detalhes</summary><pre>' +
-        esc(details) + '</pre></details></article>';
+        esc(svc.summary || "") + '</p><details><summary>Detalhes</summary>' +
+        detailsHtml + '</details></article>';
     }
 
     function formatUptime(sec) {
@@ -518,12 +545,37 @@ DASHBOARD_HTML = """<!DOCTYPE html>
           '<td class="ctx">' + esc(item.context || "") + '</td>' +
           '<td>' + esc(formatDate(item.created_at)) + '</td>' +
           '<td>' + esc(formatDate(item.expires_at)) + '</td>' +
+          '<td><button type="button" class="btn-cancel-schedule" data-phone="' + esc(item.phone) + '" data-id="' + esc(item.id) + '" style="background: rgba(248, 113, 113, 0.15); border-color: var(--err); color: var(--err); padding: 0.2rem 0.55rem; font-size: 0.72rem; border-radius: 6px; cursor: pointer; font-weight: 600;">Excluir</button></td>' +
           '</tr>';
       }).join("");
       box.innerHTML = '<table class="pending-table"><thead><tr>' +
         '<th>ID</th><th>Tipo</th><th>Telefone</th><th>Label</th><th>Trigger</th>' +
-        '<th>Contexto</th><th>Criado</th><th>Expira</th>' +
+        '<th>Contexto</th><th>Criado</th><th>Expira</th><th>Ações</th>' +
         '</tr></thead><tbody>' + rows + '</tbody></table>';
+        
+      box.querySelectorAll(".btn-cancel-schedule").forEach(function(btn) {
+        btn.addEventListener("click", function() {
+          const phone = btn.getAttribute("data-phone");
+          const id = btn.getAttribute("data-id");
+          if (phone && id && confirm("Deseja realmente cancelar este agendamento?")) {
+            cancelSchedule(phone, id);
+          }
+        });
+      });
+    }
+
+    async function cancelSchedule(phone, id) {
+      try {
+        const r = await fetch("api/scheduled-responses/" + phone + "/" + id, {
+          method: "DELETE"
+        });
+        const data = await r.json();
+        if (!r.ok) throw new Error(data.detail || "Erro HTTP " + r.status);
+        showMsg(data.message || "Agendamento cancelado com sucesso.", "ok");
+        loadStatus();
+      } catch (e) {
+        showMsg("Não foi possível excluir: " + e.message, "error");
+      }
     }
 
     async function loadStatus() {

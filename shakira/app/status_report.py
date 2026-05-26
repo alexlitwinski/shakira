@@ -24,7 +24,7 @@ from app.user_memory import USER_DATA_ROOT
 
 log = logging.getLogger(__name__)
 
-VERSION = "1.7.63"
+VERSION = "1.7.64"
 
 
 def _mask_secret(value: str, visible: int = 4) -> str:
@@ -274,6 +274,42 @@ def _check_webhook() -> dict[str, Any]:
     }
 
 
+def _check_presence_simulator(status: dict[str, Any] | None) -> dict[str, Any]:
+    if not status:
+        return {
+            "id": "presence_simulator",
+            "name": "Simulador de presença",
+            "status": "disabled",
+            "summary": "Não configurado ou desativado",
+            "details": {},
+        }
+    
+    enabled = status.get("enabled", False)
+    running = status.get("running", False)
+    
+    if not enabled:
+        level = "disabled"
+        summary = "Desativado nas configurações"
+    elif running:
+        level = "ok"
+        active_light = status.get("active_light")
+        if active_light:
+            summary = f"Ligado (Luz ativa no momento: {active_light})"
+        else:
+            summary = "Ligado (Aguardando próximo acionamento)"
+    else:
+        level = "warning"
+        summary = "Ativo nas configurações, mas inativo no Home Assistant"
+        
+    return {
+        "id": "presence_simulator",
+        "name": "Simulador de presença",
+        "status": level,
+        "summary": summary,
+        "details": status,
+    }
+
+
 def _check_user_data(
     settings: AppSettings,
     *,
@@ -399,6 +435,7 @@ async def build_status_report(
     started_at: float | None = None,
     scheduled_responses_status: dict[str, Any] | None = None,
     user_data_migrated_phones: list[str] | None = None,
+    presence_simulator_status: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     if cameras is None:
         cameras = CamerasCatalog.load(settings.frigate_cameras_config_path)
@@ -434,6 +471,7 @@ async def build_status_report(
     )
     services.append(_check_webhook())
     services.append(_check_scheduled_responses(scheduled_responses_status))
+    services.append(_check_presence_simulator(presence_simulator_status))
 
     uptime_s = None
     if started_at:
