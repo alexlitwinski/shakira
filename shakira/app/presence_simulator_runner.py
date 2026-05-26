@@ -14,7 +14,10 @@ from app.config import AppSettings
 from app.devices_catalog import DevicesCatalog
 from app.homeassistant import HomeAssistantClient
 
-log = logging.getLogger(__name__)@dataclass
+log = logging.getLogger(__name__)
+
+
+@dataclass
 class PresenceSimulatorRunner:
     settings: AppSettings
     ha: HomeAssistantClient
