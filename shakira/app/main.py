@@ -11,7 +11,8 @@ from typing import Any
 
 import httpx
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.exceptions import RequestValidationError
 from pydantic import BaseModel, Field
 
 from app.config import AppSettings, load_addon_options
@@ -236,6 +237,24 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Shakira WhatsApp Bot", lifespan=lifespan)
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    log.error("Erro de validacao na rota %s: %s", request.url.path, exc.errors())
+    try:
+        body = await request.json()
+        log.error("Payload JSON recebido: %s", body)
+    except Exception:
+        try:
+            body_bytes = await request.body()
+            log.error("Payload raw recebido: %s", body_bytes)
+        except Exception:
+            log.error("Nao foi possivel obter o corpo da requisicao")
+    return JSONResponse(
+        status_code=422,
+        content={"detail": exc.errors(), "body": str(exc.body)},
+    )
 
 
 async def _status_payload(request: Request) -> dict[str, Any]:
