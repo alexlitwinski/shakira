@@ -579,11 +579,80 @@ async def _run_webhook(
 
 
 @app.post("/api/whatsapp/send")
-async def api_whatsapp_send(request: Request, body: WhatsAppSendBody) -> dict[str, Any]:
+async def api_whatsapp_send(request: Request) -> dict[str, Any]:
     """Envia mensagem WhatsApp (para rest_command / automacoes do Home Assistant)."""
     settings: AppSettings = request.app.state.settings
     _check_shakira_api_token(request, settings)
     evo: EvolutionClient = request.app.state.evo
+
+    content_type = request.headers.get("content-type", "").lower()
+    
+    number = None
+    message = None
+    instance = None
+
+    if "application/x-www-form-urlencoded" in content_type:
+        try:
+            form_data = await request.form()
+            number = form_data.get("number")
+            message = form_data.get("message")
+            instance = form_data.get("instance")
+        except Exception as e:
+            log.error("Erro ao ler form data via request.form(): %s. Tentando parsing manual...", e)
+            try:
+                raw_body = await request.body()
+                body_str = raw_body.decode("utf-8", errors="ignore").strip()
+                from urllib.parse import parse_qs
+                parsed = parse_qs(body_str)
+                number = parsed.get("number", [None])[0]
+                message = parsed.get("message", [None])[0]
+                instance = parsed.get("instance", [None])[0]
+            except Exception as ex:
+                log.error("Erro no parsing manual do corpo urlencoded: %s", ex)
+    else:
+        # Tenta ler JSON
+        try:
+            body_json = await request.json()
+            if isinstance(body_json, dict):
+                number = body_json.get("number")
+                message = body_json.get("message")
+                instance = body_json.get("instance")
+        except Exception:
+            # Fallback robusto se o JSON falhar mas houver body raw form-encoded ou query-string
+            try:
+                raw_body = await request.body()
+                body_str = raw_body.decode("utf-8", errors="ignore").strip()
+                if "=" in body_str:
+                    from urllib.parse import parse_qs
+                    parsed = parse_qs(body_str)
+                    number = parsed.get("number", [None])[0]
+                    message = parsed.get("message", [None])[0]
+                    instance = parsed.get("instance", [None])[0]
+            except Exception as e:
+                log.error("Erro no fallback de parsing do corpo: %s", e)
+
+    # Se ainda nao encontrou nas formas normais, tenta query parameters de de-facto fallback
+    if number is None:
+        number = request.query_params.get("number")
+    if message is None:
+        message = request.query_params.get("message")
+    if instance is None:
+        instance = request.query_params.get("instance")
+
+    # Valida usando o Pydantic WhatsAppSendBody
+    try:
+        body_data = {
+            "number": number,
+            "message": message,
+            "instance": instance
+        }
+        body = WhatsAppSendBody(**body_data)
+    except Exception as e:
+        log.error("Erro de validacao no api_whatsapp_send. Raw number: %s, message: %s. Erro: %s", number, message, e)
+        raise HTTPException(
+            status_code=400,
+            detail=f"Dados de entrada invalidos. Verifique 'number' e 'message'. Erro: {e}"
+        )
 
     raw_number = body.number
     if raw_number is None:
