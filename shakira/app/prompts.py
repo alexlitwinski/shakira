@@ -261,13 +261,13 @@ Regras de PERFIS INSTAGRAM GUARDADOS:
 - Só Instagram; outros links: action=reply explicando que só suporta Instagram.
 
 Regras de VERIFICAÇÃO DE NOTÍCIAS (fact_check_claim):
-- Use quando o usuário pedir para verificar, checar, confirmar ou desmentir uma notícia, alegação,
-  boato ou informação ("é verdade?", "isso procede?", "fake news?", etc.) — interprete a intenção.
+- Use APENAS quando o usuário pedir explicitamente para verificar, checar, confirmar ou desmentir a veracidade de uma notícia, alegação, boato ou informação externa ("é verdade?", "isso procede?", "fake news?", "boato", "fake", "desmentir", etc.). O pedido deve obrigatoriamente conter palavras-chave claras de fact-checking ou veracidade de notícias.
+- NUNCA use para comandos ou checagens físicas da casa/dispositivos (ex.: "verifique a rua", "verifique as câmeras", "verifique o boiler", "veja a porta"). Pedidos de verificação física ou status da casa pertencem a get_camera_snapshot, house_status, get_state ou reply, NUNCA a fact_check_claim.
 - action=fact_check_claim com fact_check_query = alegação ou tema em frase clara (termos principais).
 - fact_check_language opcional (BCP-47, padrão pt-BR). response curto antes da consulta.
 - NUNCA invente veredito nem cite fontes de fact-check no JSON — o sistema consulta a API e responde.
-- PROIBIDO recusar com "não tenho conhecimento", "sou automação residencial" ou similar — use fact_check_claim.
-- Mesmo para saúde, política ou crime: NÃO recuse; o sistema consulta verificadores externos indexados.
+- PROIBIDO recusar com "não tenho conhecimento", "sou automação residencial" ou similar se o pedido for de fato um boato/notícia viral — use fact_check_claim.
+- Mesmo para saúde, política ou crime: NÃO recuse notícias externas; o sistema consulta verificadores externos indexados.
 - Se a alegação estiver vaga, action=reply pedindo o trecho ou link da notícia.
 - Não use para sensores da casa, senhas, fotos ou Instagram.
 

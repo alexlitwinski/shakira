@@ -25,6 +25,7 @@ from app.alerts_runner import AlertsRunner
 from app.alarm_dispatch_runner import AlarmDispatchRunner
 from app.rain_dispatch_runner import RainDispatchRunner
 from app.interfone_dispatch_runner import InterfoneDispatchRunner
+from app.presence_simulator_runner import PresenceSimulatorRunner
 from app.interfone_call_store import configure_interfone_data_root
 from app.scheduled_responses import count_all_pending_globally
 from app.scheduled_responses_runner import ScheduledResponsesRunner, set_scheduled_runner
@@ -154,15 +155,26 @@ async def lifespan(app: FastAPI):
         configure_interfone_data_root()
     interfone_runner.reload(alerts.interfone_dispatch, cameras=cameras)
     app.state.interfone_runner = interfone_runner
+
+    presence_simulator_runner = PresenceSimulatorRunner(
+        settings=settings,
+        ha=app.state.ha,
+        config=alerts.presence_simulator,
+        devices=catalog,
+    )
+    app.state.presence_simulator_runner = presence_simulator_runner
+
     alerts_runner.attach_alarm_dispatch(alarm_runner)
     alerts_runner.attach_rain_dispatch(rain_runner)
     alerts_runner.attach_interfone_dispatch(interfone_runner)
+    alerts_runner.attach_presence_simulator(presence_simulator_runner)
 
     if (
         alerts.enabled_alerts()
         or alerts.alarm_dispatch.enabled
         or alerts.rain_dispatch.enabled
         or alerts.interfone_dispatch.enabled
+        or alerts.presence_simulator.enabled
     ):
         alerts_runner.start()
     else:
@@ -185,6 +197,14 @@ async def lifespan(app: FastAPI):
     else:
         log.info(
             "Rotina de chuva desativada (rain_dispatch.enabled=false em %s)",
+            settings.alerts_config_path,
+        )
+
+    if alerts.presence_simulator.enabled:
+        presence_simulator_runner.start()
+    else:
+        log.info(
+            "Rotina de simulação de presença desativada (presence_simulator.enabled=false em %s)",
             settings.alerts_config_path,
         )
 
@@ -231,6 +251,7 @@ async def lifespan(app: FastAPI):
     await birthday_runner.stop()
     await calendar_runner.stop()
     await scheduled_runner.stop()
+    await presence_simulator_runner.stop()
     await alarm_runner.stop()
     await alerts_runner.stop()
     await client.aclose()
@@ -479,13 +500,20 @@ async def put_alerts_yaml(request: Request, body: AlertsYamlBody) -> dict[str, A
         catalog.interfone_dispatch,
         cameras=request.app.state.cameras,
     )
+    presence_simulator_runner: PresenceSimulatorRunner = request.app.state.presence_simulator_runner
+    presence_simulator_runner.reload(
+        catalog.presence_simulator,
+        devices=request.app.state.catalog,
+    )
     runner.reload(catalog)
     runner.attach_alarm_dispatch(alarm_runner)
     runner.attach_rain_dispatch(rain_runner)
     runner.attach_interfone_dispatch(interfone_runner)
+    runner.attach_presence_simulator(presence_simulator_runner)
     await runner.ensure_running()
     await alarm_runner.ensure_running()
     await rain_runner.ensure_running()
+    await presence_simulator_runner.ensure_running()
     result["message"] = (
         "Arquivo salvo. Alertas periodicos, live, rotina de alarme, chuva e interfone recarregados."
     )
@@ -508,6 +536,11 @@ async def get_alerts_status(request: Request) -> dict[str, Any]:
         payload["rain_dispatch"] = rain_runner.status_snapshot()
     if interfone_runner is not None:
         payload["interfone_dispatch"] = interfone_runner.status_snapshot()
+    presence_simulator_runner: PresenceSimulatorRunner | None = getattr(
+        request.app.state, "presence_simulator_runner", None
+    )
+    if presence_simulator_runner is not None:
+        payload["presence_simulator"] = presence_simulator_runner.status_snapshot()
     return payload
 
 

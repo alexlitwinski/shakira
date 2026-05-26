@@ -28,7 +28,7 @@ def _default_template() -> str:
     check_interval: 5m
     entity_id: binary_sensor.status_cameras_paradas
     when_state: "on"
-    message: "Atencao: existem cameras do sistema com problema."
+    message: "Atenção: existem câmeras do sistema com problema."
     cooldown: 1h
     notify:
       phones: []

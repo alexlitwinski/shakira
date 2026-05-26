@@ -397,7 +397,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     <p class="footer">Assistente WhatsApp · Home Assistant</p>
   </div>
   <script>
-    const STATUS_LABELS = { ok: "OK", warning: "Atencao", error: "Erro", disabled: "Desativado" };
+    const STATUS_LABELS = { ok: "OK", warning: "Atenção", error: "Erro", disabled: "Desativado" };
     const YAML_EDITORS = {
       devices: {
         getUrl: "api/devices-yaml",

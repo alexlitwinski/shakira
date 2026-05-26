@@ -10,16 +10,15 @@ from app.fact_check_actions import fact_check_configured
 
 _FACT_CHECK_INTENT_RE = re.compile(
     r"(?:"
-    r"\b(?:verifique|verifica|checa|checar|cheque|confira|confere|confirme|confirma)\s+"
-    r"(?:se\s+)?(?:[eé]\s+verdade\s+que\s+)?"
+    r"\b(?:verifique|verifica|checa|checar|cheque|confira|confere|confirme|confirma)\s+(?:se\s+)?(?:\w+\s+){0,2}(?:[eé]\s+verdade\s+que|[eé]\s+fake|procede|e\s+mentira|boato|rumor|not[ií]cia|alega[cç][aã]o|fact[\s-]?check|fake\s*news|veracidade|informa[cç][aã]o)\b"
     r"|\b[eé]\s+verdade\s+que\b"
     r"|\bisso\s+[eé]\s+verdade\b"
     r"|\bisso\s+procede\b"
     r"|\bfake\s*news\b"
     r"|\bfact[\s-]?check\b"
     r"|\b(?:desminta|desmentir)\b"
-    r"|\b(?:not[ií]cia|alega[cç][aã]o|boato)\b.*\b(?:verdade|verificar|confirmar|checar|confira)\b"
-    r"|\b(?:verificar|confirmar|checar|confira)\b.*\b(?:not[ií]cia|alega[cç][aã]o|boato)\b"
+    r"|\b(?:not[ií]cia|alega[cç][aã]o|boato|rumor|informa[cç][aã]o)\b.*\b(?:verdade|verificar|confirmar|checar|confira|cheque)\b"
+    r"|\b(?:verificar|confirmar|checar|confira|cheque)\b.*\b(?:not[ií]cia|alega[cç][aã]o|boato|rumor|informa[cç][aã]o)\b"
     r")",
     re.I,
 )
@@ -34,10 +33,12 @@ _REFUSAL_REPLY_RE = re.compile(
 )
 
 _HOME_STATE_RE = re.compile(
-    r"\b(?:port[aã]o|porta social|fechadura|luz(?:es)?|boiler|geladeira|"
-    r"temperatura(?:\s+da\s+[aá]gua|\s+do\s+boiler)?|umidade|sensor|"
-    r"c[âa]mera|garagem|interruptor|tomada|ar[\s-]condicionado|"
-    r"home assistant|dispositivo(?:s)?\s+(?:da\s+)?casa)\b",
+    r"\b(?:port(?:[aã]o|[oõ]es)|porta(?:s)?(?:\s+social)?|fechadura(?:s)?|luz(?:es)?|boiler(?:s)?|geladeira(?:s)?|"
+    r"temperatura(?:\s+da\s+[aá]gua|\s+do\s+boiler)?|umidade|sensor(?:es)?|"
+    r"c[âa]mera(?:s)?|garagem|garagens|interruptor(?:es)?|tomada(?:s)?|ar[\s-]condicionado|"
+    r"home assistant|dispositivo(?:s)?\s+(?:da\s+)?casa|rua(?:s)?|quintal|jardim|jardins|"
+    r"interfone(?:s)?|campainha(?:s)?|planta(?:s)?|vaso(?:s)?|aspirador(?:es)?|rob[oô](?:s)?|"
+    r"chuva(?:s)?|toldo(?:s)?)\b",
     re.I,
 )
 

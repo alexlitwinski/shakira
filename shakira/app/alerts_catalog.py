@@ -21,7 +21,7 @@ FALLBACK_ALERTS_PATHS = (
 )
 
 ALLOWED_ROOT_KEYS = frozenset(
-    {"alerts", "alarm_dispatch", "rain_dispatch", "interfone_dispatch", "default_notify"}
+    {"alerts", "alarm_dispatch", "rain_dispatch", "interfone_dispatch", "presence_simulator", "default_notify"}
 )
 ALERT_ID_RE = re.compile(r"^[a-z][a-z0-9_]+$", re.IGNORECASE)
 ENTITY_ID_RE = re.compile(r"^[a-z][a-z0-9_]+\.[a-z0-9_]+$", re.IGNORECASE)
@@ -147,6 +147,16 @@ DEFAULT_INTERFONE_DEBOUNCE_SECONDS = 10.0
 
 
 @dataclass
+class PresenceSimulatorConfig:
+    enabled: bool = False
+    control_entity: str = "input_boolean.simular_luzes"
+    min_on_minutes: float = 5.0
+    max_on_minutes: float = 25.0
+    min_off_minutes: float = 10.0
+    max_off_minutes: float = 40.0
+
+
+@dataclass
 class InterfoneDispatchConfig:
     enabled: bool = False
     interfone_entity: str = DEFAULT_INTERFONE_ENTITY
@@ -208,6 +218,9 @@ class AlertsCatalog:
     interfone_dispatch: InterfoneDispatchConfig = field(
         default_factory=InterfoneDispatchConfig
     )
+    presence_simulator: PresenceSimulatorConfig = field(
+        default_factory=PresenceSimulatorConfig
+    )
     default_notify: AlertNotifyConfig = field(default_factory=AlertNotifyConfig)
     source_path: Path | None = None
     content_hash: str = ""
@@ -248,18 +261,20 @@ class AlertsCatalog:
         alarm_dispatch = cls._parse_alarm_dispatch(data)
         rain_dispatch = cls._parse_rain_dispatch(data)
         interfone_dispatch = cls._parse_interfone_dispatch(data)
+        presence_simulator = cls._parse_presence_simulator(data)
         default_notify = cls._parse_default_notify(data)
         enabled = sum(1 for a in alerts if a.enabled)
         if source_path:
             log.info(
                 "Alertas carregados: %s (%s regra(s), %s ativa(s), alarm_dispatch=%s, "
-                "rain_dispatch=%s, interfone_dispatch=%s, default_notify=%s telefone(s))",
+                "rain_dispatch=%s, interfone_dispatch=%s, presence_simulator=%s, default_notify=%s telefone(s))",
                 source_path,
                 len(alerts),
                 enabled,
                 alarm_dispatch.enabled,
                 rain_dispatch.enabled,
                 interfone_dispatch.enabled,
+                presence_simulator.enabled,
                 len(default_notify.phones),
             )
         return cls(
@@ -267,6 +282,7 @@ class AlertsCatalog:
             alarm_dispatch=alarm_dispatch,
             rain_dispatch=rain_dispatch,
             interfone_dispatch=interfone_dispatch,
+            presence_simulator=presence_simulator,
             default_notify=default_notify,
             source_path=source_path,
             content_hash=h,
@@ -479,6 +495,29 @@ class AlertsCatalog:
         )
 
     @classmethod
+    def _parse_presence_simulator(cls, data: Any) -> PresenceSimulatorConfig:
+        if not isinstance(data, dict):
+            return PresenceSimulatorConfig()
+        block = data.get("presence_simulator")
+        if not isinstance(block, dict):
+            return PresenceSimulatorConfig()
+
+        def get_float(b: dict, key: str, default: float) -> float:
+            val = b.get(key)
+            if isinstance(val, (int, float)) and not isinstance(val, bool):
+                return float(val)
+            return default
+
+        return PresenceSimulatorConfig(
+            enabled=bool(block.get("enabled", False)),
+            control_entity=str(block.get("control_entity", "input_boolean.simular_luzes")).strip(),
+            min_on_minutes=get_float(block, "min_on_minutes", 5.0),
+            max_on_minutes=get_float(block, "max_on_minutes", 25.0),
+            min_off_minutes=get_float(block, "min_off_minutes", 10.0),
+            max_off_minutes=get_float(block, "max_off_minutes", 40.0),
+        )
+
+    @classmethod
     def _parse_data(cls, data: Any) -> list[AlertConfig]:
         if data is None:
             return []
@@ -665,6 +704,33 @@ class AlertsCatalog:
                                 errors.append(
                                     f"interfone_dispatch.entities.{ek}: entity_id invalido."
                                 )
+
+        ps_block = data.get("presence_simulator")
+        if ps_block is not None:
+            if not isinstance(ps_block, dict):
+                errors.append("'presence_simulator' deve ser um mapa.")
+            else:
+                ps_allowed = {
+                    "enabled",
+                    "control_entity",
+                    "min_on_minutes",
+                    "max_on_minutes",
+                    "min_off_minutes",
+                    "max_off_minutes",
+                }
+                for k in sorted(set(ps_block.keys()) - ps_allowed):
+                    errors.append(f"presence_simulator: chave desconhecida '{k}'.")
+                if "enabled" in ps_block and not isinstance(ps_block["enabled"], bool):
+                     errors.append("presence_simulator.enabled deve ser true ou false.")
+                if "control_entity" in ps_block:
+                     ce = ps_block["control_entity"]
+                     if not isinstance(ce, str) or not ce.strip() or not ENTITY_ID_RE.match(ce.strip()):
+                         errors.append("presence_simulator.control_entity deve ser um entity_id valido.")
+                for k in ("min_on_minutes", "max_on_minutes", "min_off_minutes", "max_off_minutes"):
+                     if k in ps_block:
+                         val = ps_block[k]
+                         if not isinstance(val, (int, float)) or isinstance(val, bool):
+                             errors.append(f"presence_simulator.{k} deve ser um numero.")
 
         if "alerts" not in data:
             errors.append("Defina a secao 'alerts:'.")

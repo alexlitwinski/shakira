@@ -36,6 +36,7 @@ ENTITY_OPTIONAL_KEYS = frozenset(
         "service_defaults",
         "opening_kind",
         "sensor_kind",
+        "simular_presenca",
     }
 )
 
@@ -102,6 +103,7 @@ class EntityConfig:
     sensor_kind: str = ""
     security: SecurityConfig | None = None
     service_defaults: dict[str, Any] = field(default_factory=dict)
+    simular_presenca: bool = False
 
 
 @dataclass
@@ -221,6 +223,7 @@ class DevicesCatalog:
                     }
                 opening_kind = str(ent.get("opening_kind") or "").strip().lower()
                 sensor_kind = str(ent.get("sensor_kind") or "").strip().lower()
+                simular_presenca = bool(ent.get("simular_presenca", False))
                 entities.append(
                     EntityConfig(
                         entity_id=eid,
@@ -230,6 +233,7 @@ class DevicesCatalog:
                         sensor_kind=sensor_kind,
                         security=sec,
                         service_defaults=defaults,
+                        simular_presenca=simular_presenca,
                     )
                 )
             devices.append(DeviceConfig(name=name, entities=entities))

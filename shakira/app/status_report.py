@@ -24,7 +24,7 @@ from app.user_memory import USER_DATA_ROOT
 
 log = logging.getLogger(__name__)
 
-VERSION = "1.7.61"
+VERSION = "1.7.63"
 
 
 def _mask_secret(value: str, visible: int = 4) -> str:

@@ -13,6 +13,7 @@ if TYPE_CHECKING:
     from app.alarm_dispatch_runner import AlarmDispatchRunner
     from app.interfone_dispatch_runner import InterfoneDispatchRunner
 from app.rain_dispatch_runner import RainDispatchRunner
+from app.presence_simulator_runner import PresenceSimulatorRunner
 
 import httpx
 
@@ -74,6 +75,12 @@ class AlertsRunner:
     _alarm_dispatch: AlarmDispatchRunner | None = None
     _rain_dispatch: RainDispatchRunner | None = None
     _interfone_dispatch: InterfoneDispatchRunner | None = None
+    _presence_simulator: PresenceSimulatorRunner | None = None
+
+    def attach_presence_simulator(self, runner: PresenceSimulatorRunner | None) -> None:
+        """Partilha o WebSocket live com a rotina de simulação de presença."""
+        self._presence_simulator = runner
+        self._sync_websocket_entities()
 
     def attach_alarm_dispatch(self, runner: AlarmDispatchRunner | None) -> None:
         """Partilha o WebSocket live com a rotina de disparo do alarme."""
@@ -131,6 +138,12 @@ class AlertsRunner:
             and self._interfone_dispatch.config.enabled
         )
 
+    def _presence_simulator_active(self) -> bool:
+        return bool(
+            self._presence_simulator
+            and self._presence_simulator.config.enabled
+        )
+
     def _live_entity_ids(self) -> set[str]:
         ids = {a.entity_id for a in self.catalog.enabled_live_alerts()}
         if any(a.id == "presenca_portao_parado" and a.enabled for a in self.catalog.alerts):
@@ -142,6 +155,8 @@ class AlertsRunner:
             ids |= self._rain_dispatch.watched_entity_ids  # type: ignore[union-attr]
         if self._interfone_dispatch_active():
             ids |= self._interfone_dispatch.watched_entity_ids  # type: ignore[union-attr]
+        if self._presence_simulator_active():
+            ids.add(self._presence_simulator.config.control_entity)  # type: ignore[union-attr]
         return ids
 
     def _needs_live_websocket(self) -> bool:
@@ -150,6 +165,7 @@ class AlertsRunner:
             or self._alarm_dispatch_active()
             or self._rain_dispatch_active()
             or self._interfone_dispatch_active()
+            or self._presence_simulator_active()
         )
 
     def _sync_websocket_entities(self) -> None:
@@ -528,6 +544,14 @@ class AlertsRunner:
 
         if self._interfone_dispatch_active() and entity_id in self._interfone_dispatch.watched_entity_ids:  # type: ignore[union-attr]
             await self._interfone_dispatch.handle_live_state_change(  # type: ignore[union-attr]
+                entity_id,
+                old_state,
+                new_state,
+                _event_data,
+            )
+
+        if self._presence_simulator_active() and entity_id == self._presence_simulator.config.control_entity:  # type: ignore[union-attr]
+            await self._presence_simulator.handle_live_state_change(  # type: ignore[union-attr]
                 entity_id,
                 old_state,
                 new_state,
