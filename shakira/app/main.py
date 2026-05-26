@@ -317,7 +317,7 @@ def _refresh_gemini_cache(request: Request) -> None:
 
 
 class WhatsAppSendBody(BaseModel):
-    number: str = Field(..., min_length=8, description="Telefone (DDI+DDD+numero, somente digitos)")
+    number: Any = Field(..., description="Telefone ou lista de telefones (DDI+DDD+numero)")
     message: str = Field(..., min_length=1, description="Texto da mensagem")
     instance: str | None = Field(None, description="Instancia Evolution (opcional)")
 
@@ -565,16 +565,56 @@ async def api_whatsapp_send(request: Request, body: WhatsAppSendBody) -> dict[st
     settings: AppSettings = request.app.state.settings
     _check_shakira_api_token(request, settings)
     evo: EvolutionClient = request.app.state.evo
-    try:
-        return await send_whatsapp_text(
-            settings=settings,
-            evo=evo,
-            number=body.number,
-            message=body.message,
-            instance=body.instance,
+
+    raw_number = body.number
+    if raw_number is None:
+        raise HTTPException(status_code=400, detail="O parâmetro 'number' é obrigatório")
+
+    if isinstance(raw_number, list):
+        numbers = [str(x).strip() for x in raw_number if x is not None]
+    else:
+        numbers = [str(raw_number).strip()]
+
+    valid_numbers = []
+    for num in numbers:
+        digits = "".join(c for c in num if c.isdigit())
+        if len(digits) >= 8:
+            valid_numbers.append(digits)
+
+    if not valid_numbers:
+        raise HTTPException(
+            status_code=400,
+            detail="Nenhum número de telefone válido foi fornecido (mínimo 8 dígitos)"
         )
-    except WhatsAppSendError as e:
-        raise HTTPException(status_code=400, detail=str(e)) from e
+
+    results = []
+    errors = []
+    for num in valid_numbers:
+        try:
+            res = await send_whatsapp_text(
+                settings=settings,
+                evo=evo,
+                number=num,
+                message=body.message,
+                instance=body.instance,
+            )
+            results.append({"number": num, "response": res})
+        except WhatsAppSendError as e:
+            log.error("Erro ao enviar para %s: %s", num, e)
+            errors.append({"number": num, "error": str(e)})
+
+    if not results:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Falha ao enviar mensagens. Erros: {errors}"
+        )
+
+    return {
+        "status": "success",
+        "sent_count": len(results),
+        "results": results,
+        "errors": errors
+    }
 
 
 @app.post("/webhook")
