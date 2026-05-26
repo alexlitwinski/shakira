@@ -157,6 +157,12 @@ class AlertsRunner:
             ids |= self._interfone_dispatch.watched_entity_ids  # type: ignore[union-attr]
         if self._presence_simulator_active():
             ids.add(self._presence_simulator.config.control_entity)  # type: ignore[union-attr]
+
+        # Monitora o aquecimento das bombas de fumaça em tempo real
+        ids.add("switch.bomba_fumaca_garagem_aquecimento")
+        ids.add("switch.bomba_fumaca_sala_aquecimento")
+        ids.add("switch.bomba_fumaca_despenca_aquecimento")
+
         return ids
 
     def _needs_live_websocket(self) -> bool:
@@ -247,6 +253,7 @@ class AlertsRunner:
             try:
                 await self._run_due_checks()
                 await self._check_presenca_portao_tick()
+                await self._check_smoke_bombs_heating_timeout()
             except Exception:
                 log.exception("Erro no ciclo de alertas polling")
             try:
@@ -254,6 +261,74 @@ class AlertsRunner:
                 break
             except asyncio.TimeoutError:
                 continue
+
+    async def _check_smoke_bombs_heating_timeout(self) -> None:
+        """Verifica se qualquer bomba de fumaça está com o aquecimento ativo por mais de 15 minutos e desliga."""
+        entities = [
+            "switch.bomba_fumaca_garagem_aquecimento",
+            "switch.bomba_fumaca_sala_aquecimento",
+            "switch.bomba_fumaca_despenca_aquecimento",
+        ]
+        
+        for entity_id in entities:
+            try:
+                state_data = await self.ha.get_state(entity_id)
+                if not state_data:
+                    continue
+                    
+                state = str(state_data.get("state", "")).strip().lower()
+                if state == "on":
+                    last_changed_str = state_data.get("last_changed")
+                    if last_changed_str:
+                        if last_changed_str.endswith("Z"):
+                            last_changed_str = last_changed_str[:-1] + "+00:00"
+                        
+                        from datetime import datetime, timezone
+                        dt = datetime.fromisoformat(last_changed_str)
+                        now_dt = datetime.now(timezone.utc)
+                        duration_seconds = (now_dt - dt).total_seconds()
+                        
+                        # 15 minutos (900 segundos)
+                        if duration_seconds > 900.0:
+                            log.warning(
+                                "Bomba fumaça: %s está ligada há %.1f segundos (> 15 min). Desligando automaticamente.",
+                                entity_id,
+                                duration_seconds,
+                            )
+                            # Registra no set para evitar aviso genérico de "DESLIGADO"
+                            if not hasattr(self, "_smoke_bombs_timeout_triggered"):
+                                self._smoke_bombs_timeout_triggered = set()
+                            self._smoke_bombs_timeout_triggered.add(entity_id)
+
+                            # Desliga via HA
+                            await self.ha.call_service("switch", "turn_off", {"entity_id": entity_id})
+                            
+                            # Envia notificação por WhatsApp
+                            labels = {
+                                "switch.bomba_fumaca_garagem_aquecimento": "Garagem",
+                                "switch.bomba_fumaca_sala_aquecimento": "Sala",
+                                "switch.bomba_fumaca_despenca_aquecimento": "Despensa",
+                            }
+                            room = labels.get(entity_id, entity_id)
+                            msg = f"⏱️ *AVISO:* O aquecimento da bomba de fumaça da *{room}* excedeu o limite máximo de 15 minutos e foi *DESLIGADO automaticamente*."
+                            
+                            phones = await resolve_notify_phones(
+                                self.ha,
+                                phones=[],
+                                default_phones=self.catalog.default_notify.phones,
+                            )
+                            for phone in phones:
+                                try:
+                                    await send_whatsapp_text(
+                                        settings=self.settings,
+                                        evo=self.evo,
+                                        number=phone,
+                                        message=msg,
+                                    )
+                                except Exception:
+                                    pass
+            except Exception as e:
+                log.warning("Erro ao verificar timeout da bomba de fumaça %s: %s", entity_id, e)
 
     async def _check_presenca_portao_tick(self) -> None:
         alert = next((a for a in self.catalog.alerts if a.id == "presenca_portao_parado" and a.enabled), None)
@@ -557,6 +632,59 @@ class AlertsRunner:
                 new_state,
                 _event_data,
             )
+
+        if entity_id in (
+            "switch.bomba_fumaca_garagem_aquecimento",
+            "switch.bomba_fumaca_sala_aquecimento",
+            "switch.bomba_fumaca_despenca_aquecimento",
+        ):
+            new_norm = (new_state or "").strip().lower()
+            old_norm = (old_state or "").strip().lower() if old_state else ""
+            if new_norm == "on" and old_norm != "on":
+                asyncio.create_task(
+                    self._notify_smoke_bomb_heating_change(entity_id, is_on=True),
+                    name="shakira-smoke-heating-notification",
+                )
+            elif new_norm == "off" and old_norm == "on":
+                # Se foi desligado devido ao timeout de 15 min, evita duplicar o aviso
+                if entity_id in getattr(self, "_smoke_bombs_timeout_triggered", set()):
+                    self._smoke_bombs_timeout_triggered.remove(entity_id)
+                else:
+                    asyncio.create_task(
+                        self._notify_smoke_bomb_heating_change(entity_id, is_on=False),
+                        name="shakira-smoke-heating-notification",
+                    )
+
+    async def _notify_smoke_bomb_heating_change(self, entity_id: str, is_on: bool) -> None:
+        labels = {
+            "switch.bomba_fumaca_garagem_aquecimento": "Garagem",
+            "switch.bomba_fumaca_sala_aquecimento": "Sala",
+            "switch.bomba_fumaca_despenca_aquecimento": "Despensa",
+        }
+        room = labels.get(entity_id, entity_id)
+        state_str = "LIGADO" if is_on else "DESLIGADO"
+        emoji = "⚠️" if is_on else "ℹ️"
+        message = f"{emoji} *AVISO:* O aquecimento da bomba de fumaça da *{room}* foi *{state_str}*!"
+        
+        phones = await resolve_notify_phones(
+            self.ha,
+            phones=[],
+            default_phones=self.catalog.default_notify.phones,
+        )
+        if not phones:
+            log.warning("Bomba fumaça: nenhum telefone configurado para notificação")
+            return
+            
+        for phone in phones:
+            try:
+                await send_whatsapp_text(
+                    settings=self.settings,
+                    evo=self.evo,
+                    number=phone,
+                    message=message,
+                )
+            except Exception as e:
+                log.warning("Bomba fumaça: falha ao enviar notificacao para %s: %s", phone, e)
 
     async def _evaluate_alert(
         self,

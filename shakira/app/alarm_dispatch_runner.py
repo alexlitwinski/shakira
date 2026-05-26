@@ -333,6 +333,24 @@ class AlarmDispatchRunner:
         self._pending_partitions.clear()
         pending_zone_snapshot = dict(self._pending_zones)
         self._pending_zones.clear()
+
+        # Aciona o aquecimento de todas as cortinas de fumaça ao disparar o alarme
+        try:
+            await self.ha.call_service(
+                "switch",
+                "turn_on",
+                {
+                    "entity_id": [
+                        "switch.bomba_fumaca_garagem_aquecimento",
+                        "switch.bomba_fumaca_sala_aquecimento",
+                        "switch.bomba_fumaca_despenca_aquecimento",
+                    ]
+                },
+            )
+            log.info("Alarme: aquecimento das bombas de fumaça iniciado devido ao disparo do alarme")
+        except Exception as e:
+            log.error("Alarme: falha ao acionar aquecimento das bombas de fumaça: %s", e)
+
         still_active = await self._fetch_triggered_partitions()
         if still_active:
             log.info("Alarme: disparo com particoes ainda em triggered no HA")

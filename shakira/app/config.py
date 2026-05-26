@@ -115,10 +115,10 @@ class AppSettings:
             opt_llt = opt_token.strip()
 
         token = (
-            os.environ.get("SUPERVISOR_TOKEN")
+            opt_llt
+            or os.environ.get("SUPERVISOR_TOKEN")
             or os.environ.get("HASSIO_TOKEN")
             or os.environ.get("HA_SUPERVISOR_TOKEN")
-            or opt_llt
             or os.environ.get("HOMEASSISTANT_TOKEN")
             or ""
         )

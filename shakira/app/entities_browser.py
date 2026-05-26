@@ -72,10 +72,21 @@ async def _fetch_registry_meta(settings: AppSettings) -> dict[str, dict[str, Any
     return {}
 
 
+GENERIC_DOMAINS = {
+    "sensor", "binary_sensor", "light", "switch", "cover", "climate", "camera",
+    "media_player", "number", "select", "button", "input_boolean", "input_select",
+    "input_number", "input_text", "input_datetime", "scene", "script", "automation",
+    "group", "zone", "device_tracker", "person", "sun", "weather", "todo",
+    "update", "text", "valve", "event", "fan", "humidifier", "lawn_mower",
+    "lock", "siren", "vacuum", "water_heater"
+}
+
+
 def _serialize_entity(
     state: dict[str, Any],
     registry: dict[str, dict[str, Any]],
     catalog_ids: set[str],
+    components: list[str] | None = None,
 ) -> dict[str, Any]:
     eid = str(state.get("entity_id") or "")
     domain = eid.split(".", 1)[0] if "." in eid else ""
@@ -87,6 +98,17 @@ def _serialize_entity(
         or str(attrs.get("platform") or "")
         or str(attrs.get("source_type") or "")
     )
+
+    # Fallback inteligente se a plataforma nao foi definida e temos a lista de componentes
+    if not platform and components:
+        object_id = eid.split(".", 1)[1] if "." in eid else ""
+        for comp in components:
+            if comp in GENERIC_DOMAINS:
+                continue
+            if object_id.startswith(f"{comp}_") or object_id == comp:
+                platform = comp
+                break
+
     device_class = str(reg.get("device_class") or attrs.get("device_class") or "")
 
     return {
@@ -118,10 +140,21 @@ async def build_entities_payload(
         store_all_states(cached)
 
     registry = await _fetch_registry_meta(settings)
+    
+    # Busca componentes do HA como fallback
+    components = []
+    ha_config = await ha.get_config()
+    if ha_config and isinstance(ha_config.get("components"), list):
+        components = sorted(
+            [c for c in ha_config["components"] if isinstance(c, str) and "." not in c],
+            key=len,
+            reverse=True,
+        )
+
     catalog_ids = set(catalog.entity_map().keys())
 
     entities = [
-        _serialize_entity(st, registry, catalog_ids)
+        _serialize_entity(st, registry, catalog_ids, components)
         for st in cached
         if isinstance(st, dict) and st.get("entity_id")
     ]

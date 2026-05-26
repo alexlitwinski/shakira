@@ -57,6 +57,19 @@ class HomeAssistantClient:
         log.debug("HA get_states OK n=%s (%.0fms)", len(data), elapsed_ms)
         return data
 
+    async def get_config(self) -> dict[str, Any] | None:
+        """Busca as configuracoes gerais do HA (inclui lista de components/integracoes)."""
+        t0 = time.monotonic()
+        try:
+            r = await self._client.get(f"{self._base}/config", headers=self._headers())
+            r.raise_for_status()
+            elapsed_ms = (time.monotonic() - t0) * 1000.0
+            log.debug("HA get_config OK (%.0fms)", elapsed_ms)
+            return r.json()
+        except Exception as e:
+            log.warning("HA get_config falhou: %s", e)
+            return None
+
     async def call_service(
         self,
         domain: str,
