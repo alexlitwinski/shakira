@@ -1109,19 +1109,40 @@ class AlertsRunner:
         if not hasattr(self, "_active_siren_tasks"):
             self._active_siren_tasks = {}
 
+        # Lógica de volume incremental progressivo com cooldown
+        if not hasattr(self, "_siren_states"):
+            self._siren_states = {}
+
+        state = self._siren_states.setdefault(siren_id, {"last_triggered_at": 0.0, "current_volume": 5.0})
+        now = time.monotonic()
+        last_triggered = state["last_triggered_at"]
+        elapsed = now - last_triggered if last_triggered > 0.0 else float("inf")
+
+        if elapsed > 600.0:  # Mais de 10 minutos de inatividade
+            state["current_volume"] = 5.0
+            log.info("AlertsRunner: Sirene %s inativa por %.1f segundos (> 10 min). Resetando volume para 5%%.", siren_id, elapsed)
+        elif 60.0 <= elapsed <= 600.0:  # Disparada novamente sucessivamente após término do ciclo
+            state["current_volume"] = min(70.0, state["current_volume"] + 10.0)
+            log.info("AlertsRunner: Nova detecção para a sirene %s após %.1f segundos. Incrementando volume para %s%%.", siren_id, elapsed, state["current_volume"])
+        else:
+            log.info("AlertsRunner: Detecção concorrente na sirene %s (elapsed = %.1f s). Mantendo volume em %s%%.", siren_id, elapsed, state["current_volume"])
+
+        state["last_triggered_at"] = now
+        volume_percent = state["current_volume"]
+
         existing_task = self._active_siren_tasks.get(siren_id)
         if existing_task and not existing_task.done():
             log.info("AlertsRunner: Reiniciando timer de 1 minuto para a sirene %s devido a nova vibração em %s.", siren_id, sensor_name)
             existing_task.cancel()
 
         task = asyncio.create_task(
-            self._run_siren_timer(siren_id, volume_id, sensor_name),
+            self._run_siren_timer(siren_id, volume_id, sensor_name, volume_percent),
             name=f"shakira-siren-timer-{siren_id}"
         )
         self._active_siren_tasks[siren_id] = task
 
-    async def _run_siren_timer(self, siren_id: str, volume_id: str, sensor_name: str) -> None:
-        """Executa disparo de sirene por 1 minuto a 30% e notifica moradores."""
+    async def _run_siren_timer(self, siren_id: str, volume_id: str, sensor_name: str, volume_percent: float) -> None:
+        """Executa disparo de sirene por 1 minuto ao volume incremental especificado e notifica moradores."""
         try:
             # 1. Envia notificação imediata
             notify_phones = await resolve_notify_phones(
@@ -1132,7 +1153,7 @@ class AlertsRunner:
             msg = (
                 f"🚨 *ALERTA DE SEGURANÇA: VIBRAÇÃO DETECTADA!*\n\n"
                 f"Foi detectada uma vibração no sensor *{sensor_name}* com o perímetro de alarme armado.\n"
-                f"Acionando a sirene associada por 1 minuto a 30% de volume para dissuasão."
+                f"Acionando a sirene associada por 1 minuto a *{int(volume_percent)}% de volume* para dissuasão."
             )
             for phone in notify_phones:
                 try:
@@ -1145,15 +1166,15 @@ class AlertsRunner:
                 except Exception as e:
                     log.error("AlertsRunner: Falha ao notificar telefone %s de vibracao: %s", phone, e)
 
-            # 2. Ajusta o volume para 30%
+            # 2. Ajusta o volume dinâmico
             try:
                 await self.ha.call_service(
                     domain="number",
                     service="set_value",
-                    service_data={"entity_id": volume_id, "value": 30.0}
+                    service_data={"entity_id": volume_id, "value": volume_percent}
                 )
             except Exception as e:
-                log.error("AlertsRunner: Falha ao definir volume da sirene %s: %s", volume_id, e)
+                log.error("AlertsRunner: Falha ao definir volume da sirene %s para %s%%: %s", volume_id, volume_percent, e)
 
             # 3. Liga a sirene
             try:
