@@ -349,6 +349,7 @@ class AlertsRunner:
                 await self._run_due_checks()
                 await self._check_presenca_portao_tick()
                 await self._check_smoke_bombs_heating_timeout()
+                await self._check_devices_unavailability()
             except Exception:
                 log.exception("Erro no ciclo de alertas polling")
             try:
@@ -1198,3 +1199,108 @@ class AlertsRunner:
             log.info("AlertsRunner: Timer da sirene %s cancelado devido a novo sinal de vibração ou parada.", siren_id)
         except Exception as e:
             log.error("AlertsRunner: Erro na execucao do timer da sirene %s: %s", siren_id, e)
+
+    async def _check_devices_unavailability(self) -> None:
+        """Verifica se algum dispositivo crítico (sirenes e sensores de movimento) está indisponível há mais de 30 minutos."""
+        monitored = {
+            # Sirenes
+            "switch.sirene_despensa_alarm",
+            "switch.sirene_entrada_alarm",
+            "switch.sirene_garagem_alarm",
+            "switch.sirene_hanna_alarm",
+            # Sensores de Movimento (AMT8000)
+            "sensor.amt_8000_zone_30",
+            "sensor.amt_8000_zone_31",
+            "sensor.amt_8000_zone_32",
+            "sensor.amt_8000_zone_33",
+            "sensor.amt_8000_zone_34",
+            "sensor.amt_8000_zone_35",
+            "sensor.amt_8000_zone_37",
+            "sensor.amt_8000_zone_38",
+            "sensor.amt_8000_zone_39",
+            "sensor.amt_8000_zone_40",
+            "sensor.amt_8000_zone_41",
+            "sensor.amt_8000_zone_42",
+        }
+
+        try:
+            states_list = await self.ha.get_states()
+            states_map = {s["entity_id"]: s for s in states_list if s.get("entity_id") in monitored}
+        except Exception as e:
+            log.warning("AlertsRunner: Falha ao buscar estados das entidades para monitoramento de indisponibilidade: %s", e)
+            return
+
+        if not hasattr(self, "_unavailability_notified"):
+            self._unavailability_notified = set()
+
+        phones = await resolve_notify_phones(
+            self.ha,
+            phones=[],
+            default_phones=self.catalog.default_notify.phones,
+        )
+        if not phones:
+            return
+
+        for entity_id in monitored:
+            state_data = states_map.get(entity_id)
+            if not state_data:
+                continue
+
+            state = str(state_data.get("state", "")).strip().lower()
+            friendly_name = state_data.get("attributes", {}).get("friendly_name", entity_id)
+
+            if state in ("unavailable", "unknown"):
+                last_changed_str = state_data.get("last_changed")
+                if last_changed_str:
+                    if last_changed_str.endswith("Z"):
+                        last_changed_str = last_changed_str[:-1] + "+00:00"
+                    
+                    try:
+                        from datetime import datetime, timezone
+                        dt = datetime.fromisoformat(last_changed_str)
+                        now_dt = datetime.now(timezone.utc)
+                        duration_seconds = (now_dt - dt).total_seconds()
+                        
+                        # 30 minutos (1800 segundos)
+                        if duration_seconds > 1800.0:
+                            if entity_id not in self._unavailability_notified:
+                                self._unavailability_notified.add(entity_id)
+                                log.warning("AlertsRunner: Dispositivo %s indisponível por %.1f segundos (> 30 min). Notificando.", entity_id, duration_seconds)
+                                
+                                # Envia WhatsApp
+                                msg = (
+                                    f"⚠️ *DISPOSITIVO OFFLINE/INDISPONÍVEL!*\n\n"
+                                    f"O dispositivo *{friendly_name}* (ID: `{entity_id}`) está offline ou indisponível há mais de 30 minutos no sistema de segurança."
+                                )
+                                for phone in phones:
+                                    try:
+                                        await send_whatsapp_text(
+                                            settings=self.settings,
+                                            evo=self.evo,
+                                            number=phone,
+                                            message=msg,
+                                        )
+                                    except Exception:
+                                        pass
+                    except Exception as e:
+                        log.warning("AlertsRunner: Erro ao calcular tempo de indisponibilidade de %s: %s", entity_id, e)
+            else:
+                # Se o dispositivo está online/restabelecido e estava no set de notificados
+                if entity_id in self._unavailability_notified:
+                    self._unavailability_notified.remove(entity_id)
+                    log.info("AlertsRunner: Dispositivo %s voltou a ficar disponível (estado: %s). Notificando restabelecimento.", entity_id, state)
+                    
+                    msg_recovery = (
+                        f"ℹ️ *DISPOSITIVO ONLINE/RESTABELECIDO!*\n\n"
+                        f"O dispositivo *{friendly_name}* (ID: `{entity_id}`) voltou a ficar online e está operando normalmente no sistema."
+                    )
+                    for phone in phones:
+                        try:
+                            await send_whatsapp_text(
+                                settings=self.settings,
+                                evo=self.evo,
+                                number=phone,
+                                message=msg_recovery,
+                            )
+                        except Exception:
+                            pass
