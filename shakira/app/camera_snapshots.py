@@ -457,7 +457,8 @@ async def handle_camera_snapshot_decision(
         # Envia as câmeras em lotes de 6 para a IA analisar
         batch_size = 6
         found_cameras = []
-        summaries = []
+        relevant_findings = []
+
 
         for i in range(0, len(fetched), batch_size):
             chunk = fetched[i : i + batch_size]
@@ -509,16 +510,14 @@ async def handle_camera_snapshot_decision(
             if not analysis:
                 continue
 
-            if analysis.description:
-                summaries.append(analysis.description)
-
-            # Procura pelo cachorro nas notas deste lote
+            # Procura pelo cachorro e extrai observações relevantes das notas deste lote
             if analysis.cameras:
                 for cam_presence in analysis.cameras:
                     cam_name = cam_presence.name
                     notes = cam_presence.notes or ""
                     notes_lower = notes.lower()
 
+                    # 1. Verifica se é o cachorro procurado
                     is_match = False
                     if target_dog == "Kátio":
                         is_match = cam_presence.katio_detected
@@ -566,6 +565,22 @@ async def handle_camera_snapshot_decision(
                                     log.warning("Double-pass REJEITOU detecção na camera=%s: %s", label, verification_reason)
                                 break
 
+                    # 2. Coleta destaques relevantes para informar o usuário se o cachorro não for encontrado
+                    if notes.strip() and len(notes.strip()) >= 3:
+                        has_detection = cam_presence.person_detected or cam_presence.katio_detected or cam_presence.otavio_detected
+                        negatives_for_relevance = [
+                            "vazio", "vazia", "sem movimento", "sem movimentação", 
+                            "sem detecção", "sem detecções", "sem pessoas", 
+                            "sem cachorros", "sem cães", "sem cão", 
+                            "escuro", "escura", "penumbra", "sem alteração", 
+                            "sem alterações", "normal", "limpo", "limpa", 
+                            "nada de diferente", "nada diferente", "sem novidades", "sem novidade"
+                        ]
+                        has_negative_relevance = any(neg in notes_lower for neg in negatives_for_relevance)
+                        
+                        if has_detection or (not has_negative_relevance):
+                            relevant_findings.append(f"{cam_name}: {notes}")
+
             # Se encontrou o cachorro neste lote, interrompe a busca nos próximos lotes (short-circuit)
             if found_cameras:
                 log.info("Cão localizado no lote! Interrompendo busca subsequente.")
@@ -592,8 +607,8 @@ async def handle_camera_snapshot_decision(
         else:
             # Não localizado
             no_dog_msg = f"Não consegui localizar o {target_dog} em nenhuma das câmeras."
-            if summaries:
-                no_dog_msg += f"\n\nResumo das câmeras analisadas:\n" + "\n".join(summaries)
+            if relevant_findings:
+                no_dog_msg += f"\n\nObservações relevantes das áreas analisadas:\n" + "\n".join(f"• {f}" for f in relevant_findings)
 
             await say(no_dog_msg, final=True)
             return CameraSnapshotsResult(

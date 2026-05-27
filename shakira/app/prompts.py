@@ -22,7 +22,7 @@ de objetos, cada um com "action" e os campos necessários — nunca envie o arra
 Para uma única ação, use um único objeto JSON.
 O campo "action" deve ser EXATAMENTE um destes valores — nunca use o id de um cenário (ex.: banho_boiler) como action:
 {
-  "action": "reply" | "call_service" | "get_state" | "list_entities" | "search_photos" | "get_camera_snapshot" | "house_status" | "save_memory" | "send_user_file" | "delete_from_memory" | "vault_save" | "vault_retrieve" | "vault_list" | "schedule_response" | "schedule_action" | "cancel_scheduled_response" | "list_instagram_links" | "search_instagram_links" | "refresh_instagram_link" | "delete_instagram_link" | "send_instagram_link" | "fact_check_claim" | "google_calendar_save_link" | "google_calendar_configure" | "google_calendar_list_events" | "google_calendar_show_settings" | "birthday_save" | "birthday_list" | "birthday_delete" | "birthday_upcoming" | "interfone_list",
+  "action": "reply" | "call_service" | "get_state" | "list_entities" | "search_photos" | "get_camera_snapshot" | "house_status" | "save_memory" | "send_user_file" | "delete_from_memory" | "vault_save" | "vault_retrieve" | "vault_list" | "schedule_response" | "schedule_action" | "cancel_scheduled_response" | "list_instagram_links" | "search_instagram_links" | "refresh_instagram_link" | "delete_instagram_link" | "send_instagram_link" | "fact_check_claim" | "google_calendar_save_link" | "google_calendar_configure" | "google_calendar_list_events" | "google_calendar_show_settings" | "birthday_save" | "birthday_list" | "birthday_delete" | "birthday_upcoming" | "interfone_list" | "get_street_history",
   "domain": "light",
   "service": "turn_on",
   "service_data": { "entity_id": "light.sala" },
@@ -90,6 +90,8 @@ O campo "action" deve ser EXATAMENTE um destes valores — nunca use o id de um 
   "birthday_list_number": "numero na lista de aniversarios (1, 2, ...)",
   "birthday_upcoming_days": "dias a frente para birthday_upcoming (padrao 7)",
   "interfone_list_limit": "quantas chamadas do interfone mostrar (1-15, padrao 5)",
+  "period": "today | yesterday | last_hour | this_month | month | busiest_weekday | busiest_day_of_month — período para contagem da rua",
+  "month_num": "número do mês (1-12) se period=month",
   "response": "Texto curto: raciocínio ou resposta (o sistema pode enviar em mensagem separada antes de executar ações)"
 }
 
@@ -295,4 +297,11 @@ Regras de CHAMADAS DO INTERFONE:
 - O sistema regista automaticamente cada toque (foto, data, avaliação Gemini, se alguém atendeu).
 - Perguntas sobre interfone, porteiro, campainha ou "quem tocou": action=interfone_list.
 - interfone_list_limit opcional (padrão 5). O sistema envia imagens reais — não invente chamadas.
+
+Regras de MOVIMENTAÇÃO NA RUA / FLUXO DE PESSOAS (get_street_history):
+- OBRIGATÓRIO quando o usuário perguntar sobre o fluxo de pessoas na rua, quantas pessoas passaram em frente de casa ou estatísticas de movimentação/passagem detectadas na rua (binary_sensor.presenca_porta_vidro_presence).
+- Parâmetros:
+  - period: "today" (hoje), "yesterday" (ontem), "last_hour" (última hora), "this_month" (este mês), "month" (mês específico), "busiest_weekday" (dia da semana mais movimentado) ou "busiest_day_of_month" (dia mais movimentado do mês corrente).
+  - month_num: número do mês correspondente (1 a 12) apenas se period for "month" (ex: "quantas passaram em março?" -> period="month", month_num=3).
+- response: mensagem curta confirmando que vai verificar as estatísticas (ex: "Vou consultar o histórico de movimentação na rua...").
 """

@@ -213,6 +213,7 @@ VALID_GEMINI_ACTIONS = frozenset(
         "birthday_delete",
         "birthday_upcoming",
         "interfone_list",
+        "get_street_history",
     }
 )
 
@@ -242,6 +243,7 @@ _SINGLE_USER_MESSAGE_ACTIONS = frozenset(
         "birthday_upcoming",
         "interfone_list",
         "house_status",
+        "get_street_history",
     }
 )
 
@@ -2339,6 +2341,19 @@ async def execute_decision(
 
         svc_data = build_ha_service_data(domain, service, target, raw_svc_data)
         svc_data = catalog.apply_service_defaults(target, svc_data)
+
+        # Blindagem de segurança para volume de sirenes (limite de 70%)
+        if domain == "number" and service == "set_value" and isinstance(svc_data, dict):
+            if isinstance(target, str) and target.startswith("number.sirene_") and target.endswith("_volume"):
+                val = svc_data.get("value")
+                try:
+                    num_val = float(val) if val is not None else 0.0
+                    if num_val > 70.0:
+                        log.warning("Sirene: limitando volume de %s de %s para o maximo de 70", target, val)
+                        svc_data["value"] = 70.0
+                except (ValueError, TypeError):
+                    pass
+
         if raw_svc_data != svc_data:
             log.info(
                 "service_data normalizado entity=%s raw=%s -> ha=%s",
@@ -2590,6 +2605,60 @@ async def execute_decision(
         return await finalize(
             "Vou buscar o histórico de chamadas do interfone e enviar as imagens."
         )
+
+    if action == "get_street_history":
+        from app.street_presence_store import StreetPresenceStore
+        store = StreetPresenceStore()
+        period = str(decision.get("period") or "today").strip().lower()
+        
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc)
+        
+        if period == "today":
+            count = store.count_today(now)
+            result = f"Hoje passaram {count} pessoas na rua em frente de casa."
+        elif period == "yesterday":
+            count = store.count_yesterday(now)
+            result = f"Ontem passaram {count} pessoas na rua em frente de casa."
+        elif period == "last_hour":
+            count = store.count_last_hour(now)
+            result = f"Na última hora passaram {count} pessoas na rua em frente de casa."
+        elif period == "this_month":
+            count = store.count_this_month(now)
+            result = f"Este mês passaram {count} pessoas na rua em frente de casa."
+        elif period == "month":
+            month_num = decision.get("month_num")
+            try:
+                m_int = int(month_num) if month_num is not None else now.month
+            except ValueError:
+                m_int = now.month
+            
+            months_pt = {
+                1: "janeiro", 2: "fevereiro", 3: "março", 4: "abril", 5: "maio", 6: "junho",
+                7: "julho", 8: "agosto", 9: "setembro", 10: "outubro", 11: "novembro", 12: "dezembro"
+            }
+            m_name = months_pt.get(m_int, f"mês {m_int}")
+            count = store.count_month(m_int, now)
+            result = f"No mês de {m_name} passaram {count} pessoas na rua em frente de casa."
+        elif period in ("busiest_weekday", "busiest_day_of_week"):
+            res = store.busiest_weekday()
+            if res:
+                day_name, count = res
+                result = f"O dia da semana mais movimentado na rua é {day_name}, com um total acumulado de {count} passagens registradas."
+            else:
+                result = "Ainda não tenho dados suficientes no histórico de movimentação da rua para calcular o dia da semana mais movimentado."
+        elif period == "busiest_day_of_month":
+            res = store.busiest_day_of_month(now)
+            if res:
+                day_name, count = res
+                result = f"O dia mais movimentado na rua este mês foi em {day_name}, com {count} passagens registradas."
+            else:
+                result = "Ainda não tenho dados de movimentação suficientes registrados este mês."
+        else:
+            count = store.count_today(now)
+            result = f"Hoje passaram {count} pessoas na rua em frente de casa."
+            
+        return await finalize(result)
 
     fallback = reply or "Não entendi o próximo passo."
     if messenger:

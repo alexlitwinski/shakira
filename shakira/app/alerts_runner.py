@@ -42,6 +42,57 @@ log = logging.getLogger(__name__)
 TICK_SECONDS = 30
 ALARM_TRIGGERED_STATE = "triggered"
 
+VIBRATION_RULES = [
+    {
+        "sensor": "binary_sensor.sensor_vibracao_portao_social_vibration",
+        "partition": "alarm_control_panel.amt_8000_partition_1",
+        "config": "input_boolean.monitorar_vibracao_no_portao_social",
+        "siren": "switch.sirene_entrada_alarm",
+        "volume": "number.sirene_entrada_volume",
+        "name": "Portão Social"
+    },
+    {
+        "sensor": "binary_sensor.vibracao_janela_sala_1_vibration",
+        "partition": "alarm_control_panel.amt_8000_partition_1",
+        "config": "input_boolean.monitorar_vibracao_nas_janelas_da_sala",
+        "siren": "switch.sirene_despensa_alarm",
+        "volume": "number.sirene_despensa_volume",
+        "name": "Janela da Sala 1"
+    },
+    {
+        "sensor": "binary_sensor.vibracao_janela_sala_2_vibration",
+        "partition": "alarm_control_panel.amt_8000_partition_1",
+        "config": "input_boolean.monitorar_vibracao_nas_janelas_da_sala",
+        "siren": "switch.sirene_despensa_alarm",
+        "volume": "number.sirene_despensa_volume",
+        "name": "Janela da Sala 2"
+    },
+    {
+        "sensor": "binary_sensor.vibracao_janela_sala_3_vibration",
+        "partition": "alarm_control_panel.amt_8000_partition_1",
+        "config": "input_boolean.monitorar_vibracao_nas_janelas_da_sala",
+        "siren": "switch.sirene_despensa_alarm",
+        "volume": "number.sirene_despensa_volume",
+        "name": "Janela da Sala 3"
+    },
+    {
+        "sensor": "binary_sensor.vibracao_porta_da_hanna_vibration",
+        "partition": "alarm_control_panel.amt_8000_partition_5",
+        "config": "input_boolean.monitorar_vibracao_na_porta_da_hanna",
+        "siren": "switch.sirene_hanna_alarm",
+        "volume": "number.sirene_hanna_volume",
+        "name": "Porta da Hanna"
+    },
+    {
+        "sensor": "binary_sensor.vibracao_portao_garagem_vibration",
+        "partition": "alarm_control_panel.amt_8000_partition_1",
+        "config": None,
+        "siren": "switch.sirene_garagem_alarm",
+        "volume": "number.sirene_garagem_volume",
+        "name": "Portão da Garagem"
+    }
+]
+
 
 def should_describe_alert_cameras(alert: AlertConfig) -> bool:
     """True se o alerta pede descricao Gemini (explicita ou disparo de particao)."""
@@ -163,6 +214,29 @@ class AlertsRunner:
         ids.add("switch.bomba_fumaca_sala_aquecimento")
         ids.add("switch.bomba_fumaca_despenca_aquecimento")
 
+        # Monitora permanentemente a presença na rua para fins de estatística
+        ids.add("binary_sensor.presenca_porta_vidro_presence")
+
+        # Monitora permanentemente as entidades da rotina de vibração
+        vibration_sensors = {
+            "binary_sensor.sensor_vibracao_portao_social_vibration",
+            "binary_sensor.vibracao_janela_sala_1_vibration",
+            "binary_sensor.vibracao_janela_sala_2_vibration",
+            "binary_sensor.vibracao_janela_sala_3_vibration",
+            "binary_sensor.vibracao_porta_da_hanna_vibration",
+            "binary_sensor.vibracao_portao_garagem_vibration",
+        }
+        vibration_configs = {
+            "input_boolean.monitorar_vibracao_no_portao_social",
+            "input_boolean.monitorar_vibracao_nas_janelas_da_sala",
+            "input_boolean.monitorar_vibracao_na_porta_da_hanna",
+        }
+        vibration_partitions = {
+            "alarm_control_panel.amt_8000_partition_1",
+            "alarm_control_panel.amt_8000_partition_5",
+        }
+        ids |= vibration_sensors | vibration_configs | vibration_partitions
+
         return ids
 
     def _needs_live_websocket(self) -> bool:
@@ -185,6 +259,21 @@ class AlertsRunner:
         for alert in self.catalog.enabled_polling_alerts():
             self._runtime(alert.id).last_check_at = now
 
+    @property
+    def street_store(self) -> Any:
+        if not hasattr(self, "_street_presence_store"):
+            from app.street_presence_store import StreetPresenceStore
+            self._street_presence_store = StreetPresenceStore()
+        return self._street_presence_store
+
+    async def _sync_street_presence_history(self) -> None:
+        try:
+            # Aguarda um tempinho curto para não travar a inicialização imediata
+            await asyncio.sleep(2.0)
+            await self.street_store.sync_history_from_ha(self.ha)
+        except Exception as e:
+            log.warning("Falha na sincronização inicial do histórico da rua: %s", e)
+
     def start(self) -> None:
         self._seed_polling_baseline()
         if self.catalog.enabled_polling_alerts() and not (
@@ -196,6 +285,12 @@ class AlertsRunner:
 
         if self._needs_live_websocket():
             self._start_websocket()
+
+        # Sincroniza retroativamente o histórico de movimentação na rua em background
+        asyncio.create_task(
+            self._sync_street_presence_history(),
+            name="shakira-street-presence-sync",
+        )
 
     async def ensure_running(self) -> None:
         """Inicia polling e/ou WebSocket se houver alertas activos."""
@@ -570,6 +665,49 @@ class AlertsRunner:
     ) -> None:
         """Dispara alertas live apenas em transicao real para o estado de alerta."""
         now = time.monotonic()
+
+        # Intercepta eventos de vibração na casa em tempo real
+        vibration_sensors = {
+            "binary_sensor.sensor_vibracao_portao_social_vibration",
+            "binary_sensor.vibracao_janela_sala_1_vibration",
+            "binary_sensor.vibracao_janela_sala_2_vibration",
+            "binary_sensor.vibracao_janela_sala_3_vibration",
+            "binary_sensor.vibracao_porta_da_hanna_vibration",
+            "binary_sensor.vibracao_portao_garagem_vibration",
+        }
+        if entity_id in vibration_sensors:
+            new_norm = (new_state or "").strip().lower()
+            old_norm = (old_state or "").strip().lower() if old_state else ""
+            if new_norm == "on" and old_norm != "on":
+                asyncio.create_task(
+                    self._evaluate_vibration_alert(entity_id),
+                    name=f"shakira-vibration-{entity_id}"
+                )
+
+        # Registra eventos de movimentação na rua no banco SQLite local
+        if entity_id == "binary_sensor.presenca_porta_vidro_presence":
+            new_norm = (new_state or "").strip().lower()
+            old_norm = (old_state or "").strip().lower() if old_state else ""
+            if new_norm == "on" and old_norm != "on":
+                from datetime import datetime, timezone
+                event_time = None
+                if _event_data:
+                    new_state_dict = _event_data.get("new_state")
+                    if isinstance(new_state_dict, dict):
+                        last_changed_str = new_state_dict.get("last_changed")
+                        if last_changed_str:
+                            try:
+                                if last_changed_str.endswith("Z"):
+                                    last_changed_str = last_changed_str[:-1] + "+00:00"
+                                event_time = datetime.fromisoformat(last_changed_str)
+                            except Exception:
+                                pass
+                if not event_time:
+                    event_time = datetime.now(timezone.utc)
+                
+                # Registra o evento na store
+                self.street_store.register_event(event_time, "on")
+
         if entity_id in ("binary_sensor.presenca_porta_vidro_presence", "sensor.presenca_porta_vidro_target_distance"):
             alert = next((a for a in self.catalog.alerts if a.id == "presenca_portao_parado" and a.enabled), None)
             if alert:
@@ -594,6 +732,13 @@ class AlertsRunner:
                 continue
             if state_matches(old_state, alert.when_state):
                 continue
+            if alert.id == "barreira_ir_disparo":
+                asyncio.create_task(
+                    self._check_barreira_ir_delayed(alert, rt, new_state),
+                    name="shakira-barreira-ir-delayed",
+                )
+                continue
+
             await self._evaluate_alert(
                 alert,
                 rt,
@@ -685,6 +830,33 @@ class AlertsRunner:
                 )
             except Exception as e:
                 log.warning("Bomba fumaça: falha ao enviar notificacao para %s: %s", phone, e)
+
+    async def _check_barreira_ir_delayed(
+        self,
+        alert: AlertConfig,
+        rt: _AlertRuntime,
+        state_override: str,
+    ) -> None:
+        """Atrasa o disparo da barreira IR em 1.5s para descartar falsos positivos rápidos."""
+        await asyncio.sleep(1.5)
+        try:
+            state_data = await self.ha.get_state(alert.entity_id)
+            if not state_data:
+                return
+            current_state = str(state_data.get("state", "")).strip().lower()
+            if state_matches(current_state, alert.when_state):
+                log.info("Barreira IR: Sensor permaneceu ativo por > 1.5s. Confirmando disparo.")
+                now = time.monotonic()
+                await self._evaluate_alert(
+                    alert,
+                    rt,
+                    now,
+                    state_override=current_state,
+                )
+            else:
+                log.info("Barreira IR: Sensor normalizado em menos de 1.5s. Disparo ignorado.")
+        except Exception as e:
+            log.warning("Erro no atraso da barreira IR: %s", e)
 
     async def _evaluate_alert(
         self,
@@ -901,3 +1073,128 @@ class AlertsRunner:
             "websocket": ws_status,
             "items": items,
         }
+
+    async def _evaluate_vibration_alert(self, sensor_id: str) -> None:
+        """Verifica se as condições de disparo de sirene por vibração foram atendidas."""
+        rule = next((r for r in VIBRATION_RULES if r["sensor"] == sensor_id), None)
+        if not rule:
+            return
+
+        partition_id = rule["partition"]
+        config_id = rule["config"]
+        siren_id = rule["siren"]
+        volume_id = rule["volume"]
+        sensor_name = rule["name"]
+
+        # 1. Verifica estado da partição associada
+        partition_state_data = await self.ha.get_state(partition_id)
+        partition_state = str(partition_state_data.get("state", "")).strip().lower() if partition_state_data else "disarmed"
+        is_armed = partition_state.startswith("armed") or partition_state in ("triggered", "arming", "pending")
+        if not is_armed:
+            log.info("AlertsRunner: Vibração detectada em %s mas a partição %s está desarmada (%s)", sensor_name, partition_id, partition_state)
+            return
+
+        # 2. Verifica estado do boolean de configuração (se aplicável)
+        if config_id:
+            config_state_data = await self.ha.get_state(config_id)
+            config_state = str(config_state_data.get("state", "")).strip().lower() if config_state_data else "off"
+            if config_state != "on":
+                log.info("AlertsRunner: Vibração detectada em %s com partição armada, mas monitoramento desativado via %s", sensor_name, config_id)
+                return
+
+        # 3. Dispara a sirene por 1 minuto
+        log.warning("AlertsRunner: DISPARO DE SIRENE por vibração detectada em %s! Siren=%s", sensor_name, siren_id)
+
+        if not hasattr(self, "_active_siren_tasks"):
+            self._active_siren_tasks = {}
+
+        existing_task = self._active_siren_tasks.get(siren_id)
+        if existing_task and not existing_task.done():
+            log.info("AlertsRunner: Reiniciando timer de 1 minuto para a sirene %s devido a nova vibração em %s.", siren_id, sensor_name)
+            existing_task.cancel()
+
+        task = asyncio.create_task(
+            self._run_siren_timer(siren_id, volume_id, sensor_name),
+            name=f"shakira-siren-timer-{siren_id}"
+        )
+        self._active_siren_tasks[siren_id] = task
+
+    async def _run_siren_timer(self, siren_id: str, volume_id: str, sensor_name: str) -> None:
+        """Executa disparo de sirene por 1 minuto a 30% e notifica moradores."""
+        try:
+            # 1. Envia notificação imediata
+            notify_phones = await resolve_notify_phones(
+                self.ha,
+                phones=[],
+                default_phones=self.catalog.default_notify.phones,
+            )
+            msg = (
+                f"🚨 *ALERTA DE SEGURANÇA: VIBRAÇÃO DETECTADA!*\n\n"
+                f"Foi detectada uma vibração no sensor *{sensor_name}* com o perímetro de alarme armado.\n"
+                f"Acionando a sirene associada por 1 minuto a 30% de volume para dissuasão."
+            )
+            for phone in notify_phones:
+                try:
+                    await send_whatsapp_text(
+                        settings=self.settings,
+                        evo=self.evo,
+                        number=phone,
+                        message=msg,
+                    )
+                except Exception as e:
+                    log.error("AlertsRunner: Falha ao notificar telefone %s de vibracao: %s", phone, e)
+
+            # 2. Ajusta o volume para 30%
+            try:
+                await self.ha.call_service(
+                    domain="number",
+                    service="set_value",
+                    service_data={"entity_id": volume_id, "value": 30.0}
+                )
+            except Exception as e:
+                log.error("AlertsRunner: Falha ao definir volume da sirene %s: %s", volume_id, e)
+
+            # 3. Liga a sirene
+            try:
+                await self.ha.call_service(
+                    domain="switch",
+                    service="turn_on",
+                    service_data={"entity_id": siren_id}
+                )
+            except Exception as e:
+                log.error("AlertsRunner: Falha ao ligar sirene %s: %s", siren_id, e)
+
+            # 4. Aguarda 1 minuto (60 segundos)
+            await asyncio.sleep(60.0)
+
+            # 5. Desliga a sirene
+            log.info("AlertsRunner: Fim do timer de 1 minuto. Desligando a sirene %s.", siren_id)
+            try:
+                await self.ha.call_service(
+                    domain="switch",
+                    service="turn_off",
+                    service_data={"entity_id": siren_id}
+                )
+            except Exception as e:
+                log.error("AlertsRunner: Falha ao desligar sirene %s: %s", siren_id, e)
+
+            # 6. Notifica moradores sobre desligamento da sirene
+            msg_off = (
+                f"ℹ️ *SIRENE DESLIGADA*\n\n"
+                f"A sirene associada ao sensor *{sensor_name}* foi desligada automaticamente após 1 minuto de funcionamento."
+            )
+            for phone in notify_phones:
+                try:
+                    await send_whatsapp_text(
+                        settings=self.settings,
+                        evo=self.evo,
+                        number=phone,
+                        message=msg_off,
+                    )
+                except Exception:
+                    pass
+
+        except asyncio.CancelledError:
+            log.info("AlertsRunner: Timer da sirene %s cancelado devido a novo sinal de vibração ou parada.", siren_id)
+        except Exception as e:
+            log.error("AlertsRunner: Erro na execucao do timer da sirene %s: %s", siren_id, e)
