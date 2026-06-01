@@ -100,17 +100,10 @@ def build_trigger_message(
     zones: list[tuple[str, str, str]],
 ) -> str:
     """
-    Mensagem WhatsApp: particoes (alarm_control_panel.*) e setores (sensor.amt_8000_zone_*).
-    partitions: [(entity_id, rotulo), ...]
-    zones: [(entity_id, rotulo, estado), ...]
+    Mensagem WhatsApp: Apenas setores (sensor.amt_8000_zone_*).
+    Partições foram ocultadas para evitar poluição visual causada pelo disparo geral da central.
     """
     lines = ["ALERTA: alarme disparou!", ""]
-
-    if partitions:
-        lines.append("Partições em disparo:")
-        for _, label in partitions:
-            lines.append(f"• {label}")
-        lines.append("")
 
     if zones:
         lines.append("Setores (zonas) em disparo:")
@@ -118,10 +111,9 @@ def build_trigger_message(
             state_bit = f" ({state})" if state else ""
             lines.append(f"• {label}{state_bit}")
         lines.append("")
-    elif partitions:
+    else:
         lines.append(
-            "Setores (zonas): nenhum sensor amt_8000_zone em disparo no momento "
-            "(confira no HA se as zonas voltaram ao normal)."
+            "Setores (zonas): nenhum sensor de zona em disparo no momento."
         )
         lines.append("")
 

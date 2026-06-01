@@ -22,8 +22,8 @@ def test_build_trigger_message_partitions_and_zones():
         ],
     )
     assert "ALERTA: alarme disparou!" in msg
-    assert "Partições em disparo:" in msg
-    assert "Partição 1 — perímetro externo" in msg
+    assert "Partições em disparo:" not in msg
+    assert "Partição 1 — perímetro externo" not in msg
     assert "Setores (zonas) em disparo:" in msg
     assert "Portão de Serviço" in msg
     assert "Porta sala estar" in msg
@@ -36,7 +36,7 @@ def test_build_trigger_message_no_zones_hint():
         [],
     )
     assert "Setores (zonas):" in msg
-    assert "nenhum sensor amt_8000_zone" in msg
+    assert "nenhum sensor de zona em disparo" in msg
 
 
 def test_zone_state_is_triggered():

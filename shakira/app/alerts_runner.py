@@ -127,6 +127,7 @@ class AlertsRunner:
     _rain_dispatch: RainDispatchRunner | None = None
     _interfone_dispatch: InterfoneDispatchRunner | None = None
     _presence_simulator: PresenceSimulatorRunner | None = None
+    _processed_double_take_ids: list[str] = field(default_factory=list)
 
     def attach_presence_simulator(self, runner: PresenceSimulatorRunner | None) -> None:
         """Partilha o WebSocket live com a rotina de simulação de presença."""
@@ -213,9 +214,13 @@ class AlertsRunner:
         ids.add("switch.bomba_fumaca_garagem_aquecimento")
         ids.add("switch.bomba_fumaca_sala_aquecimento")
         ids.add("switch.bomba_fumaca_despenca_aquecimento")
+        ids.add("switch.bomba_fumaca_alex_aquecimento")
 
         # Monitora permanentemente a presença na rua para fins de estatística
         ids.add("binary_sensor.presenca_porta_vidro_presence")
+
+        # Monitora o sensor Double Take do Portão de Vidro em tempo real
+        ids.add("sensor.double_take_porta_vidro")
 
         # Monitora permanentemente as entidades da rotina de vibração
         vibration_sensors = {
@@ -364,6 +369,7 @@ class AlertsRunner:
             "switch.bomba_fumaca_garagem_aquecimento",
             "switch.bomba_fumaca_sala_aquecimento",
             "switch.bomba_fumaca_despenca_aquecimento",
+            "switch.bomba_fumaca_alex_aquecimento",
         ]
         
         for entity_id in entities:
@@ -404,6 +410,7 @@ class AlertsRunner:
                                 "switch.bomba_fumaca_garagem_aquecimento": "Garagem",
                                 "switch.bomba_fumaca_sala_aquecimento": "Sala",
                                 "switch.bomba_fumaca_despenca_aquecimento": "Despensa",
+                                "switch.bomba_fumaca_alex_aquecimento": "Alex",
                             }
                             room = labels.get(entity_id, entity_id)
                             msg = f"⏱️ *AVISO:* O aquecimento da bomba de fumaça da *{room}* excedeu o limite máximo de 15 minutos e foi *DESLIGADO automaticamente*."
@@ -709,6 +716,13 @@ class AlertsRunner:
                 # Registra o evento na store
                 self.street_store.register_event(event_time, "on")
 
+        # Intercepta eventos de reconhecimento facial do Portão de Vidro em tempo real
+        if entity_id == "sensor.double_take_porta_vidro":
+            new_state_dict = _event_data.get("new_state") if _event_data else None
+            if isinstance(new_state_dict, dict):
+                attributes = new_state_dict.get("attributes") or {}
+                await self._handle_double_take_event(attributes)
+
         if entity_id in ("binary_sensor.presenca_porta_vidro_presence", "sensor.presenca_porta_vidro_target_distance"):
             alert = next((a for a in self.catalog.alerts if a.id == "presenca_portao_parado" and a.enabled), None)
             if alert:
@@ -783,6 +797,7 @@ class AlertsRunner:
             "switch.bomba_fumaca_garagem_aquecimento",
             "switch.bomba_fumaca_sala_aquecimento",
             "switch.bomba_fumaca_despenca_aquecimento",
+            "switch.bomba_fumaca_alex_aquecimento",
         ):
             new_norm = (new_state or "").strip().lower()
             old_norm = (old_state or "").strip().lower() if old_state else ""
@@ -806,6 +821,7 @@ class AlertsRunner:
             "switch.bomba_fumaca_garagem_aquecimento": "Garagem",
             "switch.bomba_fumaca_sala_aquecimento": "Sala",
             "switch.bomba_fumaca_despenca_aquecimento": "Despensa",
+            "switch.bomba_fumaca_alex_aquecimento": "Alex",
         }
         room = labels.get(entity_id, entity_id)
         state_str = "LIGADO" if is_on else "DESLIGADO"
@@ -1325,3 +1341,68 @@ class AlertsRunner:
                             )
                         except Exception:
                             pass
+
+    async def _handle_double_take_event(self, attributes: dict[str, Any]) -> None:
+        """Processa eventos de reconhecimento facial da câmera do Portão de Vidro."""
+        # 1. Deduplicação por ID do evento
+        event_id = attributes.get("id")
+        if not event_id:
+            return
+
+        if event_id in self._processed_double_take_ids:
+            return
+
+        self._processed_double_take_ids.append(event_id)
+        if len(self._processed_double_take_ids) > 50:
+            self._processed_double_take_ids.pop(0)
+
+        # 2. Filtrar matches com confiança >= 75% e que sejam conhecidos (não "unknown")
+        matches = attributes.get("matches") or []
+        valid_matches = []
+        for match in matches:
+            if not isinstance(match, dict):
+                continue
+            name = match.get("name")
+            confidence = match.get("confidence")
+            is_match = match.get("match")
+
+            if (
+                name
+                and name.lower() != "unknown"
+                and is_match
+                and isinstance(confidence, (int, float))
+                and confidence >= 75
+            ):
+                valid_matches.append((name, confidence))
+
+        if not valid_matches:
+            return
+
+        # 3. Formatar mensagem no WhatsApp
+        formatted_names = [f"*{name.capitalize()}* ({int(confidence)}%)" for name, confidence in valid_matches]
+        if len(formatted_names) == 1:
+            msg = f"🔔 *Reconhecimento:* {formatted_names[0]} detectado(a) no Portão de Vidro!"
+        else:
+            msg = f"🔔 *Reconhecimento:* {', '.join(formatted_names)} detectados no Portão de Vidro!"
+
+        # 4. Enviar mensagem
+        phones = await resolve_notify_phones(
+            self.ha,
+            phones=[],
+            default_phones=self.catalog.default_notify.phones,
+        )
+        if not phones:
+            log.warning("Double Take: nenhum telefone configurado para notificação")
+            return
+
+        for phone in phones:
+            try:
+                await send_whatsapp_text(
+                    settings=self.settings,
+                    evo=self.evo,
+                    number=phone,
+                    message=msg,
+                )
+                log.info("Notificação Double Take enviada com sucesso para %s: %s", phone, msg)
+            except Exception as e:
+                log.warning("Double Take: falha ao enviar notificação para %s: %s", phone, e)

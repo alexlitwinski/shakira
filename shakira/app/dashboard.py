@@ -718,7 +718,32 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         if (f.state && String(ent.state || "").toLowerCase().indexOf(f.state) < 0) return false;
         if (f.text) {
           const hay = (ent.entity_id + " " + (ent.friendly_name || "")).toLowerCase();
-          if (hay.indexOf(f.text) < 0) return false;
+          if (f.text.indexOf("*") >= 0) {
+            // Suporte a busca com curinga/wildcard (*)
+            let escaped = "";
+            const specials = "-/\\\\^$+?.()|[]{}";
+            for (let i = 0; i < f.text.length; i++) {
+              const char = f.text[i];
+              if (specials.indexOf(char) >= 0) {
+                escaped += "\\\\" + char;
+              } else if (char === "*") {
+                escaped += ".*";
+              } else {
+                escaped += char;
+              }
+            }
+            const regexStr = "^" + escaped + "$";
+            try {
+              const regex = new RegExp(regexStr);
+              const matchId = regex.test(ent.entity_id.toLowerCase());
+              const matchName = ent.friendly_name ? regex.test(ent.friendly_name.toLowerCase()) : false;
+              if (!matchId && !matchName) return false;
+            } catch (e) {
+              if (hay.indexOf(f.text.replace(/\\*/g, "")) < 0) return false;
+            }
+          } else {
+            if (hay.indexOf(f.text) < 0) return false;
+          }
         }
         return true;
       });

@@ -41,15 +41,32 @@ DEFAULT_PARTITIONS: tuple[tuple[str, str], ...] = (
 def resolve_camera_ids_for_partitions(
     cameras: CamerasCatalog,
     partition_entity_ids: list[str],
+    zone_entity_ids: list[str] | None = None,
 ) -> list[str]:
-    """Cameras cujo group em shakira_cameras.yaml inclui o entity_id da particao."""
+    """
+    Resolve as câmeras para o disparo do alarme.
+    Primeiro tenta buscar câmeras associadas às zonas físicas violadas (se zone_entity_ids for fornecido).
+    Se nenhuma for encontrada, faz o fallback para as câmeras associadas às partições globais.
+    """
     seen: set[str] = set()
     ordered: list[str] = []
-    for entity_id in partition_entity_ids:
-        for cam in cameras.cameras_for_group(entity_id):
-            if cam.id not in seen:
-                seen.add(cam.id)
-                ordered.append(cam.id)
+
+    # 1. Tenta associar as câmeras pelas zonas que dispararam
+    if zone_entity_ids:
+        for zone_id in zone_entity_ids:
+            for cam in cameras.cameras_for_group(zone_id):
+                if cam.id not in seen:
+                    seen.add(cam.id)
+                    ordered.append(cam.id)
+
+    # 2. Se nenhuma câmera foi encontrada pelas zonas, faz o fallback seguro pelas partições
+    if not ordered:
+        for entity_id in partition_entity_ids:
+            for cam in cameras.cameras_for_group(entity_id):
+                if cam.id not in seen:
+                    seen.add(cam.id)
+                    ordered.append(cam.id)
+
     return ordered
 
 
@@ -344,6 +361,7 @@ class AlarmDispatchRunner:
                         "switch.bomba_fumaca_garagem_aquecimento",
                         "switch.bomba_fumaca_sala_aquecimento",
                         "switch.bomba_fumaca_despenca_aquecimento",
+                        "switch.bomba_fumaca_alex_aquecimento",
                     ]
                 },
             )
@@ -371,7 +389,12 @@ class AlarmDispatchRunner:
             list(pending_zone_snapshot.values()),
         )
         message = build_trigger_message(triggered, triggered_zones)
-        camera_ids = resolve_camera_ids_for_partitions(self.cameras, partition_ids)
+        zone_ids = [eid for eid, _, _ in triggered_zones]
+        camera_ids = resolve_camera_ids_for_partitions(
+            self.cameras,
+            partition_ids,
+            zone_entity_ids=zone_ids,
+        )
 
         instance = (self.settings.evolution_instance or "").strip()
         if not instance:
