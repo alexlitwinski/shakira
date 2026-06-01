@@ -21,7 +21,15 @@ FALLBACK_ALERTS_PATHS = (
 )
 
 ALLOWED_ROOT_KEYS = frozenset(
-    {"alerts", "alarm_dispatch", "rain_dispatch", "interfone_dispatch", "presence_simulator", "default_notify"}
+    {
+        "alerts",
+        "alarm_dispatch",
+        "rain_dispatch",
+        "interfone_dispatch",
+        "presence_simulator",
+        "default_notify",
+        "double_take_dispatch",
+    }
 )
 ALERT_ID_RE = re.compile(r"^[a-z][a-z0-9_]+$", re.IGNORECASE)
 ENTITY_ID_RE = re.compile(r"^[a-z][a-z0-9_]+\.[a-z0-9_]+$", re.IGNORECASE)
@@ -191,6 +199,14 @@ class AlarmDispatchConfig:
     notify: AlertNotifyConfig = field(default_factory=AlertNotifyConfig)
 
 
+DEFAULT_DOUBLE_TAKE_MIN_CONFIDENCE = 85
+
+@dataclass
+class DoubleTakeDispatchConfig:
+    enabled: bool = False
+    min_confidence: int = DEFAULT_DOUBLE_TAKE_MIN_CONFIDENCE
+
+
 @dataclass
 class AlertConfig:
     id: str
@@ -220,6 +236,9 @@ class AlertsCatalog:
     )
     presence_simulator: PresenceSimulatorConfig = field(
         default_factory=PresenceSimulatorConfig
+    )
+    double_take_dispatch: DoubleTakeDispatchConfig = field(
+        default_factory=DoubleTakeDispatchConfig
     )
     default_notify: AlertNotifyConfig = field(default_factory=AlertNotifyConfig)
     source_path: Path | None = None
@@ -262,12 +281,13 @@ class AlertsCatalog:
         rain_dispatch = cls._parse_rain_dispatch(data)
         interfone_dispatch = cls._parse_interfone_dispatch(data)
         presence_simulator = cls._parse_presence_simulator(data)
+        double_take_dispatch = cls._parse_double_take_dispatch(data)
         default_notify = cls._parse_default_notify(data)
         enabled = sum(1 for a in alerts if a.enabled)
         if source_path:
             log.info(
                 "Alertas carregados: %s (%s regra(s), %s ativa(s), alarm_dispatch=%s, "
-                "rain_dispatch=%s, interfone_dispatch=%s, presence_simulator=%s, default_notify=%s telefone(s))",
+                "rain_dispatch=%s, interfone_dispatch=%s, presence_simulator=%s, double_take_dispatch=%s, default_notify=%s telefone(s))",
                 source_path,
                 len(alerts),
                 enabled,
@@ -275,6 +295,7 @@ class AlertsCatalog:
                 rain_dispatch.enabled,
                 interfone_dispatch.enabled,
                 presence_simulator.enabled,
+                double_take_dispatch.enabled,
                 len(default_notify.phones),
             )
         return cls(
@@ -283,6 +304,7 @@ class AlertsCatalog:
             rain_dispatch=rain_dispatch,
             interfone_dispatch=interfone_dispatch,
             presence_simulator=presence_simulator,
+            double_take_dispatch=double_take_dispatch,
             default_notify=default_notify,
             source_path=source_path,
             content_hash=h,
@@ -518,6 +540,24 @@ class AlertsCatalog:
         )
 
     @classmethod
+    def _parse_double_take_dispatch(cls, data: Any) -> DoubleTakeDispatchConfig:
+        if not isinstance(data, dict):
+            return DoubleTakeDispatchConfig()
+        block = data.get("double_take_dispatch")
+        if not isinstance(block, dict):
+            return DoubleTakeDispatchConfig()
+
+        min_conf_raw = block.get("min_confidence")
+        min_conf = DEFAULT_DOUBLE_TAKE_MIN_CONFIDENCE
+        if isinstance(min_conf_raw, (int, float)) and not isinstance(min_conf_raw, bool):
+            min_conf = max(10, min(int(min_conf_raw), 100))
+
+        return DoubleTakeDispatchConfig(
+            enabled=bool(block.get("enabled", False)),
+            min_confidence=min_conf,
+        )
+
+    @classmethod
     def _parse_data(cls, data: Any) -> list[AlertConfig]:
         if data is None:
             return []
@@ -731,6 +771,21 @@ class AlertsCatalog:
                          val = ps_block[k]
                          if not isinstance(val, (int, float)) or isinstance(val, bool):
                              errors.append(f"presence_simulator.{k} deve ser um numero.")
+
+        dt_block = data.get("double_take_dispatch")
+        if dt_block is not None:
+            if not isinstance(dt_block, dict):
+                errors.append("'double_take_dispatch' deve ser um mapa.")
+            else:
+                dt_allowed = {"enabled", "min_confidence"}
+                for k in sorted(set(dt_block.keys()) - dt_allowed):
+                    errors.append(f"double_take_dispatch: chave desconhecida '{k}'.")
+                if "enabled" in dt_block and not isinstance(dt_block["enabled"], bool):
+                    errors.append("double_take_dispatch.enabled deve ser true ou false.")
+                if "min_confidence" in dt_block:
+                    val = dt_block["min_confidence"]
+                    if not isinstance(val, (int, float)) or isinstance(val, bool):
+                        errors.append("double_take_dispatch.min_confidence deve ser um numero.")
 
         if "alerts" not in data:
             errors.append("Defina a secao 'alerts:'.")

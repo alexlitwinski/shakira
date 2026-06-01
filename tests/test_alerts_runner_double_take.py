@@ -21,6 +21,8 @@ class TestAlertsRunnerDoubleTake(unittest.TestCase):
     def test_double_take_valid_single_match(self, mock_send_wa, mock_resolve_phones) -> None:
         mock_resolve_phones.return_value = ["5531991119016"]
         catalog = AlertsCatalog.from_yaml_string("alerts: []")
+        catalog.double_take_dispatch.enabled = True
+        catalog.double_take_dispatch.min_confidence = 85
         runner = AlertsRunner(settings=Mock(), ha=Mock(), evo=Mock(), catalog=catalog)
 
         event_data = {
@@ -55,8 +57,11 @@ class TestAlertsRunnerDoubleTake(unittest.TestCase):
     def test_double_take_valid_multiple_matches(self, mock_send_wa, mock_resolve_phones) -> None:
         mock_resolve_phones.return_value = ["5531991119016"]
         catalog = AlertsCatalog.from_yaml_string("alerts: []")
+        catalog.double_take_dispatch.enabled = True
+        catalog.double_take_dispatch.min_confidence = 85
         runner = AlertsRunner(settings=Mock(), ha=Mock(), evo=Mock(), catalog=catalog)
 
+        # One match below 85% (hanna at 78%) and one match above 85% (alexandre at 92%)
         event_data = {
             "new_state": {
                 "attributes": {
@@ -78,11 +83,12 @@ class TestAlertsRunnerDoubleTake(unittest.TestCase):
             )
         )
 
+        # Hanna should be excluded from the message since 78% < 85%, so only Alexandre is notified
         mock_send_wa.assert_called_once_with(
             settings=runner.settings,
             evo=runner.evo,
             number="5531991119016",
-            message="🔔 *Reconhecimento:* *Hanna* (78%), *Alexandre* (92%) detectados no Portão de Vidro!"
+            message="🔔 *Reconhecimento:* *Alexandre* (92%) detectado(a) no Portão de Vidro!"
         )
 
     @patch("app.alerts_runner.resolve_notify_phones", new_callable=AsyncMock)
@@ -90,14 +96,17 @@ class TestAlertsRunnerDoubleTake(unittest.TestCase):
     def test_double_take_ignores_low_confidence(self, mock_send_wa, mock_resolve_phones) -> None:
         mock_resolve_phones.return_value = ["5531991119016"]
         catalog = AlertsCatalog.from_yaml_string("alerts: []")
+        catalog.double_take_dispatch.enabled = True
+        catalog.double_take_dispatch.min_confidence = 85
         runner = AlertsRunner(settings=Mock(), ha=Mock(), evo=Mock(), catalog=catalog)
 
+        # Match with 84% confidence (which is below the 85% threshold)
         event_data = {
             "new_state": {
                 "attributes": {
                     "id": "event-low-conf",
                     "matches": [
-                        {"name": "alexandre", "confidence": 74, "match": True}
+                        {"name": "alexandre", "confidence": 84, "match": True}
                     ]
                 }
             }
@@ -119,6 +128,8 @@ class TestAlertsRunnerDoubleTake(unittest.TestCase):
     def test_double_take_ignores_unknowns(self, mock_send_wa, mock_resolve_phones) -> None:
         mock_resolve_phones.return_value = ["5531991119016"]
         catalog = AlertsCatalog.from_yaml_string("alerts: []")
+        catalog.double_take_dispatch.enabled = True
+        catalog.double_take_dispatch.min_confidence = 85
         runner = AlertsRunner(settings=Mock(), ha=Mock(), evo=Mock(), catalog=catalog)
 
         event_data = {
@@ -126,7 +137,7 @@ class TestAlertsRunnerDoubleTake(unittest.TestCase):
                 "attributes": {
                     "id": "event-unknown",
                     "matches": [
-                        {"name": "unknown", "confidence": 85, "match": False}
+                        {"name": "unknown", "confidence": 95, "match": False}
                     ]
                 }
             }
@@ -148,6 +159,8 @@ class TestAlertsRunnerDoubleTake(unittest.TestCase):
     def test_double_take_deduplication(self, mock_send_wa, mock_resolve_phones) -> None:
         mock_resolve_phones.return_value = ["5531991119016"]
         catalog = AlertsCatalog.from_yaml_string("alerts: []")
+        catalog.double_take_dispatch.enabled = True
+        catalog.double_take_dispatch.min_confidence = 85
         runner = AlertsRunner(settings=Mock(), ha=Mock(), evo=Mock(), catalog=catalog)
 
         event_data = {
@@ -155,7 +168,7 @@ class TestAlertsRunnerDoubleTake(unittest.TestCase):
                 "attributes": {
                     "id": "event-dup",
                     "matches": [
-                        {"name": "alexandre", "confidence": 85, "match": True}
+                        {"name": "alexandre", "confidence": 88, "match": True}
                     ]
                 }
             }

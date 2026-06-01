@@ -1344,6 +1344,15 @@ class AlertsRunner:
 
     async def _handle_double_take_event(self, attributes: dict[str, Any]) -> None:
         """Processa eventos de reconhecimento facial da câmera do Portão de Vidro."""
+        # 0. Verifica se a rotina está habilitada nas configurações
+        dispatch_enabled = (
+            self.catalog.double_take_dispatch.enabled
+            if hasattr(self.catalog, "double_take_dispatch")
+            else True
+        )
+        if not dispatch_enabled:
+            return
+
         # 1. Deduplicação por ID do evento
         event_id = attributes.get("id")
         if not event_id:
@@ -1356,7 +1365,14 @@ class AlertsRunner:
         if len(self._processed_double_take_ids) > 50:
             self._processed_double_take_ids.pop(0)
 
-        # 2. Filtrar matches com confiança >= 75% e que sejam conhecidos (não "unknown")
+        # Obter o limite de confiança das configurações do catálogo (padrão 85%)
+        min_conf = (
+            self.catalog.double_take_dispatch.min_confidence
+            if hasattr(self.catalog, "double_take_dispatch")
+            else 85
+        )
+
+        # 2. Filtrar matches com confiança >= min_conf e que sejam conhecidos (não "unknown")
         matches = attributes.get("matches") or []
         valid_matches = []
         for match in matches:
@@ -1371,7 +1387,7 @@ class AlertsRunner:
                 and name.lower() != "unknown"
                 and is_match
                 and isinstance(confidence, (int, float))
-                and confidence >= 75
+                and confidence >= min_conf
             ):
                 valid_matches.append((name, confidence))
 
