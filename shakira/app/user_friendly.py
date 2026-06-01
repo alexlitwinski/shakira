@@ -86,6 +86,30 @@ def format_state_value(entity_id: str, state: dict[str, Any], catalog: DevicesCa
     label = entity_display_name(entity_id, catalog, state)
     domain = entity_id.split(".", 1)[0] if "." in entity_id else ""
 
+    if "double_take" in entity_id.lower():
+        if raw in (None, "unknown", "unavailable", ""):
+            return f"Não tenho registros de onde {label} foi visto(a) por último."
+        attrs = state.get("attributes") or {}
+        camera = attrs.get("camera") or raw
+        location = str(camera).replace("_", " ").title()
+        timestamp = attrs.get("timestamp")
+        confidence = attrs.get("confidence")
+
+        time_str = ""
+        if timestamp:
+            try:
+                t_str = str(timestamp)
+                if t_str.endswith("Z"):
+                    t_str = t_str[:-1] + "+00:00"
+                from datetime import datetime
+                dt = datetime.fromisoformat(t_str)
+                time_str = f" às {dt.strftime('%H:%M')}"
+            except Exception:
+                pass
+
+        conf_str = f" com {int(confidence)}% de confiança" if confidence else ""
+        return f"{label} foi visto(a) por último na câmera {location}{time_str}{conf_str}."
+
     if raw in (None, "unknown", "unavailable", ""):
         return f"Não consegui obter o estado de {label} agora."
 
