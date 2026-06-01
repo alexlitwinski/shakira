@@ -753,6 +753,12 @@ class AlertsRunner:
                     name="shakira-barreira-ir-delayed",
                 )
                 continue
+            if alert.id == "cameras_paradas":
+                asyncio.create_task(
+                    self._check_cameras_paradas_delayed(alert, rt, new_state),
+                    name="shakira-cameras-paradas-delayed",
+                )
+                continue
 
             await self._evaluate_alert(
                 alert,
@@ -874,6 +880,33 @@ class AlertsRunner:
                 log.info("Barreira IR: Sensor normalizado em menos de 1.5s. Disparo ignorado.")
         except Exception as e:
             log.warning("Erro no atraso da barreira IR: %s", e)
+
+    async def _check_cameras_paradas_delayed(
+        self,
+        alert: AlertConfig,
+        rt: _AlertRuntime,
+        state_override: str,
+    ) -> None:
+        """Atrasa o aviso de câmeras paradas em 5 minutos para descartar indisponibilidades rápidas."""
+        await asyncio.sleep(300.0)
+        try:
+            state_data = await self.ha.get_state(alert.entity_id)
+            if not state_data:
+                return
+            current_state = str(state_data.get("state", "")).strip().lower()
+            if state_matches(current_state, alert.when_state):
+                log.info("Câmeras Paradas: Sensor permaneceu ativo por > 5 min. Confirmando aviso.")
+                now = time.monotonic()
+                await self._evaluate_alert(
+                    alert,
+                    rt,
+                    now,
+                    state_override=current_state,
+                )
+            else:
+                log.info("Câmeras Paradas: Sensor normalizado em menos de 5 min. Aviso ignorado.")
+        except Exception as e:
+            log.warning("Erro no atraso do aviso de câmeras paradas: %s", e)
 
     async def _evaluate_alert(
         self,
